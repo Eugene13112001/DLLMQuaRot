@@ -37,6 +37,53 @@ class AttentionParts:
     attn_probs: torch.Tensor  # [B, heads, Q, K], rows sum to 1
 
 
+def preflight_memory(required_gb: float, strict: bool = True) -> float:
+    """Refuse to start a long job on a GPU that cannot hold it.
+
+    On a shared node the free memory at launch is not the free memory five
+    minutes later, but checking up front still turns the common case -- the
+    card was already full -- from a twenty-minute wait into a two-second
+    message naming the emptier GPU to use.
+    """
+    import torch as _torch
+
+    if not _torch.cuda.is_available():
+        return 0.0
+
+    free, total = _torch.cuda.mem_get_info()
+    free_gb, total_gb = free / 2**30, total / 2**30
+    print(f"GPU 0: {free_gb:.1f} GB free of {total_gb:.1f} GB "
+          f"(need about {required_gb:.0f} GB)")
+
+    if free_gb >= required_gb:
+        return free_gb
+
+    msg = (
+        f"only {free_gb:.1f} GB free, this job needs about {required_gb:.0f} GB "
+        f"(weights plus Hessians and the calibration cache).\n"
+        "On a shared node, pick an emptier GPU:\n"
+        "    nvidia-smi --query-gpu=index,memory.used,memory.total "
+        "--format=csv\n"
+        "    export CUDA_VISIBLE_DEVICES=<index>\n"
+        "    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+        "Pass --force to start anyway."
+    )
+    if strict:
+        raise RuntimeError(msg)
+    print(f"[warn] {msg}")
+    return free_gb
+
+
+def estimate_required_gb(cfg) -> float:
+    """Weights in the compute dtype, plus working room for the solver."""
+    bytes_per = {"float32": 4, "float16": 2, "bfloat16": 2}.get(cfg.dtype, 2)
+    # LLaDA-8B is the reference point; other sizes scale from the model name
+    # only loosely, so this is deliberately a floor, not a prediction.
+    weights_gb = 8.0 * bytes_per
+    working_gb = 4.0
+    return weights_gb + working_gb
+
+
 def _dtype_kwargs(dtype) -> dict:
     """`torch_dtype` was renamed to `dtype` in transformers 4.56."""
     import transformers
@@ -413,6 +460,8 @@ __all__ = [
     "ensure_tied_weights_attr",
     "check_transformers_version",
     "MAX_TESTED_TRANSFORMERS_MAJOR",
+    "preflight_memory",
+    "estimate_required_gb",
     "AttentionProbe",
     "AttentionParts",
     "ArchitectureMismatch",

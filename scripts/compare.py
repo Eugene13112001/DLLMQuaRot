@@ -90,7 +90,12 @@ def build_cfg(args, row: dict) -> DLLMQuantConfig:
         weight=QuantConfig(
             n_bits=args.w_bits, granularity="per_channel", mse_search=True
         ),
-        activation=QuantConfig(n_bits=args.a_bits, granularity="per_token"),
+        activation=(
+            QuantConfig(n_bits=args.a_bits, granularity="per_group",
+                        group_size=args.a_group_size, dynamic=True)
+            if args.a_group_size > 0
+            else QuantConfig(n_bits=args.a_bits, granularity="per_token")
+        ),
         tmas=TMASConfig(
             n_samples=args.nsamples,
             n_prompts=args.nprompts,
@@ -111,6 +116,9 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--w-bits", type=int, default=4)
     ap.add_argument("--a-bits", type=int, default=4)
+    ap.add_argument("--a-group-size", type=int, default=-1,
+                    help="one activation scale per N channels instead of per "
+                         "token; the second lever against channel outliers")
     ap.add_argument("--nsamples", type=int, default=128)
     ap.add_argument("--nprompts", type=int, default=32)
     ap.add_argument("--n-probes", type=int, default=16,

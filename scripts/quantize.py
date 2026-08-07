@@ -34,8 +34,29 @@ from dllmquant.config import (  # noqa: E402
     quarot_w4a4,
 )
 from dllmquant.models import build_adapter  # noqa: E402
+from dllmquant.models.base import estimate_required_gb, preflight_memory  # noqa: E402
 from dllmquant.pipeline import DLLMQuantPipeline  # noqa: E402
 from dllmquant.report import round_floats, sibling_csv, write_csv  # noqa: E402
+
+
+def activation_config(args) -> QuantConfig:
+    """Per-token by default; per-group when asked.
+
+    Per-token gives every token its own scale but shares it across all 4096
+    channels, so one outlier channel sets the step size for the whole token.
+    Grouping splits that: one scale per (token, group of channels). It is the
+    fallback when rotation alone does not flatten the channel axis enough --
+    and unlike rotation it costs real inference work, since the scales are
+    recomputed per forward.
+    """
+    if args.a_group_size > 0:
+        return QuantConfig(
+            n_bits=args.a_bits,
+            granularity="per_group",
+            group_size=args.a_group_size,
+            dynamic=True,
+        )
+    return QuantConfig(n_bits=args.a_bits, granularity="per_token")
 
 
 def build_config(args) -> DLLMQuantConfig:
@@ -55,6 +76,7 @@ def build_config(args) -> DLLMQuantConfig:
         cfg.tmas.seq_len = args.seq_len
         cfg.tmas.proportions = tuple(args.proportions)
         cfg.rotation.online_mlp = not args.no_online_mlp
+        cfg.checkpoint_dir = args.checkpoint_dir
         return cfg
 
     if args.recipe in ("quarot-baseline", "quarot-diffusion"):
@@ -76,6 +98,7 @@ def build_config(args) -> DLLMQuantConfig:
         cfg.tmas.seq_len = args.seq_len
         cfg.rotation.online_mlp = not args.no_online_mlp
         cfg.device_map = args.device_map or None
+        cfg.checkpoint_dir = args.checkpoint_dir
         return cfg
 
     return DLLMQuantConfig(
@@ -84,6 +107,7 @@ def build_config(args) -> DLLMQuantConfig:
         dtype=args.dtype,
         device=args.device,
         device_map=args.device_map or None,
+        checkpoint_dir=args.checkpoint_dir,
         seed=args.seed,
         weight=QuantConfig(
             n_bits=args.w_bits,
@@ -92,10 +116,7 @@ def build_config(args) -> DLLMQuantConfig:
             group_size=args.group_size,
             mse_search=not args.no_weight_mse,
         ),
-        activation=QuantConfig(
-            n_bits=args.a_bits,
-            granularity="per_token",
-        ),
+        activation=activation_config(args),
         tmas=TMASConfig(
             n_samples=args.nsamples,
             n_prompts=args.nprompts,
@@ -158,7 +179,12 @@ def main() -> int:
     g = ap.add_argument_group("format")
     g.add_argument("--w-bits", type=int, default=4)
     g.add_argument("--a-bits", type=int, default=4)
-    g.add_argument("--group-size", type=int, default=-1)
+    g.add_argument("--group-size", type=int, default=-1,
+                   help="weight group size; -1 = per output channel")
+    g.add_argument("--a-group-size", type=int, default=-1,
+                   help="activation group size: one scale per N channels "
+                        "instead of one per token. The second lever against "
+                        "channel outliers after rotation; -1 = per token")
     g.add_argument("--w-symmetric", action="store_true")
     g.add_argument("--no-weight-mse", action="store_true")
 
@@ -196,6 +222,12 @@ def main() -> int:
 
     ap.add_argument("--save", default="")
     ap.add_argument("--report", default="")
+    ap.add_argument("--force", action="store_true",
+                    help="start even if the GPU looks too full")
+    ap.add_argument("--checkpoint-dir", default="",
+                    help="save each finished block here; a restart with the "
+                         "same directory resumes instead of starting over "
+                         "(costs ~14 GB of disk for LLaDA-8B)")
     args = ap.parse_args()
 
     cfg = build_config(args)
@@ -211,6 +243,9 @@ def main() -> int:
         "rotation": cfg.rotation.enabled,
         "act_clip_ratio": cfg.activation.clip_ratio,
     }, indent=2))
+
+    # Fail in two seconds on a full GPU, not twenty minutes in.
+    preflight_memory(estimate_required_gb(cfg), strict=not args.force)
 
     adapter = build_adapter(cfg)
     adapter.load()

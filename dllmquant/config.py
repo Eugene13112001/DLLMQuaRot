@@ -262,6 +262,12 @@ class DLLMQuantConfig:
     # a major release ahead of that fails inside modeling_utils, so the guard
     # is on by default. Turn it off to test a newer library deliberately.
     allow_untested: bool = False
+    # Directory for per-block checkpoints. The solver is ~87% of the runtime
+    # on a busy node, so losing it to a neighbour's OOM at block 25 is the
+    # expensive failure. With this set, each finished block is written out and
+    # a restart resumes from the first unfinished one.
+    # Costs one full model's worth of disk (~14 GB for LLaDA-8B).
+    checkpoint_dir: str = ""
     seed: int = 0
 
     def skip(self, name: str) -> bool:

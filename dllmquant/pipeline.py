@@ -22,6 +22,7 @@ import torch.nn as nn
 from .algos.cgq import CGQ, certainty_weights
 from .algos.ia_aq import InteractionCollector
 from .calib.tmas import Snapshot, build_calibration_set, text_calibration_set
+from .checkpoint import BlockCheckpoints, config_fingerprint
 from .config import DLLMQuantConfig
 from .models.base import ModelAdapter
 from .modules import QuantLinear, find_quant_linears, wrap_linears
@@ -74,6 +75,7 @@ class QuantReport:
     n_calibration: int = 0
     unweighted_layers: List[str] = field(default_factory=list)
     rotation: Optional[object] = None  # RotationReport, if --rotate was used
+    restored_blocks: set = field(default_factory=set)
     seconds: float = 0.0
 
     def summary(self) -> str:
@@ -100,6 +102,11 @@ class QuantReport:
                     f"  IA-AQ weighted-MSE improvement: "
                     f"{sum(gains) / len(gains):.2f}x mean over {len(gains)} layers"
                 )
+        if self.restored_blocks:
+            out.append(
+                f"  {len(self.restored_blocks)} blocks restored from checkpoint "
+                f"(not re-solved)"
+            )
         if self.unweighted_layers:
             out.append(
                 f"  !! {len(self.unweighted_layers)} layers fell back to uniform "
@@ -135,8 +142,18 @@ class DLLMQuantPipeline:
             if verbose:
                 print(self.report.rotation.summary())
 
+        ckpt = None
+        if self.cfg.checkpoint_dir:
+            ckpt = BlockCheckpoints(
+                self.cfg.checkpoint_dir, config_fingerprint(self.cfg)
+            )
+
         # 1. Calibration set -------------------------------------------------
-        if self.cfg.tmas.mode == "text":
+        if ckpt is not None and ckpt.load_snapshots() is not None:
+            snapshots = ckpt.load_snapshots()
+            if verbose:
+                print(f"[ckpt] reusing {len(snapshots)} calibration snapshots")
+        elif self.cfg.tmas.mode == "text":
             # Baseline path: no trajectory at all. Rolling out generations is
             # by far the most expensive stage, so this is also much faster.
             snapshots = text_calibration_set(prompts, self.cfg.tmas, verbose=verbose)
@@ -148,6 +165,8 @@ class DLLMQuantPipeline:
                 verbose=verbose,
             )
         self.report.n_calibration = len(snapshots)
+        if ckpt is not None and ckpt.load_snapshots() is None:
+            ckpt.save_snapshots(snapshots)
 
         # 2. Block-0 inputs -------------------------------------------------
         inps, kwargs_list = self._capture_block_inputs(snapshots, verbose)
@@ -167,10 +186,26 @@ class DLLMQuantPipeline:
                 inps = self._forward_block(block, inps, kwargs_list)
                 continue
 
+            if ckpt is not None and ckpt.has_block(bi):
+                self._restore_block(ckpt, bi, layers)
+                inps = self._forward_block(block, inps, kwargs_list)
+                if verbose:
+                    print(f"[ckpt] block {bi + 1}/{len(blocks)} restored")
+                continue
+
             if self.cfg.ia_aq.enabled:
                 self._run_ia_aq(bi, block, layers, inps, kwargs_list, verbose)
 
+            n_before = len(self.report.layers)
             self._run_cgq(bi, block, layers, inps, kwargs_list, snapshots, verbose)
+
+            if ckpt is not None:
+                ckpt.save_block(
+                    bi,
+                    {n: l.weight for n, l in layers.items()},
+                    self._value_quantizer_state(layers),
+                    [vars(l) for l in self.report.layers[n_before:]],
+                )
 
             inps = self._forward_block(block, inps, kwargs_list)
             gc.collect()
@@ -209,6 +244,65 @@ class DLLMQuantPipeline:
                 "discovered block list is probably not on the forward path"
             )
         return store["inps"], store["kwargs"]
+
+    # ------------------------------------------------------------ checkpoints
+
+    @staticmethod
+    def _value_quantizer_state(layers: Dict[str, QuantLinear]) -> Optional[dict]:
+        for name, layer in layers.items():
+            q = layer.out_quantizer
+            if q is None:
+                continue
+            return {
+                "layer": name,
+                "slice": list(layer.out_slice) if layer.out_slice else None,
+                "scale": q.scale.detach().cpu(),
+                "zero": q.zero_point.detach().cpu(),
+                "n_bits": q.n_bits,
+                "granularity": q.granularity,
+                "symmetric": q.symmetric,
+            }
+        return None
+
+    def _restore_block(self, ckpt, bi: int, layers: Dict[str, QuantLinear]) -> None:
+        from .config import QuantConfig
+        from .quantizers import InteractionAwareQuantizer
+
+        data = ckpt.load_block(bi)
+
+        missing = set(layers) - set(data["weights"])
+        extra = set(data["weights"]) - set(layers)
+        if missing or extra:
+            raise RuntimeError(
+                f"checkpoint for block {bi} does not match the model: "
+                f"missing {sorted(missing)}, unexpected {sorted(extra)}. "
+                "The checkpoint was written for a different architecture."
+            )
+
+        for name, layer in layers.items():
+            layer.set_weight(data["weights"][name])
+            self.report.restored_blocks.add(bi)
+
+        state = data.get("v_quant")
+        if state is not None:
+            target = layers[state["layer"]]
+            q = InteractionAwareQuantizer(
+                QuantConfig(
+                    n_bits=state["n_bits"],
+                    symmetric=state["symmetric"],
+                    granularity=state["granularity"],
+                )
+            )
+            device = target.weight.device
+            q.scale = state["scale"].to(device)
+            q.zero_point = state["zero"].to(device)
+            q.calibrated = True
+            q.freeze()
+            target.out_quantizer = q
+            target.out_slice = tuple(state["slice"]) if state["slice"] else None
+
+        for entry in data.get("layer_reports", []):
+            self.report.layers.append(LayerReport(**entry))
 
     def _forward_block(
         self, block: nn.Module, inps: List[torch.Tensor], kwargs_list: List[dict]
