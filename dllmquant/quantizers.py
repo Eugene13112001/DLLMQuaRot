@@ -180,7 +180,12 @@ class UniformAffineQuantizer(nn.Module):
             self.find_params(x)
         xg, orig = self._reshape_for_group(x)
         out = self._fake_quant(xg, self.scale, self.zero_point)
-        return out.reshape(orig)
+        # A fake quantizer must be transparent in dtype. Scales calibrated in
+        # float32 (IA-AQ collects activations in fp32 for numerical stability)
+        # would otherwise promote the output, and a single promoted projection
+        # is enough to break fused attention -- q/k stay bf16 while v turns
+        # fp32 and scaled_dot_product_attention refuses the mix.
+        return out.reshape(orig).to(x.dtype)
 
     def extra_repr(self) -> str:
         return (
@@ -211,7 +216,7 @@ class InteractionAwareQuantizer(UniformAffineQuantizer):
             return super().forward(x)
         xg, orig = self._reshape_for_group(x)
         out = self._fake_quant(xg, self.scale, self.zero_point)
-        return out.reshape(orig)
+        return out.reshape(orig).to(x.dtype)
 
 
 def quantize_weight_rtn(weight: torch.Tensor, cfg: QuantConfig) -> torch.Tensor:

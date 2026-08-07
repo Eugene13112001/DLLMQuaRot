@@ -48,6 +48,59 @@ def test_error_is_bounded_by_half_a_step():
     assert (err <= q.scale / 2 + 1e-5).all()
 
 
+def test_quantizer_preserves_dtype():
+    """A fake quantizer must be transparent in dtype, always."""
+    for dtype in (torch.float32, torch.float16, torch.bfloat16):
+        x = torch.randn(8, 32, dtype=dtype)
+        for gran in ("per_token", "per_channel", "per_feature", "per_tensor"):
+            q = UniformAffineQuantizer(QuantConfig(n_bits=4, granularity=gran))
+            assert q(x).dtype == dtype, (dtype, gran)
+
+
+def test_fp32_calibrated_scale_does_not_promote_a_bf16_tensor():
+    """IA-AQ calibrates in fp32; applying it must not upcast the activation.
+
+    Regression: a promoted value projection breaks fused attention, because q
+    and k stay bf16 while v turns fp32 and SDPA refuses the mix.
+    """
+    from dllmquant.quantizers import InteractionAwareQuantizer
+
+    calib = torch.randn(256, 32, dtype=torch.float32)
+    q = InteractionAwareQuantizer(
+        QuantConfig(n_bits=4, granularity="per_feature", mse_search=True)
+    )
+    q.find_params(calib, weights=torch.rand(256))
+    q.freeze()
+    assert q.scale.dtype == torch.float32
+
+    x = torch.randn(4, 16, 32, dtype=torch.bfloat16)
+    out = q(x)
+    assert out.dtype == torch.bfloat16
+    assert out.shape == x.shape
+
+
+def test_quant_linear_preserves_dtype_with_an_output_quantizer():
+    from dllmquant.quantizers import InteractionAwareQuantizer
+
+    linear = torch.nn.Linear(32, 96, bias=False).to(torch.bfloat16)
+    ql = QuantLinear(
+        linear,
+        QuantConfig(n_bits=4, granularity="per_channel"),
+        QuantConfig(n_bits=4, granularity="per_token"),
+    )
+    vq = InteractionAwareQuantizer(
+        QuantConfig(n_bits=4, granularity="per_feature", mse_search=False)
+    )
+    vq.find_params(torch.randn(128, 32, dtype=torch.float32))
+    vq.freeze()
+    ql.out_quantizer = vq
+    ql.out_slice = (64, 96)  # V slice of a fused QKV projection
+
+    out = ql(torch.randn(2, 5, 32, dtype=torch.bfloat16))
+    assert out.dtype == torch.bfloat16
+    assert out.shape == (2, 5, 96)
+
+
 def test_16_bits_is_a_no_op():
     x = torch.randn(8, 16)
     q = UniformAffineQuantizer(QuantConfig(n_bits=16, granularity="per_token"))
