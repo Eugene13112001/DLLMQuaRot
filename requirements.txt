@@ -1,0 +1,10 @@
+# Core. Install torch matching your CUDA build first, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.4
+transformers>=4.44
+accelerate>=0.33
+datasets>=2.20
+safetensors>=0.4
+
+# Testing
+pytest>=8.0

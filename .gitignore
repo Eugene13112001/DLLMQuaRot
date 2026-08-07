@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Артефакты прогонов: отчёты, квантованные чекпоинты, логи
+out/
+outputs/
+*.log
+
+# Веса и датасеты — никогда в git
+*.safetensors
+*.bin
+*.pt
+*.pth
+models/
+checkpoints/
+.cache/
+hf_cache/
+
+# Локальные настройки редактора/инструментов
+.claude/settings.local.json
+.idea/
+.vscode/
+.DS_Store
