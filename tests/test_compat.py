@@ -80,6 +80,40 @@ def test_shim_checks_the_llama_style_config_key_too(monkeypatch):
         ensure_tied_weights_attr(_Cfg())
 
 
+def test_version_guard_rejects_a_major_release_ahead(monkeypatch):
+    """Fail in a second, not after downloading 16 GB and crashing inside
+    modeling_utils with a traceback that names none of the real cause."""
+    import transformers
+
+    from dllmquant.models.base import check_transformers_version
+
+    monkeypatch.setattr(transformers, "__version__", "5.14.1")
+    with pytest.raises(RuntimeError) as exc:
+        check_transformers_version()
+    msg = str(exc.value)
+    assert "4.46.3" in msg and "4.38.2" in msg
+    assert "--allow-untested-transformers" in msg
+
+
+def test_version_guard_passes_supported_releases(monkeypatch):
+    import transformers
+
+    from dllmquant.models.base import check_transformers_version
+
+    for v in ("4.38.2", "4.46.3", "4.57.0"):
+        monkeypatch.setattr(transformers, "__version__", v)
+        assert check_transformers_version() == v
+
+
+def test_version_guard_can_be_waived(monkeypatch):
+    import transformers
+
+    from dllmquant.models.base import check_transformers_version
+
+    monkeypatch.setattr(transformers, "__version__", "5.14.1")
+    assert check_transformers_version(strict=False) == "5.14.1"
+
+
 def test_dtype_kwarg_follows_the_transformers_rename(monkeypatch):
     """`torch_dtype` became `dtype` in 4.56."""
     import torch

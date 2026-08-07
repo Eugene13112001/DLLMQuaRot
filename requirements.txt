@@ -1,7 +1,12 @@
 # Core. Install torch matching your CUDA build first, e.g.
 #   pip install torch --index-url https://download.pytorch.org/whl/cu124
 torch>=2.4
-transformers>=4.44
+# Upper bound is not caution, it is a hard requirement: LLaDA ships
+# `modeling_llada.py` as remote code written against transformers 4.38.2, and
+# transformers 5.x changes APIs it depends on (`tie_weights()` signature,
+# `all_tied_weights_keys`). 4.46.3 is the newest that has worked; drop to
+# 4.38.2 (the authors' own pin) if anything else trips.
+transformers>=4.38,<5
 accelerate>=0.33
 datasets>=2.20
 safetensors>=0.4

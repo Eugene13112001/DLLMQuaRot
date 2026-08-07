@@ -36,6 +36,8 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--rotate", action="store_true",
                     help="also verify the QuaRot rotation plan and invariance")
+    ap.add_argument("--allow-untested-transformers", action="store_true",
+                    help="skip the transformers major-version guard")
     ap.add_argument("--device-map", default="",
                     help="only for models too big for one GPU (e.g. 'auto'); "
                          "LLaDA's remote code breaks accelerate's device-map "
@@ -48,6 +50,7 @@ def main() -> int:
         dtype=args.dtype,
         device=args.device,
         device_map=args.device_map or None,
+        allow_untested=args.allow_untested_transformers,
     )
     failures = 0
 

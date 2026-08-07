@@ -50,6 +50,38 @@ def _dtype_kwargs(dtype) -> dict:
     return {key: dtype}
 
 
+# LLaDA ships `modeling_llada.py` as remote code written against
+# transformers 4.38.2.  Small shims can bridge a few minor releases; a major
+# release cannot be bridged this way -- `tie_weights()` alone changed
+# signature, and every patch just moves the failure further down the loading
+# path.  Refuse early instead of crashing 16 GB later.
+MAX_TESTED_TRANSFORMERS_MAJOR = 4
+
+
+def check_transformers_version(strict: bool = True) -> str:
+    import transformers
+
+    version = transformers.__version__
+    try:
+        major = int(version.split(".")[0])
+    except (ValueError, IndexError):
+        return version
+
+    if strict and major > MAX_TESTED_TRANSFORMERS_MAJOR:
+        raise RuntimeError(
+            f"transformers {version} is a major release ahead of what LLaDA's "
+            f"remote code targets (4.38.2). Loading will fail somewhere inside "
+            f"modeling_utils -- the exact spot varies by release.\n\n"
+            f"Pin the library:\n"
+            f"    pip install 'transformers==4.46.3'\n"
+            f"and if that still trips, the authors' own pin:\n"
+            f"    pip install 'transformers==4.38.2'\n\n"
+            f"Weights already downloaded are reused; only the library changes. "
+            f"To try anyway, pass --allow-untested-transformers."
+        )
+    return version
+
+
 def ensure_tied_weights_attr(cfg) -> bool:
     """Make LLaDA's remote code loadable under a modern transformers.
 
@@ -108,6 +140,7 @@ def load_pretrained(auto_class, cfg):
     """
     import torch as _torch
 
+    check_transformers_version(strict=not getattr(cfg, "allow_untested", False))
     if ensure_tied_weights_attr(cfg):
         print("[compat] installed PreTrainedModel.all_tied_weights_keys = {} "
               "(checkpoint reports weight_tying=False)")
@@ -378,6 +411,8 @@ __all__ = [
     "ModelAdapter",
     "load_pretrained",
     "ensure_tied_weights_attr",
+    "check_transformers_version",
+    "MAX_TESTED_TRANSFORMERS_MAJOR",
     "AttentionProbe",
     "AttentionParts",
     "ArchitectureMismatch",

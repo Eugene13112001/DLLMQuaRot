@@ -252,6 +252,10 @@ class DLLMQuantConfig:
     # PreTrainedModel but LLaDA's remote-code class does not -- passing
     # device_map="auto" crashes before a single weight is placed.
     device_map: Optional[str] = None
+    # Skip the transformers-version guard. LLaDA's remote code targets 4.38.2;
+    # a major release ahead of that fails inside modeling_utils, so the guard
+    # is on by default. Turn it off to test a newer library deliberately.
+    allow_untested: bool = False
     seed: int = 0
 
     def skip(self, name: str) -> bool:
