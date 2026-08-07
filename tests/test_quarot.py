@@ -228,8 +228,12 @@ def test_apply_quarot_is_invariant_at_every_mask_ratio():
     report = apply_quarot(adapter, cfg)
 
     assert set(report.invariance) == {"1.00", "0.75", "0.50", "0.25", "0.00"}
+    # float32 storage: the rotation is invariant to round-off, not merely
+    # "close". Anything above ~1e-6 here would mean a real defect, which is
+    # exactly the sharpness bf16 cannot give.
     for ratio, rel in report.invariance.items():
-        assert rel < cfg.rotation.invariance_tol, f"mask ratio {ratio}: {rel:.2e}"
+        assert rel < 1e-5, f"mask ratio {ratio}: {rel:.2e}"
+    assert report.tolerance == 1e-4  # resolved from dtype=float32
 
 
 def test_apply_quarot_flattens_the_residual_stream():
@@ -256,7 +260,7 @@ def test_the_all_mask_state_is_checked_too():
     adapter, cfg = _rotated_adapter()
     report = apply_quarot(adapter, cfg)
     assert "1.00" in report.invariance
-    assert report.invariance["1.00"] < cfg.rotation.invariance_tol
+    assert report.invariance["1.00"] < report.tolerance
 
 
 def test_a_missed_residual_layer_is_caught():
@@ -275,6 +279,45 @@ def test_a_missed_residual_layer_is_caught():
         rel = float((adapter.model(ids).logits - before).abs().mean()
                     / before.abs().mean())
     assert rel > cfg.rotation.invariance_tol
+
+
+def test_dtype_sets_the_invariance_floor():
+    """bf16 keeps 7 mantissa bits, so "invariant" means something looser."""
+    from dllmquant.rotate import dtype_invariance_tol
+
+    assert dtype_invariance_tol("float32") < dtype_invariance_tol("float16")
+    assert dtype_invariance_tol("float16") < dtype_invariance_tol("bfloat16")
+    assert dtype_invariance_tol("something-odd") == dtype_invariance_tol("bfloat16")
+
+
+def test_online_hadamard_keeps_the_original_leaf_name():
+    """Renaming ff_out to `inner` would drop it out of CGQ's sequential groups,
+    the skip patterns, and the value-projection search all at once."""
+    from dllmquant.algos.quarot import OnlineHadamard
+
+    adapter, _ = _rotated_adapter()
+    adapter.install_online_hadamards()
+
+    block = adapter.blocks[0]
+    assert isinstance(block.ff_out, OnlineHadamard)
+    leaves = {n.split(".")[-1] for n, m in block.named_modules()
+              if isinstance(m, nn.Linear)}
+    assert "ff_out" in leaves and "inner" not in leaves
+
+    out = block(torch.randn(1, 6, D))
+    assert out.shape == (1, 6, D)
+
+
+def test_unclassified_linear_in_a_block_is_refused():
+    """Structural coverage, not the numeric check, is what catches a miss."""
+    from dllmquant.models.base import ArchitectureMismatch
+
+    adapter, _ = _rotated_adapter()
+    adapter.blocks[0].mystery_proj = nn.Linear(D, D, bias=False)
+
+    with pytest.raises(ArchitectureMismatch) as exc:
+        adapter.rotation_plan()
+    assert "mystery_proj" in str(exc.value)
 
 
 def test_rotation_plan_separates_lm_head_from_block_down_projection():

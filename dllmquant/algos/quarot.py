@@ -367,12 +367,21 @@ class OnlineHadamard(nn.Module):
     QuaRot pays for an online transform instead -- O(d log d), no matrix.
     """
 
-    def __init__(self, inner: nn.Module):
+    def __init__(self, inner: nn.Module, name: str = "inner"):
         super().__init__()
-        self.inner = inner
+        # Keep the wrapped module under its ORIGINAL attribute name. Every
+        # downstream lookup -- CGQ's sequential groups, the skip patterns, the
+        # value-projection search -- matches on the leaf name, and renaming
+        # `ff_out` to `inner` silently drops it out of all of them.
+        self._inner_name = name
+        setattr(self, name, inner)
+
+    @property
+    def wrapped(self) -> nn.Module:
+        return getattr(self, self._inner_name)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.inner(fast_hadamard(x))
+        return self.wrapped(fast_hadamard(x))
 
 
 @torch.no_grad()

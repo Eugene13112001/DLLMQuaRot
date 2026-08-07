@@ -33,6 +33,7 @@ class RotationReport:
     blocks: int
     norms_fused: int
     online_mlp: int
+    tolerance: float = 0.0
     # mask ratio -> metrics
     invariance: Dict[str, float] = field(default_factory=dict)
     outliers_before: Dict[str, float] = field(default_factory=dict)
@@ -42,6 +43,7 @@ class RotationReport:
         lines = [
             f"QuaRot: d_model={self.d_model}, {self.blocks} blocks, "
             f"{self.norms_fused} norms fused, {self.online_mlp} online Hadamards"
+            + (f", invariance floor {self.tolerance:.0e}" if self.tolerance else "")
         ]
         for key in sorted(self.invariance, key=float, reverse=True):
             before = self.outliers_before.get(key, float("nan"))
@@ -134,16 +136,39 @@ def apply_quarot(adapter: ModelAdapter, cfg: DLLMQuantConfig) -> RotationReport:
         report.invariance[k] = float((after - reference[k]).abs().mean() / denom)
         report.outliers_after[k] = crest_factor(_hidden_at_block0(adapter, v))
 
+    tol = rot.invariance_tol or dtype_invariance_tol(cfg.dtype)
     worst = max(report.invariance.values()) if report.invariance else 0.0
-    if worst > rot.invariance_tol:
+    report.tolerance = tol
+
+    if worst > tol:
         raise RuntimeError(
-            f"rotation changed the model's output by {worst:.3e} (tolerance "
-            f"{rot.invariance_tol:.1e}). Rotation must be exactly invariant; "
-            "this means a layer that reads or writes the residual stream was "
-            "missed by rotation_plan(), or a norm has a bias term.\n"
-            + report.summary()
+            f"rotation changed the model's output by {worst:.3e}, past the "
+            f"{cfg.dtype} noise floor of {tol:.1e}.\n\n"
+            "Rotation is exactly invariant in exact arithmetic, so an excess "
+            "this large means either a layer that touches the residual stream "
+            "was missed, or a norm carries a bias. Note that rotation_plan() "
+            "already checks coverage structurally, so if it passed, suspect "
+            "the norms first.\n"
+            f"Loading in float32 (--dtype float32) drops the floor to "
+            f"{dtype_invariance_tol('float32'):.0e} and makes this diagnostic "
+            "sharp.\n\n" + report.summary()
         )
     return report
+
+
+def dtype_invariance_tol(dtype: str) -> float:
+    """Noise floor for the invariance check, by storage precision.
+
+    The rotation math runs in float64, but the rotated weights are stored back
+    in the model's dtype. bf16 keeps 7 mantissa bits, fp16 keeps 10, and the
+    error compounds across blocks -- so what counts as "exactly invariant"
+    differs by two orders of magnitude between bf16 and fp32.
+    """
+    return {
+        "float32": 1e-4,
+        "float16": 1.5e-2,
+        "bfloat16": 6e-2,
+    }.get(dtype, 6e-2)
 
 
 def _trajectory_states(

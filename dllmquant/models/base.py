@@ -363,7 +363,7 @@ class ModelAdapter(ABC):
                     if attr in ("ff_out", "down_proj", "w2") and isinstance(
                         child, nn.Linear
                     ):
-                        setattr(parent, attr, OnlineHadamard(child))
+                        setattr(parent, attr, OnlineHadamard(child, name=attr))
 
     # ------------------------------------------------------------- utilities
 

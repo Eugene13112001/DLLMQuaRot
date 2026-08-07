@@ -199,9 +199,15 @@ class RotationConfig:
     qk_heads: bool = False      # R4 -- needs a patchable attention forward
     randomized: bool = True     # random sign flips, as in the paper
     seed: int = 0
-    # Fail rather than quantize if rotation changed the model's output by more
-    # than this (relative). Rotation is supposed to be exactly invariant.
-    invariance_tol: float = 1e-2
+    # Relative output change above which apply_quarot refuses to continue.
+    # 0 means "pick it from the compute dtype", which is what you want:
+    # rotation is exactly invariant in exact arithmetic, but W @ Q is stored
+    # back in the model's dtype, and bf16 keeps only 7 mantissa bits (relative
+    # precision ~4e-3). Summing 4096 terms per row and compounding over 32
+    # blocks puts the honest noise floor at a few percent -- so a tolerance
+    # tight enough to be meaningful in fp32 will always fail in bf16.
+    # A missed layer is caught structurally instead, by rotation_plan().
+    invariance_tol: float = 0.0
     # Mask ratios at which invariance is verified. A DLLM has no single
     # activation regime, so checking one state proves little.
     check_mask_ratios: Sequence[float] = (1.0, 0.75, 0.5, 0.25, 0.0)

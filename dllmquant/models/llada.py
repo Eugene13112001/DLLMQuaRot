@@ -72,12 +72,14 @@ class LLaDAAttentionProbe(AttentionProbe):
         n_kv_heads: int,
         head_dim: int,
         rotary: Optional[nn.Module] = None,
+        rope_theta: float = 0.0,
     ):
         super().__init__(block)
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.head_dim = head_dim
         self.rotary = rotary
+        self.rope_theta = rope_theta
         self.rope_applied = False
 
         self.fused = find_submodule(block, _QKV_FUSED_NAMES)
@@ -142,23 +144,52 @@ class LLaDAAttentionProbe(AttentionProbe):
             q, k = self._apply_rotary(q, k, t)
         return q, k, v
 
+    @staticmethod
+    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat((-x2, x1), dim=-1)
+
+    def _rope_tables(self, seq_len: int, device, dtype):
+        """Llama-convention RoPE, built from the config's theta.
+
+        LLaDA applies the rotation inside its attention function rather than
+        through a submodule, so there is nothing to borrow -- but the tables
+        are three lines, and computing them is far better than dropping the
+        positional rotation and calling the resulting attention weights
+        "approximate".
+        """
+        dim = self.head_dim
+        inv_freq = 1.0 / (
+            self.rope_theta
+            ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim)
+        )
+        t = torch.arange(seq_len, device=device, dtype=torch.float32)
+        freqs = torch.outer(t, inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        return emb.cos().to(dtype), emb.sin().to(dtype)
+
     def _apply_rotary(self, q, k, seq_len):
-        try:
-            cos, sin = self.rotary(q, seq_len=seq_len)
-        except Exception:
-            try:
-                cos, sin = self.rotary(seq_len)
-            except Exception:
+        cos = sin = None
+        if self.rotary is not None:
+            for call in (lambda: self.rotary(q, seq_len=seq_len),
+                         lambda: self.rotary(seq_len)):
+                try:
+                    cos, sin = call()
+                    break
+                except Exception:
+                    continue
+        if cos is None:
+            if not self.rope_theta:
                 return q, k
+            cos, sin = self._rope_tables(seq_len, q.device, q.dtype)
 
-        def rotate_half(x):
-            x1, x2 = x.chunk(2, dim=-1)
-            return torch.cat((-x2, x1), dim=-1)
-
-        cos = cos.to(q.dtype).view(1, 1, seq_len, -1)
-        sin = sin.to(q.dtype).view(1, 1, seq_len, -1)
+        cos = cos.to(q.dtype).reshape(1, 1, seq_len, -1)
+        sin = sin.to(q.dtype).reshape(1, 1, seq_len, -1)
         self.rope_applied = True
-        return q * cos + rotate_half(q) * sin, k * cos + rotate_half(k) * sin
+        return (
+            q * cos + self._rotate_half(q) * sin,
+            k * cos + self._rotate_half(k) * sin,
+        )
 
     def _attention_probs(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
         # Grouped-query attention: repeat KV heads to match query heads.
@@ -243,13 +274,19 @@ class LLaDAAdapter(ModelAdapter):
         rotary = find_submodule(block, ("rotary_emb", "rope", "rotary"))
         if rotary is None:
             rotary = find_submodule(self.model, ("rotary_emb", "rope", "rotary"))
-        probe = LLaDAAttentionProbe(
-            block, self.n_heads, self.n_kv_heads, self.head_dim, rotary
+        theta = float(
+            getattr(self.model.config, "rope_theta", 0.0)
+            or getattr(self.model.config, "rope_base", 0.0)
+            or 0.0
         )
-        if rotary is None:
+        probe = LLaDAAttentionProbe(
+            block, self.n_heads, self.n_kv_heads, self.head_dim, rotary, theta
+        )
+        if rotary is None and not theta:
             warnings.warn(
-                "no rotary module found; IA-AQ importance weights will be "
-                "computed without positional rotation (approximate ranking)",
+                "no rotary module and no rope_theta in the config; IA-AQ "
+                "importance weights will ignore positional rotation "
+                "(approximate ranking)",
                 RuntimeWarning,
             )
         return probe
@@ -304,6 +341,24 @@ class LLaDAAdapter(ModelAdapter):
                 raise ArchitectureMismatch(
                     f"block exposes {[n for n, _ in ins]} inputs and "
                     f"{[n for n, _ in outs]} outputs; expected at least one of each"
+                )
+
+            # Structural coverage is the real guard against a missed layer.
+            # The numeric invariance check cannot serve that role in bf16: the
+            # rotation itself perturbs the output by a few percent there, so a
+            # tolerance loose enough to pass would also hide a genuine miss.
+            classified = {id(m) for _, m in ins} | {id(m) for _, m in outs}
+            unclassified = [
+                name for name, module in block.named_modules()
+                if is_linear(module) and id(module) not in classified
+            ]
+            if unclassified:
+                raise ArchitectureMismatch(
+                    f"these linears in the block are neither residual readers "
+                    f"nor writers, so rotation would break the model: "
+                    f"{unclassified}. Add their leaf names to "
+                    f"_RESIDUAL_IN_NAMES or _RESIDUAL_OUT_NAMES in "
+                    f"dllmquant/models/llada.py"
                 )
             input_linears.extend(m for _, m in ins)
             output_linears.extend(m for _, m in outs)
