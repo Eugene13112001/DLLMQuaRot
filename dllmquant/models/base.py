@@ -50,6 +50,52 @@ def _dtype_kwargs(dtype) -> dict:
     return {key: dtype}
 
 
+def ensure_tied_weights_attr(cfg) -> bool:
+    """Make LLaDA's remote code loadable under a modern transformers.
+
+    Transformers ~4.57 reads ``model.all_tied_weights_keys`` in several places
+    along the loading path (device-map inference, then
+    ``_move_missing_keys_from_meta_to_device``).  It is set as an *instance*
+    attribute during ``PreTrainedModel`` initialisation, and LLaDA's
+    remote-code ``LLaDAModelLM`` -- written against transformers 4.38 -- never
+    sets it, so attribute lookup falls through to ``nn.Module.__getattr__``
+    and raises.
+
+    A class-level default fixes every call site at once, and ``{}`` is the
+    *correct* value exactly when the checkpoint ties nothing.  So it is only
+    installed after checking the config: claiming "nothing is tied" for a model
+    that does tie would silently leave the output head randomly initialised
+    instead of bound to the embeddings.
+
+    Returns True if the shim was installed.
+    """
+    import transformers
+
+    base = transformers.PreTrainedModel
+    if hasattr(base, "all_tied_weights_keys"):
+        return False  # this transformers already provides a class-level default
+
+    from transformers import AutoConfig
+
+    conf = AutoConfig.from_pretrained(cfg.model_path, trust_remote_code=True)
+    tied = getattr(conf, "weight_tying", None)
+    if tied is None:
+        tied = getattr(conf, "tie_word_embeddings", None)
+
+    if tied:
+        raise RuntimeError(
+            f"{cfg.model_path} ties its embedding and output weights, and this "
+            f"transformers ({transformers.__version__}) needs "
+            "`all_tied_weights_keys`, which the checkpoint's remote code does "
+            "not define. Pretending nothing is tied would leave the output "
+            "head uninitialised, so pin the library instead:\n"
+            "    pip install 'transformers==4.38.2'"
+        )
+
+    base.all_tied_weights_keys = {}
+    return True
+
+
 def load_pretrained(auto_class, cfg):
     """Load a checkpoint, avoiding accelerate's device-map inference by default.
 
@@ -61,6 +107,10 @@ def load_pretrained(auto_class, cfg):
     so it is opt-in via ``cfg.device_map``.
     """
     import torch as _torch
+
+    if ensure_tied_weights_attr(cfg):
+        print("[compat] installed PreTrainedModel.all_tied_weights_keys = {} "
+              "(checkpoint reports weight_tying=False)")
 
     dtype = getattr(_torch, cfg.dtype)
     kwargs = {"trust_remote_code": True, **_dtype_kwargs(dtype)}
@@ -326,6 +376,8 @@ class AttentionProbe(ABC):
 
 __all__ = [
     "ModelAdapter",
+    "load_pretrained",
+    "ensure_tied_weights_attr",
     "AttentionProbe",
     "AttentionParts",
     "ArchitectureMismatch",
