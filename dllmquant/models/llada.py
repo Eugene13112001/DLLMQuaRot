@@ -265,6 +265,13 @@ class LLaDAAdapter(ModelAdapter):
         breaks invariance instead of raising.
         """
         from ..algos.quarot import RotationPlan
+        from ..modules import QuantLinear
+
+        def is_linear(m) -> bool:
+            # QuantLinear counts too: rotating a model whose linears are already
+            # wrapped is legitimate, and it has the same weight/in_features/
+            # out_features surface the rotation needs.
+            return isinstance(m, (nn.Linear, QuantLinear))
 
         blocks_prefix = self._blocks_path + "."
         embeddings = [
@@ -286,7 +293,7 @@ class LLaDAAdapter(ModelAdapter):
             ins, outs = [], []
             for name, module in block.named_modules():
                 leaf = name.split(".")[-1]
-                if not isinstance(module, nn.Linear):
+                if not is_linear(module):
                     continue
                 if leaf in _RESIDUAL_IN_NAMES:
                     ins.append((leaf, module))
@@ -328,7 +335,7 @@ class LLaDAAdapter(ModelAdapter):
             if name.startswith(blocks_prefix) or name == self._blocks_path:
                 continue
             leaf = name.split(".")[-1]
-            if isinstance(module, nn.Linear) and leaf in _LM_HEAD_NAMES:
+            if is_linear(module) and leaf in _LM_HEAD_NAMES:
                 head = module
             elif leaf in _FINAL_NORM_NAMES and hasattr(module, "weight"):
                 final_norm = module

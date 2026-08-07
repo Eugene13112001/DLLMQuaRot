@@ -122,16 +122,22 @@ def main() -> int:
     block = adapter.blocks[0]
     try:
         probe = adapter.make_probe(block)
+        captured = None
         with probe:
             adapter.model(prompt.unsqueeze(0).to(next(adapter.model.parameters()).device))
-        if probe.parts is None:
+            # parts are released on __exit__, so read them inside the scope.
+            if probe.parts is not None:
+                captured = (
+                    probe.parts.attn_probs.detach().clone(),
+                    tuple(probe.parts.value_states.shape),
+                )
+        if captured is None:
             print(FAIL, "probe never fired -- the hook is on the wrong module")
             failures += 1
         else:
-            a = probe.parts.attn_probs
-            v = probe.parts.value_states
+            a, v_shape = captured
             rowsum = a.sum(-1)
-            print(OK, f"attn {tuple(a.shape)}, V {tuple(v.shape)}")
+            print(OK, f"attn {tuple(a.shape)}, V {v_shape}")
             if not torch.allclose(rowsum, torch.ones_like(rowsum), atol=1e-2):
                 print(FAIL, f"attention rows do not sum to 1 (got {rowsum.mean():.3f})")
                 failures += 1
@@ -145,34 +151,14 @@ def main() -> int:
         traceback.print_exc()
         failures += 1
 
-    # 5 -- linears can be wrapped and the block still runs -------------------
-    print("\n=== 5. QuantLinear wrapping ===")
-    try:
-        replaced = wrap_linears(
-            block, cfg.weight, cfg.activation, skip=cfg.skip, prefix="blocks.0"
-        )
-        print(OK, f"wrapped {len(replaced)} linears: {sorted(n.split('.')[-1] for n in replaced)}")
-        if not replaced:
-            print(FAIL, "nothing was wrapped -- skip_patterns are too broad")
-            failures += 1
-    except Exception:
-        print(FAIL, "wrap_linears raised:")
-        traceback.print_exc()
-        failures += 1
+    # NOTE ON ORDER: the QuaRot check must run BEFORE the wrapping check.
+    # wrap_linears mutates block 0 in place, and rotation_plan scans the real
+    # module tree -- checking rotation afterwards would inspect a model this
+    # script itself had already modified.
 
-    # 6 -- value projection is reachable for IA-AQ ---------------------------
-    print("\n=== 6. value projection ===")
-    leaves = {n.split(".")[-1] for n in replaced} if replaced else set()
-    v_like = leaves & {"v_proj", "wv", "value", "att_proj", "qkv_proj", "Wqkv"}
-    if v_like:
-        print(OK, f"IA-AQ will attach to {sorted(v_like)}")
-    else:
-        print(FAIL, f"no value projection among {sorted(leaves)}; IA-AQ would be a no-op")
-        failures += 1
-
-    # 7 -- QuaRot rotation plan ----------------------------------------------
+    # 5 -- QuaRot rotation plan ----------------------------------------------
     if args.rotate:
-        print("\n=== 7. QuaRot ===")
+        print("\n=== 5. QuaRot ===")
         try:
             plan = adapter.rotation_plan()
             print(OK, f"plan: {len(plan.embeddings)} embeddings, "
@@ -193,6 +179,31 @@ def main() -> int:
             print(FAIL, "rotation raised:")
             traceback.print_exc()
             failures += 1
+
+    # 6 -- linears can be wrapped and the block still runs -------------------
+    print("\n=== 6. QuantLinear wrapping ===")
+    try:
+        replaced = wrap_linears(
+            block, cfg.weight, cfg.activation, skip=cfg.skip, prefix="blocks.0"
+        )
+        print(OK, f"wrapped {len(replaced)} linears: {sorted(n.split('.')[-1] for n in replaced)}")
+        if not replaced:
+            print(FAIL, "nothing was wrapped -- skip_patterns are too broad")
+            failures += 1
+    except Exception:
+        print(FAIL, "wrap_linears raised:")
+        traceback.print_exc()
+        failures += 1
+
+    # 7 -- value projection is reachable for IA-AQ ---------------------------
+    print("\n=== 7. value projection ===")
+    leaves = {n.split(".")[-1] for n in replaced} if replaced else set()
+    v_like = leaves & {"v_proj", "wv", "value", "att_proj", "qkv_proj", "Wqkv"}
+    if v_like:
+        print(OK, f"IA-AQ will attach to {sorted(v_like)}")
+    else:
+        print(FAIL, f"no value projection among {sorted(leaves)}; IA-AQ would be a no-op")
+        failures += 1
 
     # 8 -- MoE expert coverage ----------------------------------------------
     if args.model_type == "llada2_moe":
