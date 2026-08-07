@@ -36,6 +36,10 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--rotate", action="store_true",
                     help="also verify the QuaRot rotation plan and invariance")
+    ap.add_argument("--device-map", default="",
+                    help="only for models too big for one GPU (e.g. 'auto'); "
+                         "LLaDA's remote code breaks accelerate's device-map "
+                         "inference, so leave it empty unless you need it")
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(
@@ -43,8 +47,18 @@ def main() -> int:
         model_type=args.model_type,
         dtype=args.dtype,
         device=args.device,
+        device_map=args.device_map or None,
     )
     failures = 0
+
+    import transformers
+    print(f"torch {torch.__version__} · transformers {transformers.__version__} · "
+          f"cuda {torch.cuda.is_available()} "
+          f"({torch.cuda.device_count()} device(s))")
+    if torch.cuda.is_available():
+        free, total = torch.cuda.mem_get_info()
+        print(f"GPU 0: {torch.cuda.get_device_name(0)}, "
+              f"{free / 2**30:.1f} GB free of {total / 2**30:.1f} GB")
 
     print(f"\n=== loading {args.model} ===")
     adapter = build_adapter(cfg)

@@ -32,6 +32,7 @@ from dllmquant.models import build_adapter  # noqa: E402
 from dllmquant.modules import wrap_linears  # noqa: E402
 from dllmquant.pipeline import DLLMQuantPipeline  # noqa: E402
 from dllmquant.quantizers import quantize_weight_rtn  # noqa: E402
+from dllmquant.report import round_floats, sibling_csv, write_csv  # noqa: E402
 
 
 def apply_rtn(adapter, cfg: DLLMQuantConfig) -> int:
@@ -145,7 +146,19 @@ def main() -> int:
                 f,
                 indent=2,
             )
-        print(f"results -> {p}")
+        csv_path = write_csv(
+            sibling_csv(p),
+            [
+                round_floats({
+                    "question": s["question"].replace("\n", " ")[:200],
+                    "predicted": s["pred"],
+                    "gold": s["gold"],
+                    "correct": s["correct"],
+                })
+                for s in result.samples
+            ],
+        )
+        print(f"results -> {p}\n         -> {csv_path}")
     return 0
 
 

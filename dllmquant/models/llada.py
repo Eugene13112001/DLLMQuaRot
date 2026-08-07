@@ -22,6 +22,7 @@ from .base import (
     ModelAdapter,
     discover_blocks,
     find_submodule,
+    load_pretrained,
 )
 
 # LLaDA's reserved mask token; identical for LLaDA-8B and LLaDA-1.5.
@@ -188,16 +189,10 @@ class LLaDAAdapter(ModelAdapter):
     def load(self) -> None:
         from transformers import AutoModel, AutoTokenizer
 
-        dtype = getattr(torch, self.cfg.dtype)
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.cfg.model_path, trust_remote_code=True
         )
-        self.model = AutoModel.from_pretrained(
-            self.cfg.model_path,
-            trust_remote_code=True,
-            torch_dtype=dtype,
-            device_map="auto" if self.cfg.device == "cuda" else None,
-        )
+        self.model = load_pretrained(AutoModel, self.cfg)
         self.model.eval()
         self._validate()
 

@@ -35,6 +35,7 @@ from dllmquant.config import (  # noqa: E402
 )
 from dllmquant.models import build_adapter  # noqa: E402
 from dllmquant.pipeline import DLLMQuantPipeline  # noqa: E402
+from dllmquant.report import round_floats, sibling_csv, write_csv  # noqa: E402
 
 
 def build_config(args) -> DLLMQuantConfig:
@@ -45,6 +46,7 @@ def build_config(args) -> DLLMQuantConfig:
         cfg.model_path = args.model
         cfg.model_type = args.model_type
         cfg.dtype, cfg.device, cfg.seed = args.dtype, args.device, args.seed
+        cfg.device_map = args.device_map or None
         cfg.weight.n_bits = args.w_bits
         cfg.activation.n_bits = args.a_bits
         cfg.ia_aq.n_bits = args.a_bits
@@ -73,6 +75,7 @@ def build_config(args) -> DLLMQuantConfig:
         cfg.tmas.n_prompts = args.nprompts
         cfg.tmas.seq_len = args.seq_len
         cfg.rotation.online_mlp = not args.no_online_mlp
+        cfg.device_map = args.device_map or None
         return cfg
 
     return DLLMQuantConfig(
@@ -80,6 +83,7 @@ def build_config(args) -> DLLMQuantConfig:
         model_type=args.model_type,
         dtype=args.dtype,
         device=args.device,
+        device_map=args.device_map or None,
         seed=args.seed,
         weight=QuantConfig(
             n_bits=args.w_bits,
@@ -132,6 +136,9 @@ def main() -> int:
     ap.add_argument("--model-type", default="llada", choices=["llada", "llada2_moe"])
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--device-map", default="",
+                    help="only when the model does not fit on one GPU "
+                         "(e.g. 'auto' for LLaDA2.0-flash)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument(
         "--recipe",
@@ -233,7 +240,23 @@ def main() -> int:
                 f,
                 indent=2,
             )
-        print(f"report -> {args.report}")
+        # Per-layer CSV: this is the table you actually sort when hunting for
+        # the layer that took the most damage.
+        csv_path = write_csv(
+            sibling_csv(args.report),
+            [
+                round_floats({
+                    "layer": l.name,
+                    "block": l.block,
+                    "proxy_loss": l.proxy_loss,
+                    "calib_tokens": l.tokens,
+                    "certainty_weighted": l.weighted,
+                    "seconds": l.seconds,
+                })
+                for l in report.layers
+            ],
+        )
+        print(f"report -> {args.report}\n       -> {csv_path}")
 
     if args.save:
         out = pathlib.Path(args.save)

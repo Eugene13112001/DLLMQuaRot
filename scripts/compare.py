@@ -14,11 +14,11 @@ GSM8K only with --gsm8k, because it costs a full generation per problem.
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import pathlib
 import sys
 import time
+from typing import List, Sequence
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -38,6 +38,7 @@ from dllmquant.models import build_adapter  # noqa: E402
 from dllmquant.modules import wrap_linears  # noqa: E402
 from dllmquant.pipeline import DLLMQuantPipeline  # noqa: E402
 from dllmquant.quantizers import quantize_weight_rtn  # noqa: E402
+from dllmquant.report import round_floats, sibling_csv, write_csv  # noqa: E402
 
 
 def recipes(args) -> list[dict]:
@@ -117,7 +118,8 @@ def main() -> int:
     ap.add_argument("--gsm8k", action="store_true", help="also run GSM8K (slow)")
     ap.add_argument("--n-eval", type=int, default=200)
     ap.add_argument("--only", default="", help="comma-separated row names")
-    ap.add_argument("--out", default="")
+    ap.add_argument("--out", default="", help="JSON path; a .csv is written beside it")
+    ap.add_argument("--csv", default="", help="override the CSV path")
     args = ap.parse_args()
 
     rows = recipes(args)
@@ -201,8 +203,35 @@ def main() -> int:
         p = pathlib.Path(args.out)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(results, indent=2), encoding="utf-8")
-        print(f"\nresults -> {p}")
+        csv_path = write_csv(
+            args.csv or sibling_csv(p), flatten_results(results)
+        )
+        print(f"\nresults -> {p}\n         -> {csv_path}")
     return 0
+
+
+def flatten_results(results: Sequence[dict]) -> List[dict]:
+    """One row per recipe, with the per-bucket columns spread out flat."""
+    buckets = _buckets(results)
+    rows = []
+    for e in results:
+        f = e["fidelity"]
+        row = {
+            "recipe": e["name"].strip(),
+            "top1": f["top1"],
+            "kl": f["kl"],
+            "conf_delta": f["conf_delta"],
+            "mean_proxy_loss": e.get("mean_proxy_loss", ""),
+            "layers": e.get("layers", ""),
+            "gsm8k": e.get("gsm8k", ""),
+            "seconds": e.get("seconds", ""),
+        }
+        for b in buckets:
+            m = f["per_bucket"].get(b)
+            row[f"top1_mask_{b}"] = m["top1"] if m else ""
+            row[f"kl_mask_{b}"] = m["kl"] if m else ""
+        rows.append(round_floats(row))
+    return rows
 
 
 def print_table(results, reference, args) -> None:

@@ -9,7 +9,7 @@ Mirrors the three components of the paper (arXiv:2508.14090):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence  # noqa: F401
 
 
 @dataclass
@@ -243,6 +243,15 @@ class DLLMQuantConfig:
     )
     device: str = "cuda"
     dtype: str = "bfloat16"
+    # None -> load normally and move to `device`. Only set this ("auto", or an
+    # explicit map) when the model genuinely does not fit on one GPU, e.g.
+    # LLaDA2.0-flash at 100B.
+    #
+    # It is not the default because accelerate's device-map inference reaches
+    # into `model.all_tied_weights_keys`, which recent transformers define on
+    # PreTrainedModel but LLaDA's remote-code class does not -- passing
+    # device_map="auto" crashes before a single weight is placed.
+    device_map: Optional[str] = None
     seed: int = 0
 
     def skip(self, name: str) -> bool:

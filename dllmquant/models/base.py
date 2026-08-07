@@ -37,6 +37,49 @@ class AttentionParts:
     attn_probs: torch.Tensor  # [B, heads, Q, K], rows sum to 1
 
 
+def _dtype_kwargs(dtype) -> dict:
+    """`torch_dtype` was renamed to `dtype` in transformers 4.56."""
+    import transformers
+
+    try:
+        parts = transformers.__version__.split(".")
+        major, minor = int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        major, minor = 0, 0
+    key = "dtype" if (major, minor) >= (4, 56) else "torch_dtype"
+    return {key: dtype}
+
+
+def load_pretrained(auto_class, cfg):
+    """Load a checkpoint, avoiding accelerate's device-map inference by default.
+
+    LLaDA ships as remote code written against an older transformers.  Newer
+    releases infer the device map through ``model.all_tied_weights_keys``,
+    which ``PreTrainedModel`` defines but the remote-code class does not, so
+    ``device_map="auto"`` raises ``AttributeError`` before any weight is
+    placed.  Nothing here needs a device map for a model that fits on one GPU,
+    so it is opt-in via ``cfg.device_map``.
+    """
+    import torch as _torch
+
+    dtype = getattr(_torch, cfg.dtype)
+    kwargs = {"trust_remote_code": True, **_dtype_kwargs(dtype)}
+
+    if cfg.device_map:
+        kwargs["device_map"] = cfg.device_map
+        return auto_class.from_pretrained(cfg.model_path, **kwargs)
+
+    model = auto_class.from_pretrained(cfg.model_path, **kwargs)
+    if cfg.device and cfg.device != "cpu":
+        if not _torch.cuda.is_available():
+            raise RuntimeError(
+                f"device='{cfg.device}' but CUDA is unavailable; "
+                "pass --device cpu (very slow) or fix the environment"
+            )
+        model = model.to(cfg.device)
+    return model
+
+
 def discover_blocks(model: nn.Module) -> Tuple[str, nn.ModuleList]:
     """Find the transformer block list without hardcoding a module path.
 

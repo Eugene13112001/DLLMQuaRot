@@ -35,7 +35,12 @@ import torch
 import torch.nn as nn
 
 from ..config import DLLMQuantConfig
-from .base import ArchitectureMismatch, discover_blocks, find_submodule
+from .base import (
+    ArchitectureMismatch,
+    discover_blocks,
+    find_submodule,
+    load_pretrained,
+)
 from .llada import LLaDAAdapter
 
 _ROUTER_NAMES = ("gate", "router", "wg", "gate_proj_moe")
@@ -112,16 +117,10 @@ class LLaDA2MoEAdapter(LLaDAAdapter):
     def load(self) -> None:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        dtype = getattr(torch, self.cfg.dtype)
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.cfg.model_path, trust_remote_code=True
         )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.cfg.model_path,
-            trust_remote_code=True,
-            torch_dtype=dtype,
-            device_map="auto" if self.cfg.device == "cuda" else None,
-        )
+        self.model = load_pretrained(AutoModelForCausalLM, self.cfg)
         self.model.eval()
         self.mask_id = self._discover_mask_id()
         self._validate()
