@@ -1,0 +1,362 @@
+"""Adapter for the dense LLaDA family (LLaDA-8B-*, LLaDA-1.5-8B).
+
+LLaDA is an OLMo-style decoder with **bidirectional** attention -- there is no
+causal mask, which is precisely why the value matrix is shared across the whole
+sequence and why IA-AQ has something to optimise.
+"""
+
+from __future__ import annotations
+
+import math
+import warnings
+from typing import List, Optional, Sequence
+
+import torch
+import torch.nn as nn
+
+from ..config import DLLMQuantConfig
+from .base import (
+    ArchitectureMismatch,
+    AttentionParts,
+    AttentionProbe,
+    ModelAdapter,
+    discover_blocks,
+    find_submodule,
+)
+
+# LLaDA's reserved mask token; identical for LLaDA-8B and LLaDA-1.5.
+LLADA_MASK_ID = 126336
+
+_QKV_FUSED_NAMES = ("att_proj", "qkv_proj", "Wqkv")
+_Q_NAMES = ("q_proj", "wq", "query")
+_K_NAMES = ("k_proj", "wk", "key")
+_V_NAMES = ("v_proj", "wv", "value")
+# The norm applied to the block input *before* the QKV projection.  Listed
+# explicitly rather than matching a bare "norm", which would also catch the
+# MLP's norm and silently feed the projection the wrong tensor.
+_ATTN_NORM_NAMES = ("attn_norm", "input_layernorm", "ln_1", "norm1", "ln_attn")
+_FF_NORM_NAMES = ("ff_norm", "post_attention_layernorm", "ln_2", "norm2", "ln_mlp")
+_FINAL_NORM_NAMES = ("ln_f", "final_layernorm", "norm_f", "final_norm")
+_EMBED_NAMES = ("wte", "embed_tokens", "embed_in", "word_embeddings")
+_LM_HEAD_NAMES = ("ff_out", "lm_head", "embed_out")
+
+# Residual-stream classification for QuaRot. By name, deliberately: `attn_out`
+# is square, so no shape rule can separate it from `att_proj`.
+_ATTN_IN_NAMES = _QKV_FUSED_NAMES + _Q_NAMES + _K_NAMES + _V_NAMES
+_RESIDUAL_IN_NAMES = _ATTN_IN_NAMES + (
+    "ff_proj", "gate_proj", "up_proj", "w1", "w3",
+)
+_ATTN_OUT_NAMES = ("attn_out", "o_proj", "out_proj")
+_RESIDUAL_OUT_NAMES = _ATTN_OUT_NAMES + ("ff_out", "down_proj", "w2")
+
+
+class LLaDAAttentionProbe(AttentionProbe):
+    """Recovers Q/K/V from a block's projections and forms the softmax matrix.
+
+    The attention probabilities are recomputed here instead of being requested
+    via ``output_attentions=True``: the remote-code LLaDA modelling file routes
+    through fused SDPA/flash kernels that never materialise the matrix.
+
+    Caveat, stated plainly: rotary embeddings are applied only when the block
+    exposes a rotary module we recognise.  Without it the recovered
+    probabilities ignore positional rotation, which shifts the *ranking* of
+    token importance slightly.  IA-AQ uses these weights as a soft priority,
+    not as an exact quantity, but the fallback is reported by ``selfcheck``.
+    """
+
+    def __init__(
+        self,
+        block: nn.Module,
+        n_heads: int,
+        n_kv_heads: int,
+        head_dim: int,
+        rotary: Optional[nn.Module] = None,
+    ):
+        super().__init__(block)
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = head_dim
+        self.rotary = rotary
+        self.rope_applied = False
+
+        self.fused = find_submodule(block, _QKV_FUSED_NAMES)
+        self.q = find_submodule(block, _Q_NAMES)
+        self.k = find_submodule(block, _K_NAMES)
+        self.v = find_submodule(block, _V_NAMES)
+        self.attn_norm = find_submodule(block, _ATTN_NORM_NAMES)
+        if self.attn_norm is None:
+            warnings.warn(
+                f"no pre-attention norm found among {_ATTN_NORM_NAMES}; the probe "
+                "will project the raw block input, which is wrong for any "
+                "pre-norm transformer. Check the block's children.",
+                RuntimeWarning,
+            )
+
+        if self.fused is None and None in (self.q, self.k, self.v):
+            raise ArchitectureMismatch(
+                "block exposes neither a fused QKV projection "
+                f"{_QKV_FUSED_NAMES} nor separate {_Q_NAMES}/{_K_NAMES}/{_V_NAMES}; "
+                f"children: {[n for n, _ in block.named_children()]}"
+            )
+
+    # ------------------------------------------------------------------ hook
+
+    def _hook(self, module, args, kwargs, output) -> None:
+        hidden = kwargs.get("hidden_states", args[0] if args else None)
+        if hidden is None:
+            raise ArchitectureMismatch("could not locate block hidden_states input")
+        if hidden.dim() != 3:
+            return  # not the call we care about
+
+        with torch.no_grad():
+            q, k, v = self._project(hidden)
+            probs = self._attention_probs(q, k)
+        self.parts = AttentionParts(value_states=v, attn_probs=probs)
+
+    def _project(self, hidden: torch.Tensor):
+        b, t, _ = hidden.shape
+        # Pre-norm transformer: the projection sees the normed input, not the
+        # residual stream. Skipping this silently rescales Q/K and distorts the
+        # softmax the importance weights are read from.
+        if self.attn_norm is not None:
+            hidden = self.attn_norm(hidden)
+        if self.fused is not None:
+            qkv = self.fused(hidden)
+            d_q = self.n_heads * self.head_dim
+            d_kv = self.n_kv_heads * self.head_dim
+            if qkv.shape[-1] != d_q + 2 * d_kv:
+                raise ArchitectureMismatch(
+                    f"fused QKV width {qkv.shape[-1]} != "
+                    f"{d_q} + 2*{d_kv}; head config is wrong"
+                )
+            q, k, v = qkv.split([d_q, d_kv, d_kv], dim=-1)
+        else:
+            q, k, v = self.q(hidden), self.k(hidden), self.v(hidden)
+
+        q = q.view(b, t, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(b, t, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(b, t, self.n_kv_heads, self.head_dim).transpose(1, 2)
+
+        if self.rotary is not None:
+            q, k = self._apply_rotary(q, k, t)
+        return q, k, v
+
+    def _apply_rotary(self, q, k, seq_len):
+        try:
+            cos, sin = self.rotary(q, seq_len=seq_len)
+        except Exception:
+            try:
+                cos, sin = self.rotary(seq_len)
+            except Exception:
+                return q, k
+
+        def rotate_half(x):
+            x1, x2 = x.chunk(2, dim=-1)
+            return torch.cat((-x2, x1), dim=-1)
+
+        cos = cos.to(q.dtype).view(1, 1, seq_len, -1)
+        sin = sin.to(q.dtype).view(1, 1, seq_len, -1)
+        self.rope_applied = True
+        return q * cos + rotate_half(q) * sin, k * cos + rotate_half(k) * sin
+
+    def _attention_probs(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+        # Grouped-query attention: repeat KV heads to match query heads.
+        if self.n_kv_heads != self.n_heads:
+            rep = self.n_heads // self.n_kv_heads
+            k = k.repeat_interleave(rep, dim=1)
+        scores = (q.float() @ k.float().transpose(-1, -2)) / math.sqrt(self.head_dim)
+        # No causal mask: LLaDA attends bidirectionally at every denoising step.
+        return torch.softmax(scores, dim=-1)
+
+
+class LLaDAAdapter(ModelAdapter):
+    """LLaDA-8B-Base / -Instruct / LLaDA-1.5-8B."""
+
+    def __init__(self, cfg: DLLMQuantConfig):
+        self.cfg = cfg
+        self.mask_id = LLADA_MASK_ID
+        self.model = None
+        self.tokenizer = None
+        self._blocks = None
+        self._blocks_path = ""
+        self.n_heads = 0
+        self.n_kv_heads = 0
+        self.head_dim = 0
+
+    # ------------------------------------------------------------------ load
+
+    def load(self) -> None:
+        from transformers import AutoModel, AutoTokenizer
+
+        dtype = getattr(torch, self.cfg.dtype)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.cfg.model_path, trust_remote_code=True
+        )
+        self.model = AutoModel.from_pretrained(
+            self.cfg.model_path,
+            trust_remote_code=True,
+            torch_dtype=dtype,
+            device_map="auto" if self.cfg.device == "cuda" else None,
+        )
+        self.model.eval()
+        self._validate()
+
+    def _validate(self) -> None:
+        self._blocks_path, self._blocks = discover_blocks(self.model)
+
+        cfg = self.model.config
+        self.n_heads = self._cfg_get(cfg, ["n_heads", "num_attention_heads"])
+        hidden = self._cfg_get(cfg, ["d_model", "hidden_size"])
+        self.n_kv_heads = self._cfg_get(
+            cfg, ["n_kv_heads", "num_key_value_heads"], default=self.n_heads
+        )
+        self.head_dim = hidden // self.n_heads
+
+        if self.n_heads % self.n_kv_heads != 0:
+            raise ArchitectureMismatch(
+                f"n_heads={self.n_heads} not divisible by n_kv_heads={self.n_kv_heads}"
+            )
+
+        vocab = self._cfg_get(cfg, ["vocab_size", "embedding_size"], default=0)
+        if vocab and self.mask_id >= vocab:
+            raise ArchitectureMismatch(
+                f"mask_id {self.mask_id} outside vocab of {vocab}; "
+                "this does not look like a LLaDA checkpoint"
+            )
+
+    @staticmethod
+    def _cfg_get(cfg, names: Sequence[str], default=None):
+        for n in names:
+            if hasattr(cfg, n):
+                return getattr(cfg, n)
+        if default is not None:
+            return default
+        raise ArchitectureMismatch(
+            f"model config exposes none of {names}; available: "
+            f"{sorted(k for k in vars(cfg) if not k.startswith('_'))[:20]}"
+        )
+
+    # ------------------------------------------------------------- structure
+
+    @property
+    def blocks(self) -> nn.ModuleList:
+        if self._blocks is None:
+            raise RuntimeError("call load() first")
+        return self._blocks
+
+    def make_probe(self, block: nn.Module) -> LLaDAAttentionProbe:
+        rotary = find_submodule(block, ("rotary_emb", "rope", "rotary"))
+        if rotary is None:
+            rotary = find_submodule(self.model, ("rotary_emb", "rope", "rotary"))
+        probe = LLaDAAttentionProbe(
+            block, self.n_heads, self.n_kv_heads, self.head_dim, rotary
+        )
+        if rotary is None:
+            warnings.warn(
+                "no rotary module found; IA-AQ importance weights will be "
+                "computed without positional rotation (approximate ranking)",
+                RuntimeWarning,
+            )
+        return probe
+
+    # -------------------------------------------------------------- rotation
+
+    def rotation_plan(self):
+        """Classify every linear as reading or writing the residual stream.
+
+        Classification is by name, not by shape: ``attn_out`` has
+        ``in_features == out_features == d_model``, so a shape rule cannot tell
+        it apart from ``att_proj`` -- and getting that backwards silently
+        breaks invariance instead of raising.
+        """
+        from ..algos.quarot import RotationPlan
+
+        blocks_prefix = self._blocks_path + "."
+        embeddings = [
+            m for name, m in self.model.named_modules()
+            if isinstance(m, nn.Embedding)
+            and name.split(".")[-1] in _EMBED_NAMES
+        ]
+        if not embeddings:
+            raise ArchitectureMismatch(
+                f"no token embedding found among names {_EMBED_NAMES}"
+            )
+
+        input_linears: List[nn.Linear] = []
+        output_linears: List[nn.Linear] = []
+        norm_groups = []
+        head_pairs = []
+
+        for block in self.blocks:
+            ins, outs = [], []
+            for name, module in block.named_modules():
+                leaf = name.split(".")[-1]
+                if not isinstance(module, nn.Linear):
+                    continue
+                if leaf in _RESIDUAL_IN_NAMES:
+                    ins.append((leaf, module))
+                elif leaf in _RESIDUAL_OUT_NAMES:
+                    outs.append((leaf, module))
+
+            if not ins or not outs:
+                raise ArchitectureMismatch(
+                    f"block exposes {[n for n, _ in ins]} inputs and "
+                    f"{[n for n, _ in outs]} outputs; expected at least one of each"
+                )
+            input_linears.extend(m for _, m in ins)
+            output_linears.extend(m for _, m in outs)
+
+            attn_norm = find_submodule(block, _ATTN_NORM_NAMES)
+            ff_norm = find_submodule(block, _FF_NORM_NAMES)
+            attn_consumers = [m for n, m in ins if n in _ATTN_IN_NAMES]
+            ff_consumers = [m for n, m in ins if n not in _ATTN_IN_NAMES]
+            if attn_norm is not None and attn_consumers:
+                norm_groups.append((attn_norm, attn_consumers))
+            if ff_norm is not None and ff_consumers:
+                norm_groups.append((ff_norm, ff_consumers))
+
+            out_proj = next((m for n, m in outs if n in _ATTN_OUT_NAMES), None)
+            fused = next((m for n, m in ins if n in _QKV_FUSED_NAMES), None)
+            v_only = next((m for n, m in ins if n in _V_NAMES), None)
+            if out_proj is not None and fused is not None:
+                offset = (self.n_heads + self.n_kv_heads) * self.head_dim
+                head_pairs.append((fused, out_proj, offset))
+            elif out_proj is not None and v_only is not None:
+                head_pairs.append((v_only, out_proj, None))
+
+        # The LM head reads the residual stream, so it rotates like an input.
+        # In LLaDA it is called `ff_out` -- the same leaf name as the MLP
+        # down-projection inside every block -- so it must be located strictly
+        # outside the block list.
+        head, final_norm = None, None
+        for name, module in self.model.named_modules():
+            if name.startswith(blocks_prefix) or name == self._blocks_path:
+                continue
+            leaf = name.split(".")[-1]
+            if isinstance(module, nn.Linear) and leaf in _LM_HEAD_NAMES:
+                head = module
+            elif leaf in _FINAL_NORM_NAMES and hasattr(module, "weight"):
+                final_norm = module
+
+        if head is not None:
+            input_linears.append(head)
+            if final_norm is not None:
+                norm_groups.append((final_norm, [head]))
+
+        return RotationPlan(
+            embeddings=embeddings,
+            input_linears=input_linears,
+            output_linears=output_linears,
+            norm_groups=norm_groups,
+            head_pairs=head_pairs,
+        )
+
+    def describe(self) -> str:
+        return (
+            f"LLaDAAdapter: {len(self.blocks)} blocks at '{self._blocks_path}', "
+            f"heads={self.n_heads}, kv_heads={self.n_kv_heads}, "
+            f"head_dim={self.head_dim}, mask_id={self.mask_id}"
+        )
+
+
+__all__ = ["LLaDAAdapter", "LLaDAAttentionProbe", "LLADA_MASK_ID"]

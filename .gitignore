@@ -11,15 +11,17 @@ out/
 outputs/
 *.log
 
-# Веса и датасеты — никогда в git
+# Веса и датасеты — никогда в git.
+# Ведущий слэш обязателен: без него `models/` совпадает на ЛЮБОЙ глубине и
+# заодно исключает пакет dllmquant/models/ с адаптерами моделей.
 *.safetensors
 *.bin
 *.pt
 *.pth
-models/
-checkpoints/
-.cache/
-hf_cache/
+/models/
+/checkpoints/
+/.cache/
+/hf_cache/
 
 # Локальные настройки редактора/инструментов
 .claude/settings.local.json
