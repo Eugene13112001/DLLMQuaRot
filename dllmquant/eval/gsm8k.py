@@ -18,20 +18,50 @@ from ..config import TMASConfig
 from ..models.base import ModelAdapter
 
 _NUMBER = re.compile(r"-?\$?\d[\d,]*\.?\d*")
+# Ordered by how explicitly the model is pointing at its answer. A completion
+# that ends "...he will eat 7 dozens of eggs in 4 weeks" has 4 as its last
+# number, so the plain last-number rule scores a correct answer wrong -- and
+# it does so silently, which is worse than a crash.
+_MARKERS = [
+    re.compile(r"\\boxed\{([^}]*)\}"),
+    re.compile(r"(?:final\s+answer|answer)\s*(?:is|:)?\s*\**\s*"
+               r"(-?\$?\d[\d,]*\.?\d*)", re.IGNORECASE),
+    re.compile(r"\*\*\s*(-?\$?\d[\d,]*\.?\d*)\s*\**"),
+]
+
+
+def _to_float(raw: str) -> Optional[float]:
+    raw = raw.replace(",", "").replace("$", "").replace("\\", "").strip()
+    raw = raw.rstrip(".").strip()
+    m = _NUMBER.search(raw)
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(",", "").replace("$", "").rstrip("."))
+    except ValueError:
+        return None
 
 
 def extract_answer(text: str) -> Optional[float]:
-    """Take the last number in the completion, GSM8K convention."""
+    """Pull the model's final answer out of a chain-of-thought completion.
+
+    Prefers an explicit marker over position: \\boxed{}, then "the answer is
+    N", then a bolded number, and only then the last number in the text.
+    """
     if "####" in text:
         text = text.split("####")[-1]
+
+    for pattern in _MARKERS:
+        hits = pattern.findall(text)
+        if hits:
+            value = _to_float(hits[-1])
+            if value is not None:
+                return value
+
     matches = _NUMBER.findall(text)
     if not matches:
         return None
-    raw = matches[-1].replace(",", "").replace("$", "").rstrip(".")
-    try:
-        return float(raw)
-    except ValueError:
-        return None
+    return _to_float(matches[-1])
 
 
 def gold_answer(answer_field: str) -> Optional[float]:
@@ -52,13 +82,23 @@ class EvalResult:
         return f"GSM8K: {self.correct}/{self.total} = {100 * self.accuracy:.2f}%"
 
 
+# Asking for an explicit marker is not cosmetic: without one, extraction has
+# to guess which number in the closing sentence is the answer, and "7 dozens
+# of eggs in 4 weeks" has no syntactic tell. Requiring the marker moves the
+# problem from a heuristic to a contract.
+ANSWER_INSTRUCTION = (
+    "Think step by step, then end your reply with the final answer on its own "
+    'line in exactly this form: "The answer is N", where N is a single number '
+    "with no units."
+)
+
+
 def build_prompt(adapter: ModelAdapter, question: str, few_shot: str = "") -> torch.Tensor:
-    text = f"{few_shot}Question: {question}\nAnswer:"
     tok = adapter.tokenizer
+    text = f"{few_shot}Question: {question}\n{ANSWER_INSTRUCTION}\nAnswer:"
     if hasattr(tok, "apply_chat_template") and getattr(tok, "chat_template", None):
         text = tok.apply_chat_template(
-            [{"role": "user", "content":
-              f"{question}\n\nThink step by step, then give the final number."}],
+            [{"role": "user", "content": f"{question}\n\n{ANSWER_INSTRUCTION}"}],
             add_generation_prompt=True,
             tokenize=False,
         )

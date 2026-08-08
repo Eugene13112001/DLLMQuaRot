@@ -141,7 +141,10 @@ def main() -> int:
                     "accuracy": result.accuracy,
                     "correct": result.correct,
                     "total": result.total,
-                    "samples": result.samples[:20],
+                    # Every completion, not a sample of them: generation costs
+                    # hours and a change to answer extraction must not require
+                    # re-running it. scripts/rescore.py re-parses these.
+                    "samples": result.samples,
                 },
                 f,
                 indent=2,
