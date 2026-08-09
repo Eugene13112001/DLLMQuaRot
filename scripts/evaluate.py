@@ -59,7 +59,11 @@ def main() -> int:
     ap.add_argument("--rtn", action="store_true", help="use RTN instead of DLLMQuant")
     ap.add_argument("--w-bits", type=int, default=16)
     ap.add_argument("--a-bits", type=int, default=16)
-    ap.add_argument("--group-size", type=int, default=-1)
+    ap.add_argument("--group-size", type=int, default=-1,
+                    help="weight group size; -1 = per output channel")
+    ap.add_argument("--a-group-size", type=int, default=-1,
+                    help="activation group size: one scale per N channels "
+                         "instead of one per token; -1 = per token")
     ap.add_argument("--nsamples", type=int, default=128)
     ap.add_argument("--nprompts", type=int, default=32)
     ap.add_argument("--no-ia-aq", action="store_true")
@@ -93,7 +97,12 @@ def main() -> int:
             group_size=args.group_size,
             mse_search=True,
         ),
-        activation=QuantConfig(n_bits=args.a_bits, granularity="per_token"),
+        activation=(
+            QuantConfig(n_bits=args.a_bits, granularity="per_group",
+                        group_size=args.a_group_size, dynamic=True)
+            if args.a_group_size > 0
+            else QuantConfig(n_bits=args.a_bits, granularity="per_token")
+        ),
         tmas=TMASConfig(
             n_samples=args.nsamples,
             n_prompts=args.nprompts,
@@ -137,6 +146,7 @@ def main() -> int:
                         "ia_aq": not args.no_ia_aq,
                         "certainty_weighting": not args.no_cgq_weights,
                         "rotation": args.rotate,
+                        "a_group_size": args.a_group_size,
                     },
                     "accuracy": result.accuracy,
                     "correct": result.correct,
