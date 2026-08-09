@@ -327,6 +327,8 @@ def test_pipeline_reports_ia_aq_statistics():
     for stats in report.ia_aq.values():
         assert stats["weighted_mse"] >= 0
         assert "minmax_weighted_mse" in stats
+        # The snapshot mask actually reached the collector, not just the config.
+        assert stats["decoded_query_weight"] == 0.5
 
 
 def test_certainty_weights_reach_the_solver():

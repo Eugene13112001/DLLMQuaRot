@@ -194,7 +194,9 @@ class DLLMQuantPipeline:
                 continue
 
             if self.cfg.ia_aq.enabled:
-                self._run_ia_aq(bi, block, layers, inps, kwargs_list, verbose)
+                self._run_ia_aq(
+                    bi, block, layers, inps, kwargs_list, snapshots, verbose
+                )
 
             n_before = len(self.report.layers)
             self._run_cgq(bi, block, layers, inps, kwargs_list, snapshots, verbose)
@@ -322,29 +324,42 @@ class DLLMQuantPipeline:
         layers: Dict[str, QuantLinear],
         inps: List[torch.Tensor],
         kwargs_list: List[dict],
+        snapshots: Sequence[Snapshot],
         verbose: bool,
     ) -> None:
         """Calibrate the value-matrix quantizer from real attention weights."""
         probe = self.adapter.make_probe(block)
         collector = InteractionCollector(self.cfg.ia_aq)
+        device = next(block.parameters()).device
 
         with probe:
-            for x, kw in zip(inps, kwargs_list):
+            for x, kw, snap in zip(inps, kwargs_list, snapshots):
                 block(x, **kw)
-                if probe.parts is not None:
-                    collector.add(probe.parts.value_states, probe.parts.attn_probs)
+                if probe.parts is None:
+                    continue
+                # Attention from decoded positions goes nowhere -- the sampler
+                # discards those logits -- so it must not count towards
+                # importance.
+                q_mask = snap.mask.unsqueeze(0).to(device)
+                if q_mask.shape[1] != probe.parts.attn_probs.shape[-1]:
+                    q_mask = None  # length mismatch: fall back to all queries
+                collector.add(
+                    probe.parts.value_states, probe.parts.attn_probs, q_mask
+                )
 
         if not collector.values:
             if verbose:
                 print(f"  [block {bi}] IA-AQ skipped: probe captured nothing")
             return
 
-        device = next(block.parameters()).device
         quantizer = collector.build_quantizer(device=device)
 
         stats = collector.error_report(quantizer)
         stats["minmax_weighted_mse"] = self._minmax_baseline(collector, device)
         stats["rope_applied"] = float(getattr(probe, "rope_applied", False))
+        stats["decoded_query_weight"] = (
+            self.cfg.ia_aq.decoded_query_weight if collector.used_query_mask else 1.0
+        )
         self.report.ia_aq[f"block{bi}"] = stats
 
         self._attach_value_quantizer(layers, quantizer, verbose, bi)

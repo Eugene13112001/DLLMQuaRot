@@ -28,13 +28,19 @@ from ..quantizers import InteractionAwareQuantizer
 def interaction_weights(
     attn_probs: torch.Tensor,
     cfg: IAAQConfig,
-    valid_mask: Optional[torch.Tensor] = None,
+    query_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Token importance from a softmax attention tensor.
 
     ``attn_probs`` is [B, heads, Q, K] with rows summing to 1.  Returns [B, K],
     normalised to mean 1 per sequence so the values are comparable across
     layers and batch sizes.
+
+    ``query_mask`` is [B, Q], True where the position is still masked.  Rows on
+    decoded positions are scaled by ``cfg.decoded_query_weight`` rather than
+    dropped -- their logits are discarded only at the final layer, while
+    everywhere below they still feed the masked positions through the layer
+    above.
     """
     if attn_probs.dim() != 4:
         raise ValueError(f"expected [B, H, Q, K], got {tuple(attn_probs.shape)}")
@@ -42,10 +48,16 @@ def interaction_weights(
     a = attn_probs.to(torch.float32)
     a = a.mean(dim=1) if cfg.reduce_heads == "mean" else a.amax(dim=1)  # [B, Q, K]
 
-    if valid_mask is not None:
-        # Ignore padding queries when accumulating column mass.
-        a = a * valid_mask.to(a.dtype).unsqueeze(-1)
-        denom = valid_mask.to(a.dtype).sum(dim=1, keepdim=True).clamp(min=1.0)
+    if query_mask is not None:
+        # Soft, not binary: decoded rows still reach the read-out positions
+        # through the layers above, just weakly.
+        row_w = torch.where(
+            query_mask.to(torch.bool),
+            torch.ones_like(a[:, :, 0]),
+            torch.full_like(a[:, :, 0], cfg.decoded_query_weight),
+        )
+        a = a * row_w.unsqueeze(-1)
+        denom = row_w.sum(dim=1, keepdim=True).clamp(min=1e-6)
     else:
         denom = torch.full(
             (a.shape[0], 1), float(a.shape[1]), device=a.device, dtype=a.dtype
@@ -76,24 +88,35 @@ class InteractionCollector:
         self.max_tokens = max_tokens
         self.values: List[torch.Tensor] = []
         self.weights: List[torch.Tensor] = []
+        self.used_query_mask = False
         self._n_tokens = 0
 
     def add(
         self,
         value_states: torch.Tensor,
         attn_probs: torch.Tensor,
-        valid_mask: Optional[torch.Tensor] = None,
+        query_mask: Optional[torch.Tensor] = None,
     ) -> None:
-        """``value_states``: [B, heads, K, head_dim] or [B, K, D]."""
+        """``value_states``: [B, heads, K, head_dim] or [B, K, D].
+
+        ``query_mask`` is [B, Q] and True where the query position is still
+        masked; attention from decoded positions is then ignored, because the
+        sampler throws those outputs away.
+        """
         if self._n_tokens >= self.max_tokens:
             return
+
+        if query_mask is not None and self.cfg.decoded_query_weight >= 1.0:
+            # Decoded rows count fully: the mask would change nothing.
+            query_mask = None
 
         v = value_states
         if v.dim() == 4:  # merge heads back into the feature axis
             b, h, k, d = v.shape
             v = v.permute(0, 2, 1, 3).reshape(b, k, h * d)
 
-        w = interaction_weights(attn_probs, self.cfg, valid_mask)
+        w = interaction_weights(attn_probs, self.cfg, query_mask)
+        self.used_query_mask = self.used_query_mask or query_mask is not None
         if w.shape[1] != v.shape[1]:
             raise ValueError(
                 f"attention keys ({w.shape[1]}) != value tokens ({v.shape[1]})"

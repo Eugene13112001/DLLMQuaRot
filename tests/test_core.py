@@ -442,6 +442,72 @@ def test_interaction_weights_follow_attention_mass():
     assert abs(float(w.mean()) - 1.0) < 1e-4
 
 
+def _split_attention(n: int = 8, cut: int = 4):
+    """Masked queries all look at token 2, decoded queries all at token 6."""
+    attn = torch.zeros(1, 2, n, n)
+    attn[:, :, :cut, 2] = 1.0
+    attn[:, :, cut:, 6] = 1.0
+    q_mask = torch.zeros(1, n, dtype=torch.bool)
+    q_mask[0, :cut] = True
+    return attn, q_mask
+
+
+def test_decoded_queries_are_down_weighted_not_dropped():
+    """A decoded query's output is discarded only at the FINAL layer.
+
+    Below it, that output becomes the hidden state which -- one layer up --
+    serves as key and value for the masked positions. The influence is
+    indirect and attenuated, so the row is scaled, not removed.
+    """
+    attn, q_mask = _split_attention()
+
+    w_full = interaction_weights(attn, IAAQConfig(decoded_query_weight=1.0), q_mask)
+    w_soft = interaction_weights(attn, IAAQConfig(decoded_query_weight=0.5), q_mask)
+
+    # Counting decoded rows fully, both tokens look equally important.
+    assert abs(float(w_full[0, 2]) - float(w_full[0, 6])) < 1e-4
+    # Down-weighted, token 2 leads -- but token 6 keeps real weight.
+    assert float(w_soft[0, 2]) > float(w_soft[0, 6])
+    assert float(w_soft[0, 6]) > 0.3 * float(w_soft[0, 2])
+
+
+def test_zero_weight_reproduces_hard_exclusion():
+    attn, q_mask = _split_attention()
+    w = interaction_weights(attn, IAAQConfig(decoded_query_weight=0.0), q_mask)
+    assert float(w[0, 2]) > float(w[0, 6]) * 100
+
+
+def test_weight_of_one_makes_the_mask_a_no_op():
+    """Then IA-AQ behaves exactly as it would on an autoregressive model."""
+    attn, q_mask = _split_attention()
+    v = torch.randn(1, 8, 8)
+
+    off = InteractionCollector(IAAQConfig(decoded_query_weight=1.0))
+    off.add(v, attn, q_mask)
+    assert off.used_query_mask is False
+
+    on = InteractionCollector(IAAQConfig(decoded_query_weight=0.5))
+    on.add(v, attn, q_mask)
+    assert on.used_query_mask is True
+    assert not torch.allclose(off.weights[0], on.weights[0])
+
+
+def test_all_decoded_state_still_ranks_tokens():
+    """The trajectory's final state has nothing masked; every row is scaled by
+    the same factor, so the ranking must survive rather than collapse."""
+    v = torch.randn(1, 8, 16)
+    attn = torch.softmax(torch.randn(1, 2, 8, 8), dim=-1)
+    empty = torch.zeros(1, 8, dtype=torch.bool)
+
+    collector = InteractionCollector(IAAQConfig(n_bits=4))
+    collector.add(v, attn, empty)
+
+    w = collector.weights[0]
+    assert torch.isfinite(w).all()
+    assert float(w.std()) > 0, "weights collapsed to a constant"
+    assert abs(float(w.mean()) - 1.0) < 1e-4
+
+
 def test_interaction_weights_reject_bad_shapes():
     try:
         interaction_weights(torch.rand(4, 8, 8), IAAQConfig())

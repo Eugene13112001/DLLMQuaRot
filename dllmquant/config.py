@@ -150,6 +150,18 @@ class IAAQConfig:
 
     enabled: bool = True
     n_bits: int = 4
+    # How much a query row counts when it sits on an already-decoded position.
+    #
+    # The sampler reads logits only at masked positions, so at the LAST layer a
+    # decoded query's output is discarded outright. At every earlier layer it
+    # is not: that output becomes the hidden state which, one layer up, serves
+    # as a key and value for the masked positions. Its influence is indirect
+    # and attenuated, not absent -- so it is down-weighted, mirroring what CGQ
+    # does with decoded tokens, rather than dropped.
+    #
+    # 1.0 counts decoded queries fully (what an autoregressive method would
+    # do); 0.0 excludes them, which overstates the case.
+    decoded_query_weight: float = 0.5
     # Average attention over heads before computing column mass.
     reduce_heads: str = "mean"  # 'mean' | 'max'
     # Exponent on the importance weights; >1 sharpens the priority.

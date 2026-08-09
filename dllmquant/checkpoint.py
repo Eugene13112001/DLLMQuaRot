@@ -152,7 +152,8 @@ def config_fingerprint(cfg) -> str:
         f":{cfg.tmas.n_prompts}:{cfg.tmas.steps}:{cfg.tmas.gen_length}",
         f"cgq{cfg.cgq.unmasked_weight}:{cfg.cgq.masked_base}:{cfg.cgq.beta}"
         f":{cfg.cgq.percdamp}:{int(cfg.cgq.act_order)}",
-        f"iaaq{int(cfg.ia_aq.enabled)}:{cfg.ia_aq.n_bits}",
+        f"iaaq{int(cfg.ia_aq.enabled)}:{cfg.ia_aq.n_bits}"
+        f":{cfg.ia_aq.decoded_query_weight}",
         f"rot{int(cfg.rotation.enabled)}:{int(cfg.rotation.residual)}"
         f":{int(cfg.rotation.value_heads)}:{int(cfg.rotation.online_mlp)}"
         f":{cfg.rotation.seed}",
