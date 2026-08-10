@@ -178,6 +178,61 @@ def test_value_head_rotation_leaves_the_function_unchanged():
     assert torch.allclose(adapter.model(ids).logits, before, atol=2e-3)
 
 
+def _gqa_pieces(n_heads=4, n_kv_heads=2, head_dim=4):
+    d = n_heads * head_dim
+    qkv = nn.Linear(d, (n_heads + 2 * n_kv_heads) * head_dim, bias=False)
+    out = nn.Linear(d, d, bias=False)
+    x = torch.randn(2, 5, d)
+
+    def forward():
+        b, t, _ = x.shape
+        q, k, v = qkv(x).split(
+            [n_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim],
+            dim=-1,
+        )
+        q = q.view(b, t, n_heads, head_dim).transpose(1, 2)
+        k = k.view(b, t, n_kv_heads, head_dim).transpose(1, 2)
+        v = v.view(b, t, n_kv_heads, head_dim).transpose(1, 2)
+        rep = n_heads // n_kv_heads
+        k, v = k.repeat_interleave(rep, dim=1), v.repeat_interleave(rep, dim=1)
+        a = torch.softmax(q @ k.transpose(-1, -2) / math.sqrt(head_dim), dim=-1)
+        return out((a @ v).transpose(1, 2).reshape(b, t, d))
+
+    return qkv, out, forward
+
+
+def test_value_rotation_survives_grouped_query_attention():
+    """LLaDA2.0 has 16 query heads over 4 KV heads; V holds 4, not 16.
+
+    Reshaping the V block as 16 heads reinterprets the matrix rather than
+    rotating it -- and because slicing past the end clips instead of raising,
+    it took a shape error two lines later to reveal that.
+    """
+    torch.manual_seed(0)
+    n_heads, n_kv, hd = 4, 2, 4
+    qkv, out, forward = _gqa_pieces(n_heads, n_kv, hd)
+
+    before = forward()
+    rotate_value_heads(
+        qkv, out, n_heads, hd, random_hadamard_matrix(hd, seed=2),
+        v_offset=(n_heads + n_kv) * hd, n_kv_heads=n_kv,
+    )
+    assert torch.allclose(forward(), before, atol=1e-4)
+
+
+def test_a_v_block_that_overruns_the_projection_is_refused():
+    """Without n_kv_heads the block is four times too tall for this weight."""
+    torch.manual_seed(0)
+    n_heads, n_kv, hd = 4, 2, 4
+    qkv, out, _ = _gqa_pieces(n_heads, n_kv, hd)
+
+    with pytest.raises(ValueError, match="does not fit"):
+        rotate_value_heads(
+            qkv, out, n_heads, hd, random_hadamard_matrix(hd, seed=2),
+            v_offset=(n_heads + n_kv) * hd,
+        )
+
+
 def test_r4_preserves_attention_scores_exactly():
     """(QH)(KH)ᵀ = QKᵀ -- the rotation cancels inside the score matmul."""
     torch.manual_seed(4)

@@ -318,6 +318,7 @@ def rotate_value_heads(
     head_dim: int,
     h: torch.Tensor,
     v_offset: Optional[int] = None,
+    n_kv_heads: Optional[int] = None,
 ) -> None:
     """Rotate each attention head's value subspace (QuaRot's R3).
 
@@ -328,19 +329,35 @@ def rotate_value_heads(
     left for the shared per-feature scale to accommodate.
 
     ``v_offset`` is the column at which V starts inside a fused QKV projection.
+
+    Under grouped-query attention the two sides have *different* head counts:
+    V holds ``n_kv_heads`` heads while the out-projection consumes ``n_heads``
+    of them, each query head reading the KV head it was grouped with.  Since
+    one ``H`` is shared by every head here, the out-projection side is
+    unaffected by the grouping -- but the V side is, and reshaping 4 KV heads
+    as if they were 16 reinterprets the matrix instead of rotating it.
     """
     hd = h.to(torch.float64)
     if h.shape != (head_dim, head_dim):
         raise ValueError(f"head rotation must be {head_dim}x{head_dim}, got {h.shape}")
 
+    kv_heads = n_kv_heads or n_heads
     w = v_proj.weight.data
     lo = 0 if v_offset is None else v_offset
-    hi = lo + n_heads * head_dim
-    block = w[lo:hi, :].to(torch.float64).reshape(n_heads, head_dim, -1)
+    hi = lo + kv_heads * head_dim
+    if hi > w.shape[0]:
+        # Slicing past the end clips silently, and the reshape that follows
+        # then succeeds on the wrong number of rows.
+        raise ValueError(
+            f"V block [{lo}:{hi}] does not fit in a projection with "
+            f"{w.shape[0]} rows -- check n_kv_heads ({kv_heads}) and the "
+            f"fused-QKV offset"
+        )
+    block = w[lo:hi, :].to(torch.float64).reshape(kv_heads, head_dim, -1)
     block = torch.einsum("ij,hjk->hik", hd.t(), block)
-    w[lo:hi, :] = block.reshape(n_heads * head_dim, -1).to(w.dtype)
+    w[lo:hi, :] = block.reshape(kv_heads * head_dim, -1).to(w.dtype)
     if v_proj.bias is not None:
-        b = v_proj.bias.data[lo:hi].to(torch.float64).reshape(n_heads, head_dim)
+        b = v_proj.bias.data[lo:hi].to(torch.float64).reshape(kv_heads, head_dim)
         v_proj.bias.data[lo:hi] = (b @ hd).reshape(-1).to(v_proj.bias.dtype)
 
     wo = out_proj.weight.data

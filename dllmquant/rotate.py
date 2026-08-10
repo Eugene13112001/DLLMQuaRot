@@ -120,7 +120,8 @@ def apply_quarot(adapter: ModelAdapter, cfg: DLLMQuantConfig) -> RotationReport:
         )
         for v_proj, out_proj, v_offset in plan.head_pairs:
             rotate_value_heads(
-                v_proj, out_proj, adapter.n_heads, adapter.head_dim, h, v_offset
+                v_proj, out_proj, adapter.n_heads, adapter.head_dim, h, v_offset,
+                n_kv_heads=adapter.n_kv_heads,
             )
 
     # --- R2: online Hadamard in front of the MLP down-projection -------------

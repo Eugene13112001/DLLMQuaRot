@@ -214,6 +214,10 @@ def main() -> int:
         except Exception:
             print(FAIL, "rotation raised:")
             traceback.print_exc()
+            print(FAIL, "rotation mutates weights in place, so it stopped "
+                        "part-way through and the model is now inconsistent. "
+                        "Checks below run on that model -- read them as noise, "
+                        "not as findings.")
             failures += 1
 
     # 6 -- linears can be wrapped and the block still runs -------------------
