@@ -28,6 +28,18 @@ from dllmquant.rotate import apply_quarot  # noqa: E402
 
 OK, FAIL, WARN = "  [ok]  ", "  [FAIL]", "  [warn]"
 
+# torch.OutOfMemoryError since 2.5; the cuda-namespaced one before that.
+_OOM = getattr(torch, "OutOfMemoryError", torch.cuda.OutOfMemoryError)
+
+
+def _print_gpu_memory(label: str = "") -> None:
+    if not torch.cuda.is_available():
+        return
+    free, total = torch.cuda.mem_get_info()
+    held = torch.cuda.memory_allocated()
+    print(f"  {label}GPU: {free / 2**30:.2f} GB free of {total / 2**30:.1f} GB, "
+          f"{held / 2**30:.1f} GB held by this process")
+
 
 def representative_block(adapter):
     """The first block that has experts, else block 0.
@@ -86,6 +98,9 @@ def main() -> int:
     try:
         adapter.load()
         print(OK, adapter.describe())
+        # The headroom that matters is what is left *after* the weights land,
+        # and on a shared node it is not what was free at launch.
+        _print_gpu_memory("after load: ")
     except Exception:
         print(FAIL, "load/validate raised:")
         traceback.print_exc()
@@ -201,6 +216,7 @@ def main() -> int:
 
     # 6 -- linears can be wrapped and the block still runs -------------------
     print("\n=== 6. QuantLinear wrapping ===")
+    replaced = None  # distinct from "wrapped nothing", which is a real failure
     try:
         replaced = wrap_linears(
             block, cfg.weight, cfg.activation, skip=cfg.skip,
@@ -210,6 +226,13 @@ def main() -> int:
         if not replaced:
             print(FAIL, "nothing was wrapped -- skip_patterns are too broad")
             failures += 1
+    except _OOM:
+        # Not an adapter problem, and calling it one sends you to read the
+        # wrong code.  On a shared node the card can fill up between the load
+        # and this line -- it did, mid-run, while checks 1-4 were passing.
+        print(WARN, "out of memory while wrapping: the GPU filled up, the "
+                    "adapter is not implicated. Free memory below, then rerun.")
+        _print_gpu_memory()
     except Exception:
         print(FAIL, "wrap_linears raised:")
         traceback.print_exc()
@@ -217,13 +240,18 @@ def main() -> int:
 
     # 7 -- value projection is reachable for IA-AQ ---------------------------
     print("\n=== 7. value projection ===")
-    leaves = {n.split(".")[-1] for n in replaced} if replaced else set()
-    v_like = leaves & set(VALUE_BEARING_NAMES)
-    if v_like:
-        print(OK, f"IA-AQ will attach to {sorted(v_like)}")
+    if replaced is None:
+        print(WARN, "skipped: nothing was wrapped to look at")
     else:
-        print(FAIL, f"no value projection among {sorted(leaves)}; IA-AQ would be a no-op")
-        failures += 1
+        leaves = {n.split(".")[-1] for n in replaced}
+        v_like = leaves & set(VALUE_BEARING_NAMES)
+        if v_like:
+            print(OK, f"IA-AQ will attach to {sorted(v_like)}")
+        else:
+            print(FAIL,
+                  f"no value projection among {sorted(leaves)}; "
+                  "IA-AQ would be a no-op")
+            failures += 1
 
     # 8 -- MoE expert coverage ----------------------------------------------
     if args.model_type == "llada2_moe":
