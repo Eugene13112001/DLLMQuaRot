@@ -219,8 +219,12 @@ def _suggest(minimum: VersionBound, maximum: VersionBound) -> str:
     return "4.46.3"
 
 
-def ensure_tied_weights_attr(cfg) -> bool:
+def ensure_tied_weights_attr(cfg, model_config=None) -> bool:
     """Make LLaDA's remote code loadable under a modern transformers.
+
+    ``model_config`` short-circuits the AutoConfig lookup, which otherwise
+    fetches the checkpoint's remote configuration class -- pointless, and a
+    network dependency, when the caller already holds a vendored config.
 
     Transformers ~4.57 reads ``model.all_tied_weights_keys`` in several places
     along the loading path (device-map inference, then
@@ -244,9 +248,14 @@ def ensure_tied_weights_attr(cfg) -> bool:
     if hasattr(base, "all_tied_weights_keys"):
         return False  # this transformers already provides a class-level default
 
-    from transformers import AutoConfig
+    if model_config is None:
+        from transformers import AutoConfig
 
-    conf = AutoConfig.from_pretrained(cfg.model_path, trust_remote_code=True)
+        model_config = AutoConfig.from_pretrained(
+            cfg.model_path, trust_remote_code=True
+        )
+
+    conf = model_config
     tied = getattr(conf, "weight_tying", None)
     if tied is None:
         tied = getattr(conf, "tie_word_embeddings", None)
@@ -270,6 +279,7 @@ def load_pretrained(
     cfg,
     minimum: VersionBound = None,
     maximum: VersionBound = None,
+    model_config=None,
 ):
     """Load a checkpoint, avoiding accelerate's device-map inference by default.
 
@@ -288,12 +298,16 @@ def load_pretrained(
         strict=not getattr(cfg, "allow_untested", False),
         model=cfg.model_path or "this checkpoint",
     )
-    if ensure_tied_weights_attr(cfg):
+    if ensure_tied_weights_attr(cfg, model_config):
         print("[compat] installed PreTrainedModel.all_tied_weights_keys = {} "
               "(checkpoint reports weight_tying=False)")
 
     dtype = getattr(_torch, cfg.dtype)
     kwargs = {"trust_remote_code": True, **_dtype_kwargs(dtype)}
+    if model_config is not None:
+        # A vendored config: hand it over so from_pretrained does not go and
+        # fetch the checkpoint's own configuration class instead.
+        kwargs["config"] = model_config
 
     if cfg.device_map:
         kwargs["device_map"] = cfg.device_map

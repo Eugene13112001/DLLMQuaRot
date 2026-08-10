@@ -39,6 +39,7 @@ import torch.nn as nn
 from ..config import DLLMQuantConfig
 from .base import (
     ArchitectureMismatch,
+    check_transformers_version,
     discover_blocks,
     find_submodule,
     load_pretrained,
@@ -177,14 +178,34 @@ class LLaDA2MoEAdapter(LLaDAAdapter):
         self.block_length = cfg.tmas.block_length
 
     def load(self) -> None:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoTokenizer
 
+        # Before importing the vendored modelling code, which fails on an
+        # unhelpful missing symbol under an old transformers. This raises with
+        # the version window instead.
+        check_transformers_version(
+            minimum=self.TRANSFORMERS_MIN,
+            maximum=self.TRANSFORMERS_MAX,
+            strict=not getattr(self.cfg, "allow_untested", False),
+            model=self.cfg.model_path or "this checkpoint",
+        )
+        from ..vendor.llada2_moe import REVISION
+        from ..vendor.llada2_moe.configuration_llada2_moe import LLaDA2MoeConfig
+        from ..vendor.llada2_moe.modeling_llada2_moe import LLaDA2MoeModelLM
+
+        self.code_revision = REVISION
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.cfg.model_path, trust_remote_code=True
         )
+        # The checkpoint's own classes, pinned in this repository rather than
+        # downloaded per run: the KV cache and R4 both have to be inserted
+        # inside attention, and a file that can change between runs is not
+        # something to measure against.
+        model_config = LLaDA2MoeConfig.from_pretrained(self.cfg.model_path)
         self.model = load_pretrained(
-            AutoModelForCausalLM, self.cfg,
+            LLaDA2MoeModelLM, self.cfg,
             self.TRANSFORMERS_MIN, self.TRANSFORMERS_MAX,
+            model_config=model_config,
         )
         self.model.eval()
         self.mask_id = self._discover_mask_id()
@@ -354,8 +375,10 @@ class LLaDA2MoEAdapter(LLaDAAdapter):
         return out
 
     def describe(self) -> str:
+        revision = getattr(self, "code_revision", "?")[:7]
         return (
-            f"LLaDA2MoEAdapter: {len(self.blocks)} blocks at '{self._blocks_path}', "
+            f"LLaDA2MoEAdapter [code {revision}]: "
+            f"{len(self.blocks)} blocks at '{self._blocks_path}', "
             f"heads={self.n_heads}, kv_heads={self.n_kv_heads}, "
             f"head_dim={self.head_dim}, mask_id={self.mask_id}, "
             f"expert containers={getattr(self, '_n_expert_containers', '?')}"
