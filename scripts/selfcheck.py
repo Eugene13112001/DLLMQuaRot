@@ -83,6 +83,7 @@ def main() -> int:
         allow_untested=args.allow_untested_transformers,
     )
     failures = 0
+    skipped: list[str] = []
 
     import transformers
     print(f"torch {torch.__version__} · transformers {transformers.__version__} · "
@@ -233,6 +234,7 @@ def main() -> int:
         print(WARN, "out of memory while wrapping: the GPU filled up, the "
                     "adapter is not implicated. Free memory below, then rerun.")
         _print_gpu_memory()
+        skipped.append("6 (QuantLinear wrapping)")
     except Exception:
         print(FAIL, "wrap_linears raised:")
         traceback.print_exc()
@@ -242,6 +244,7 @@ def main() -> int:
     print("\n=== 7. value projection ===")
     if replaced is None:
         print(WARN, "skipped: nothing was wrapped to look at")
+        skipped.append("7 (value projection)")
     else:
         leaves = {n.split(".")[-1] for n in replaced}
         v_like = leaves & set(VALUE_BEARING_NAMES)
@@ -268,6 +271,12 @@ def main() -> int:
             # answers is whether routing is observable at all -- the budget
             # question needs a real calibration run.
             print(adapter.coverage.report(min_tokens=1))
+            print("  (one prompt, and routing is deterministic, so most experts "
+                  "seeing nothing here is expected -- what this check answers "
+                  "is whether routing is observable at all. Note the spread "
+                  "between median and max: usage is concentrated, so a "
+                  "calibration budget sized off the mean will still starve "
+                  "the median expert.)")
         except Exception:
             print(WARN, "expert coverage probe failed:")
             traceback.print_exc()
@@ -275,6 +284,12 @@ def main() -> int:
     print("\n" + "=" * 60)
     if failures:
         print(f"{failures} check(s) FAILED -- fix the adapter before quantizing")
+    elif skipped:
+        # "all checks passed" over a run that skipped two of them is how an
+        # unverified adapter gets launched into a six-hour job.
+        print(f"no failures, but {len(skipped)} check(s) never ran: "
+              f"{', '.join(skipped)}")
+        print("the adapter is not cleared until they do")
     else:
         print("all checks passed")
     return 1 if failures else 0

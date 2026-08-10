@@ -145,8 +145,10 @@ class ExpertCoverage:
                 f"max {int(counts.max())} tokens; {starved} below {min_tokens}"
             )
         if starved_total:
+            total = sum(len(c) for c in self.counts.values())
             lines.append(
-                f"  !! {starved_total} expert projections will be solved from an "
+                f"  !! {starved_total} of {total} expert projections saw fewer "
+                f"than {min_tokens} tokens and would be solved from an "
                 f"under-determined Hessian. Raise tmas.n_samples or "
                 f"tmas.gen_length, or quantize starved experts with RTN."
             )
