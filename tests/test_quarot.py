@@ -119,6 +119,48 @@ def test_residual_rotation_leaves_the_function_unchanged():
     assert torch.allclose(adapter.model(ids).logits, before, atol=2e-3)
 
 
+@pytest.mark.parametrize("chunk", [8, 64, 4096])
+def test_chunked_rotation_equals_the_whole_matrix(monkeypatch, chunk):
+    """The chunking exists for memory, so it must change nothing else.
+
+    A 157184 x 2048 embedding in float64 is 2.6 GB in and 2.6 GB out, which
+    does not fit beside a model already filling the card -- but a chunk loop
+    that drops or misplaces a slice would corrupt weights silently, and the
+    rotation's own invariance check would then blame the rotation.
+    """
+    from dllmquant.algos import quarot as q
+
+    torch.manual_seed(0)
+    w = torch.randn(37, 16)  # deliberately not a multiple of any chunk
+    rot = random_hadamard_matrix(16, seed=3).to(torch.float64)
+
+    whole_right = (w.to(torch.float64) @ rot).to(w.dtype)
+    whole_left = (rot.t() @ w.t().to(torch.float64)).to(w.dtype)
+
+    monkeypatch.setattr(q, "_ROTATE_CHUNK_ELEMS", chunk)
+    assert torch.equal(q._rotate_right(w, rot), whole_right)
+    assert torch.equal(q._rotate_left(w.t().contiguous(), rot), whole_left)
+
+
+def test_chunked_residual_rotation_is_still_invariant(monkeypatch):
+    from dllmquant.algos import quarot as q
+
+    torch.manual_seed(0)
+    monkeypatch.setattr(q, "_ROTATE_CHUNK_ELEMS", 8)  # forces many chunks
+    cfg = _config()
+    adapter = TinyAdapter(cfg)
+    adapter.load()
+    ids = torch.randint(0, VOCAB - 1, (1, 10))
+
+    before = adapter.model(ids).logits.clone()
+    plan = adapter.rotation_plan()
+    for norm, consumers in plan.norm_groups:
+        fuse_norm_into_linears(norm, consumers)
+    rotate_residual_stream(plan, random_hadamard_matrix(D, seed=1))
+
+    assert torch.allclose(adapter.model(ids).logits, before, atol=2e-3)
+
+
 def test_value_head_rotation_leaves_the_function_unchanged():
     torch.manual_seed(0)
     cfg = _config()

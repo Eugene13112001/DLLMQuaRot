@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
+from collections import Counter
 
 import torch
 
@@ -223,7 +224,14 @@ def main() -> int:
             block, cfg.weight, cfg.activation, skip=cfg.skip,
             prefix=f"blocks.{block_idx}",
         )
-        print(OK, f"wrapped {len(replaced)} linears: {sorted(n.split('.')[-1] for n in replaced)}")
+        # Counted by leaf name: an MoE block has 773 of them and the flat list
+        # is unreadable. The counts also carry information -- 257 of each
+        # expert projection is 256 experts plus the shared one.
+        kinds = Counter(n.split(".")[-1] for n in replaced)
+        shape = ", ".join(
+            f"{k} x{v}" if v > 1 else k for k, v in sorted(kinds.items())
+        )
+        print(OK, f"wrapped {len(replaced)} linears: {shape}")
         if not replaced:
             print(FAIL, "nothing was wrapped -- skip_patterns are too broad")
             failures += 1

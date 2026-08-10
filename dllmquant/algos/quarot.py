@@ -249,6 +249,47 @@ class RotationPlan:
                 )
 
 
+# Elements per float64 temporary while rotating. 2**23 is 64 MB in, 64 MB
+# out -- small enough to fit beside a model that already fills the card,
+# large enough that the chunk loop costs nothing measurable.
+_ROTATE_CHUNK_ELEMS = 2**23
+
+
+@torch.no_grad()
+def _rotate_right(w: torch.Tensor, qd: torch.Tensor) -> torch.Tensor:
+    """``w @ qd`` in float64, in row chunks, returned in w's own dtype.
+
+    float64 is not negotiable here -- a rotation applied in bf16 loses more
+    than the rotation buys -- but it costs four bytes per element over bf16,
+    for the input and again for the result.  On a 157184 x 2048 embedding that
+    is 2.6 GB each way, which is the difference between rotating on a shared
+    card and not.  Chunking bounds the temporary without touching the result.
+    """
+    rows = max(1, _ROTATE_CHUNK_ELEMS // max(w.shape[-1], 1))
+    if w.shape[0] <= rows:
+        return (w.to(torch.float64) @ qd).to(w.dtype)
+
+    out = torch.empty_like(w)
+    for i in range(0, w.shape[0], rows):
+        out[i : i + rows] = (w[i : i + rows].to(torch.float64) @ qd).to(w.dtype)
+    return out
+
+
+@torch.no_grad()
+def _rotate_left(w: torch.Tensor, qd: torch.Tensor) -> torch.Tensor:
+    """``qd.T @ w``, chunked along w's columns for the same reason."""
+    cols = max(1, _ROTATE_CHUNK_ELEMS // max(w.shape[0], 1))
+    if w.shape[-1] <= cols:
+        return (qd.t() @ w.to(torch.float64)).to(w.dtype)
+
+    out = torch.empty_like(w)
+    for j in range(0, w.shape[-1], cols):
+        out[:, j : j + cols] = (qd.t() @ w[:, j : j + cols].to(torch.float64)).to(
+            w.dtype
+        )
+    return out
+
+
 @torch.no_grad()
 def rotate_residual_stream(plan: RotationPlan, q: torch.Tensor) -> None:
     """Apply h -> h @ Q throughout, leaving the function unchanged."""
@@ -257,16 +298,13 @@ def rotate_residual_stream(plan: RotationPlan, q: torch.Tensor) -> None:
     qd = q.to(torch.float64)
 
     for emb in plan.embeddings:
-        w = emb.weight.data
-        emb.weight.data = (w.to(torch.float64) @ qd).to(w.dtype)
+        emb.weight.data = _rotate_right(emb.weight.data, qd)
 
     for lin in plan.input_linears:
-        w = lin.weight.data
-        lin.weight.data = (w.to(torch.float64) @ qd).to(w.dtype)
+        lin.weight.data = _rotate_right(lin.weight.data, qd)
 
     for lin in plan.output_linears:
-        w = lin.weight.data
-        lin.weight.data = (qd.t() @ w.to(torch.float64)).to(w.dtype)
+        lin.weight.data = _rotate_left(lin.weight.data, qd)
         if lin.bias is not None:
             b = lin.bias.data
             lin.bias.data = (b.to(torch.float64) @ qd).to(b.dtype)
@@ -394,8 +432,7 @@ def install_online_hadamard(down_proj: nn.Linear) -> None:
             "skip the online rotation for this model"
         )
     h = hadamard_matrix(n, device=down_proj.weight.device, dtype=torch.float64)
-    w = down_proj.weight.data
-    down_proj.weight.data = (w.to(torch.float64) @ h).to(w.dtype)
+    down_proj.weight.data = _rotate_right(down_proj.weight.data, h)
 
 
 __all__ = [
