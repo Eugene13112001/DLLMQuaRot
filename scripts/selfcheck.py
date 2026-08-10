@@ -123,8 +123,9 @@ def main() -> int:
     try:
         probe = adapter.make_probe(block)
         captured = None
+        ids = prompt.unsqueeze(0).to(next(adapter.model.parameters()).device)
         with probe:
-            adapter.model(prompt.unsqueeze(0).to(next(adapter.model.parameters()).device))
+            adapter.model(ids, **adapter.forward_kwargs(ids))
             # parts are released on __exit__, so read them inside the scope.
             if probe.parts is not None:
                 captured = (
@@ -210,9 +211,9 @@ def main() -> int:
         print("\n=== 8. expert coverage ===")
         try:
             adapter.coverage.attach(adapter.model)
+            ids = prompt.unsqueeze(0).to(next(adapter.model.parameters()).device)
             for _ in range(2):
-                adapter.model(prompt.unsqueeze(0).to(
-                    next(adapter.model.parameters()).device))
+                adapter.model(ids, **adapter.forward_kwargs(ids))
             adapter.coverage.detach()
             print(adapter.coverage.report())
         except Exception:

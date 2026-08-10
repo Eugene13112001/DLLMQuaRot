@@ -90,7 +90,10 @@ def apply_quarot(adapter: ModelAdapter, cfg: DLLMQuantConfig) -> RotationReport:
 
     # --- reference behaviour, sampled across the trajectory -----------------
     states = _trajectory_states(adapter, cfg)
-    reference = {k: adapter.model(v).logits.float().clone() for k, v in states.items()}
+    reference = {
+        k: adapter.model(v, **adapter.forward_kwargs(v)).logits.float().clone()
+        for k, v in states.items()
+    }
     for k, v in states.items():
         report.outliers_before[k] = crest_factor(_hidden_at_block0(adapter, v))
 
@@ -131,7 +134,7 @@ def apply_quarot(adapter: ModelAdapter, cfg: DLLMQuantConfig) -> RotationReport:
 
     # --- verification --------------------------------------------------------
     for k, v in states.items():
-        after = adapter.model(v).logits.float()
+        after = adapter.model(v, **adapter.forward_kwargs(v)).logits.float()
         denom = reference[k].abs().mean().clamp(min=1e-6)
         report.invariance[k] = float((after - reference[k]).abs().mean() / denom)
         report.outliers_after[k] = crest_factor(_hidden_at_block0(adapter, v))
@@ -210,7 +213,7 @@ def _hidden_at_block0(adapter: ModelAdapter, ids: torch.Tensor) -> torch.Tensor:
 
     handle = adapter.blocks[0].register_forward_hook(hook, with_kwargs=True)
     try:
-        adapter.model(ids)
+        adapter.model(ids, **adapter.forward_kwargs(ids))
     finally:
         handle.remove()
     if not grabbed:

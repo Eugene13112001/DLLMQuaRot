@@ -121,6 +121,11 @@ class LLaDA2MoEAdapter(LLaDAAdapter):
         super().__init__(cfg)
         self.mask_id = -1  # discovered from the checkpoint
         self.coverage = ExpertCoverage()
+        # The attention mask and the sampler must be built on the *same* block
+        # grid, so the two share this one number.  ``_sequence_layout`` updates
+        # it from whatever TMASConfig the caller passed, because callers do
+        # pass a different one than cfg.tmas (selfcheck, for instance).
+        self.block_length = cfg.tmas.block_length
 
     def load(self) -> None:
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -157,6 +162,89 @@ class LLaDA2MoEAdapter(LLaDAAdapter):
             "Set it explicitly: adapter.mask_id = <id>. Check the model card "
             "or tokenizer.added_tokens_decoder for the [MASK] entry."
         )
+
+    # ----------------------------------------------------------- block masking
+
+    def block_attention_mask(
+        self,
+        seq_len: int,
+        block_length: int,
+        *,
+        batch_size: int = 1,
+        device=None,
+        dtype=None,
+    ) -> torch.Tensor:
+        """The block-diffusion mask LLaDA2.0's remote code demands.
+
+        Additive, ``[B, 1, T, T]``, ``0`` where a query may attend and ``-inf``
+        where it may not: bidirectional inside a block, visible to every
+        earlier block, blind to later ones.  Built exactly as the checkpoint's
+        own sampler builds it -- ``tril`` over blocks, expanded to tokens, then
+        ``log()`` to turn 1/0 into 0/-inf.
+
+        The shape is checked for equality, not broadcast, by the remote code,
+        and a 4-D mask is passed through ``_prepare_4d_causal_attention_mask_
+        for_sdpa`` untouched -- no causality is added on top -- so this mask is
+        the whole story about what attends to what.
+        """
+        n_blocks = (seq_len + block_length - 1) // block_length
+        allowed = torch.tril(torch.ones(n_blocks, n_blocks, device=device))
+        expanded = allowed.repeat_interleave(block_length, dim=0).repeat_interleave(
+            block_length, dim=1
+        )[:seq_len, :seq_len]
+        mask = expanded.log().to(dtype)
+        return mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, seq_len, seq_len)
+
+    def forward_kwargs(self, input_ids: torch.Tensor) -> Dict[str, object]:
+        """LLaDA2.0 raises on a missing mask instead of assuming full attention.
+
+        Its ``forward`` reads ``attention_mask.size()`` unguarded, so ``None``
+        is an AttributeError several frames deep rather than a default.
+        """
+        ids = input_ids if input_ids.dim() > 1 else input_ids.unsqueeze(0)
+        param = next(self.model.parameters())
+        return {
+            "attention_mask": self.block_attention_mask(
+                ids.shape[-1],
+                self.block_length,
+                batch_size=ids.shape[0],
+                device=param.device,
+                dtype=param.dtype,
+            )
+        }
+
+    def _probe_rotary_dim(self) -> Optional[int]:
+        """LLaDA2.0 rotates ``head_dim * partial_rotary_factor`` channels only."""
+        cfg = self.model.config
+        rotary_dim = getattr(cfg, "rotary_dim", None)
+        if isinstance(rotary_dim, int) and rotary_dim > 0:
+            return rotary_dim
+        factor = getattr(cfg, "partial_rotary_factor", 1.0) or 1.0
+        return int(self.head_dim * factor)
+
+    def _probe_attn_mask_fn(self):
+        def mask_fn(seq_len: int, device, dtype):
+            return self.block_attention_mask(
+                seq_len, self.block_length, device=device, dtype=dtype
+            )
+
+        return mask_fn
+
+    def _sequence_layout(self, p_len: int, cfg) -> tuple:
+        """Blocks sit on a grid anchored at position 0, not at the prompt end.
+
+        The mask is built from that grid, so a decoding block that straddled a
+        grid boundary would lose bidirectionality over its own first half --
+        silently, as slightly worse text.  Following the checkpoint's sampler:
+        the prompt's own last block is decoded together with the masks that
+        share it, and the sequence is rounded up to a whole number of blocks.
+        """
+        b = cfg.block_length
+        self.block_length = b
+        n_blocks = (p_len + cfg.gen_length + b - 1) // b
+        first = p_len // b  # blocks lying entirely inside the prompt
+        bounds = [(i * b, (i + 1) * b) for i in range(first, n_blocks)]
+        return n_blocks * b, bounds
 
     # ------------------------------------------------------------- structure
 

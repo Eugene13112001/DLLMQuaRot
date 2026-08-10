@@ -233,7 +233,8 @@ class DLLMQuantPipeline:
         device = next(self.adapter.model.parameters()).device
         for i, snap in enumerate(snapshots):
             try:
-                self.adapter.model(snap.input_ids.unsqueeze(0).to(device))
+                ids = snap.input_ids.unsqueeze(0).to(device)
+                self.adapter.model(ids, **self.adapter.forward_kwargs(ids))
             except _Stop:
                 pass
             if verbose and (i + 1) % 32 == 0:

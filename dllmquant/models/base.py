@@ -14,15 +14,23 @@ before a long job.
 
 from __future__ import annotations
 
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
 
 from ..calib.tmas import Snapshot
 from ..config import TMASConfig
+
+# Leaf names that mark a module as an attention layer.  Used to tell a decoder
+# block apart from the other uniform ModuleLists a model may contain.
+_ATTENTION_NAMES = (
+    "self_attn", "attention", "attn", "att_proj", "attn_out",
+    "q_proj", "wq", "qkv_proj", "Wqkv",
+)
 
 
 class ArchitectureMismatch(RuntimeError):
@@ -302,29 +310,51 @@ def load_pretrained(
     return model
 
 
+def _contains_attention(module: nn.Module) -> bool:
+    """Whether a module has anything that looks like an attention projection."""
+    return any(
+        name.split(".")[-1] in _ATTENTION_NAMES for name, _ in module.named_modules()
+    )
+
+
 def discover_blocks(model: nn.Module) -> Tuple[str, nn.ModuleList]:
     """Find the transformer block list without hardcoding a module path.
 
-    Returns the qualified name and the ModuleList.  Picks the longest
-    ``nn.ModuleList`` whose entries all share one class -- for every decoder
-    stack that is the layer list and nothing else.
+    Returns the qualified name and the ModuleList.  Candidates are
+    ``nn.ModuleList``s whose entries all share one class; among those, the one
+    whose entries contain attention wins, and length breaks ties.
+
+    Attention is the filter rather than length because in an MoE the expert
+    list is *longer than the layer list* -- LLaDA2.0-mini has 20 layers and 256
+    experts in each -- so "longest ModuleList" picks ``layers.1.mlp.experts``.
+    Nothing downstream notices: the rotation plan, CGQ grouping and the
+    attention probe all just operate on one layer's experts and report
+    plausible-looking numbers for a model that was never touched.
     """
-    best: Optional[Tuple[str, nn.ModuleList]] = None
+    candidates: List[Tuple[str, nn.ModuleList]] = []
     for name, module in model.named_modules():
         if not isinstance(module, nn.ModuleList) or len(module) < 2:
             continue
-        classes = {type(m) for m in module}
-        if len(classes) != 1:
+        if len({type(m) for m in module}) != 1:
             continue
-        if best is None or len(module) > len(best[1]):
-            best = (name, module)
+        candidates.append((name, module))
 
-    if best is None:
+    if not candidates:
         raise ArchitectureMismatch(
             "could not find a transformer block list in this model; "
             "pass the module path explicitly"
         )
-    return best
+
+    with_attention = [c for c in candidates if _contains_attention(c[1][0])]
+    if not with_attention:
+        warnings.warn(
+            "no ModuleList whose entries contain attention; falling back to the "
+            "longest one, which in an MoE is likely the expert list rather than "
+            "the layers. Check the path printed by describe().",
+            RuntimeWarning,
+        )
+    pool = with_attention or candidates
+    return max(pool, key=lambda c: len(c[1]))
 
 
 def find_submodule(root: nn.Module, names: Sequence[str]) -> Optional[nn.Module]:
@@ -334,6 +364,12 @@ def find_submodule(root: nn.Module, names: Sequence[str]) -> Optional[nn.Module]
             if mod_name.split(".")[-1] == name:
                 return module
     return None
+
+
+def _split_evenly(total: int, parts: int) -> List[int]:
+    """Split ``total`` into ``parts`` near-equal integers, remainder first."""
+    base, remainder = divmod(total, parts)
+    return [base + (1 if i < remainder else 0) for i in range(parts)]
 
 
 def get_num_transfer_tokens(mask_index: torch.Tensor, steps: int) -> torch.Tensor:
@@ -379,6 +415,38 @@ class ModelAdapter(ABC):
         what happens before block 0.
         """
 
+    # ------------------------------------------------------------ forward
+
+    def forward_kwargs(self, input_ids: torch.Tensor) -> Dict[str, Any]:
+        """Extra arguments this model's forward needs beyond ``input_ids``.
+
+        Empty for LLaDA-1.5, which attends over everything and is happy with
+        ``model(x)``.  LLaDA2.0 refuses to run without an explicit 4-D block
+        attention mask, so it fills this in.  Every call site that runs the
+        model -- sampler, calibration capture, rotation check, probes -- goes
+        through here so the two families cannot drift apart.
+        """
+        return {}
+
+    def _sequence_layout(
+        self, p_len: int, cfg: TMASConfig
+    ) -> Tuple[int, List[Tuple[int, int]]]:
+        """Total sequence length and the ``[lo, hi)`` span of each block.
+
+        LLaDA-1.5 attends over the whole sequence, so its blocks start wherever
+        the prompt happens to end and nothing else has to line up.  Block
+        diffusion models pin their blocks to a grid anchored at position 0 --
+        the attention mask is built from that grid -- and override this.
+        """
+        if cfg.gen_length % cfg.block_length != 0:
+            raise ValueError("gen_length must be divisible by block_length")
+        n_blocks = cfg.gen_length // cfg.block_length
+        bounds = [
+            (p_len + i * cfg.block_length, p_len + (i + 1) * cfg.block_length)
+            for i in range(n_blocks)
+        ]
+        return p_len + cfg.gen_length, bounds
+
     # ------------------------------------------------------------ generation
 
     @torch.no_grad()
@@ -413,28 +481,33 @@ class ModelAdapter(ABC):
             prompt_ids = prompt_ids.unsqueeze(0)
 
         p_len = prompt_ids.shape[1]
-        total_len = p_len + cfg.gen_length
+        total_len, bounds = self._sequence_layout(p_len, cfg)
         x = torch.full(
             (1, total_len), self.mask_id, dtype=torch.long, device=device
         )
         x[:, :p_len] = prompt_ids
 
-        if cfg.gen_length % cfg.block_length != 0:
-            raise ValueError("gen_length must be divisible by block_length")
-        n_blocks = cfg.gen_length // cfg.block_length
-        if cfg.steps % n_blocks != 0:
-            raise ValueError("steps must be divisible by the number of blocks")
-        steps_per_block = cfg.steps // n_blocks
+        if cfg.steps < len(bounds):
+            raise ValueError(
+                f"{cfg.steps} steps cannot cover {len(bounds)} blocks -- some "
+                "block would never be visited and stay masked"
+            )
+        # Even split, remainder front-loaded.  With the LLaDA-1.5 layout and a
+        # divisible step count this is exactly the old steps // n_blocks; the
+        # block-diffusion layout derives its block count from the prompt
+        # length, which the caller does not control, so it cannot demand
+        # divisibility.
+        schedule = _split_evenly(cfg.steps, len(bounds))
 
-        for block_idx in range(n_blocks):
-            lo = p_len + block_idx * cfg.block_length
-            hi = p_len + (block_idx + 1) * cfg.block_length
+        step_offset = 0
+        for block_idx, (lo, hi) in enumerate(bounds):
+            steps_per_block = schedule[block_idx]
             block_mask = x[:, lo:hi] == self.mask_id
             budget = get_num_transfer_tokens(block_mask, steps_per_block)
 
             for step in range(steps_per_block):
                 mask_index = x == self.mask_id
-                logits = self.model(x).logits
+                logits = self.model(x, **self.forward_kwargs(x)).logits
 
                 probs = torch.softmax(logits.to(torch.float32), dim=-1)
                 conf_all, x0 = probs.max(dim=-1)
@@ -453,7 +526,7 @@ class ModelAdapter(ABC):
                             input_ids=x[0].detach().cpu().clone(),
                             mask=mask_index[0].detach().cpu().clone(),
                             confidence=conf[0].detach().float().cpu().clone(),
-                            step=block_idx * steps_per_block + step,
+                            step=step_offset + step,
                             total_steps=cfg.steps,
                             block_idx=block_idx,
                             mask_ratio=float(resp_mask.float().mean()),
@@ -468,6 +541,8 @@ class ModelAdapter(ABC):
                     )
                     idx = torch.topk(score[0], k=min(k, int(selectable.sum()))).indices
                     x[0, idx] = x0[0, idx]
+
+            step_offset += steps_per_block
 
         return x
 

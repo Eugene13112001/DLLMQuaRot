@@ -76,6 +76,8 @@ class LLaDAAttentionProbe(AttentionProbe):
         head_dim: int,
         rotary: Optional[nn.Module] = None,
         rope_theta: float = 0.0,
+        rotary_dim: Optional[int] = None,
+        attn_mask_fn=None,
     ):
         super().__init__(block)
         self.n_heads = n_heads
@@ -84,6 +86,14 @@ class LLaDAAttentionProbe(AttentionProbe):
         self.rotary = rotary
         self.rope_theta = rope_theta
         self.rope_applied = False
+        # LLaDA2.0 rotates only the first half of each head (partial_rotary_
+        # factor 0.5) and leaves the rest untouched; LLaDA-1.5 rotates all of
+        # it.  Rotating channels the model never rotates changes Q/K and so
+        # the importance ranking IA-AQ reads off the softmax.
+        self.rotary_dim = rotary_dim or head_dim
+        # Block-diffusion attention is not bidirectional across blocks.  With
+        # no mask the probe would credit tokens the model cannot see.
+        self.attn_mask_fn = attn_mask_fn
 
         self.fused = find_submodule(block, _QKV_FUSED_NAMES)
         self.q = find_submodule(block, _Q_NAMES)
@@ -161,7 +171,7 @@ class LLaDAAttentionProbe(AttentionProbe):
         positional rotation and calling the resulting attention weights
         "approximate".
         """
-        dim = self.head_dim
+        dim = self.rotary_dim
         inv_freq = 1.0 / (
             self.rope_theta
             ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim)
@@ -189,10 +199,24 @@ class LLaDAAttentionProbe(AttentionProbe):
         cos = cos.to(q.dtype).reshape(1, 1, seq_len, -1)
         sin = sin.to(q.dtype).reshape(1, 1, seq_len, -1)
         self.rope_applied = True
-        return (
-            q * cos + self._rotate_half(q) * sin,
-            k * cos + self._rotate_half(k) * sin,
-        )
+
+        # Partial rotary: the width of the tables says how much of the head is
+        # rotated; the remainder passes through unchanged.  When they cover the
+        # whole head -- LLaDA-1.5 -- the split is a no-op.
+        rd = min(cos.shape[-1], q.shape[-1])
+        if rd == q.shape[-1]:
+            return (
+                q * cos + self._rotate_half(q) * sin,
+                k * cos + self._rotate_half(k) * sin,
+            )
+
+        def rotate(x):
+            head, tail = x[..., :rd], x[..., rd:]
+            return torch.cat(
+                (head * cos + self._rotate_half(head) * sin, tail), dim=-1
+            )
+
+        return rotate(q), rotate(k)
 
     def _attention_probs(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
         # Grouped-query attention: repeat KV heads to match query heads.
@@ -200,7 +224,14 @@ class LLaDAAttentionProbe(AttentionProbe):
             rep = self.n_heads // self.n_kv_heads
             k = k.repeat_interleave(rep, dim=1)
         scores = (q.float() @ k.float().transpose(-1, -2)) / math.sqrt(self.head_dim)
-        # No causal mask: LLaDA attends bidirectionally at every denoising step.
+        # LLaDA-1.5 attends bidirectionally over the whole sequence, so there is
+        # nothing to mask.  Block-diffusion models supply a mask here: without
+        # it the probe would hand IA-AQ weights for tokens the model is blind
+        # to, and the rows would still sum to 1, so nothing would look wrong.
+        if self.attn_mask_fn is not None:
+            mask = self.attn_mask_fn(q.shape[-2], q.device, torch.float32)
+            if mask is not None:
+                scores = scores + mask
         return torch.softmax(scores, dim=-1)
 
 
@@ -279,6 +310,14 @@ class LLaDAAdapter(ModelAdapter):
             raise RuntimeError("call load() first")
         return self._blocks
 
+    def _probe_rotary_dim(self) -> Optional[int]:
+        """How much of each head carries rotary. Full head for LLaDA-1.5."""
+        return None
+
+    def _probe_attn_mask_fn(self):
+        """Additive attention mask for the probe, or None for full attention."""
+        return None
+
     def make_probe(self, block: nn.Module) -> LLaDAAttentionProbe:
         rotary = find_submodule(block, ("rotary_emb", "rope", "rotary"))
         if rotary is None:
@@ -289,7 +328,9 @@ class LLaDAAdapter(ModelAdapter):
             or 0.0
         )
         probe = LLaDAAttentionProbe(
-            block, self.n_heads, self.n_kv_heads, self.head_dim, rotary, theta
+            block, self.n_heads, self.n_kv_heads, self.head_dim, rotary, theta,
+            rotary_dim=self._probe_rotary_dim(),
+            attn_mask_fn=self._probe_attn_mask_fn(),
         )
         if rotary is None and not theta:
             warnings.warn(

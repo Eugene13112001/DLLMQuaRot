@@ -53,7 +53,7 @@ def capture_residual_stream(adapter, ids: torch.Tensor) -> Dict[int, torch.Tenso
     for i, block in enumerate(adapter.blocks):
         handles.append(block.register_forward_hook(make(i), with_kwargs=True))
     try:
-        adapter.model(ids)
+        adapter.model(ids, **adapter.forward_kwargs(ids))
     finally:
         for h in handles:
             h.remove()
