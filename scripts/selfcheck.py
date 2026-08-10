@@ -210,7 +210,14 @@ def main() -> int:
             cfg.rotation.enabled = True
             report = apply_quarot(adapter, cfg)
             print(report.summary())
-            print(OK, "rotation is invariant at every checked mask ratio")
+            if report.decisive:
+                print(OK, "rotation is invariant at every checked mask ratio")
+            else:
+                print(WARN, "invariance is not decisive in this precision -- "
+                            "routing moved as well, and that alone explains a "
+                            "change of this size. Verify once with "
+                            "--dtype float32.")
+                skipped.append("5 (invariance, undecidable at this precision)")
         except Exception:
             print(FAIL, "rotation raised:")
             traceback.print_exc()

@@ -7,6 +7,7 @@ is the part a dense-LLM implementation has no reason to do.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -41,6 +42,10 @@ class RotationReport:
     # Fraction of expert slots that route the same way after rotation.
     # Empty for dense models, which have nothing discrete to disagree about.
     routing_agreement: Dict[str, float] = field(default_factory=dict)
+    # False when the invariance number could not settle the question -- an MoE
+    # in low precision, where routing noise is larger than what the check is
+    # looking for.
+    decisive: bool = True
 
     def summary(self) -> str:
         lines = [
@@ -223,41 +228,54 @@ def apply_quarot(adapter: ModelAdapter, cfg: DLLMQuantConfig) -> RotationReport:
     worst = max(report.invariance.values()) if report.invariance else 0.0
     report.tolerance = tol
 
-    if worst > tol:
-        agreement = report.worst_routing_agreement
-        if agreement is not None and agreement < 1.0:
-            # The rotation did not miss anything: the model took a different
-            # path. Saying "suspect the norms" here would send the reader to
-            # audit code that is behaving correctly.
-            routing_note = (
-                f"\nRouting is not identical after rotation -- as low as "
-                f"{100 * agreement:.1f}% of expert slots kept -- and that alone "
-                "produces an output change of this size. Rotation perturbs the "
-                "router's logits by the last bits of bf16, and top-k selection "
-                "turns that into a different expert. Confirm by rerunning with "
-                "--dtype float32: if the change collapses toward "
-                f"{dtype_invariance_tol('float32'):.0e} and routing goes to "
-                "100%, nothing is missed and this is the storage precision.\n"
-            )
-        else:
-            routing_note = (
-                "\nRotation is exactly invariant in exact arithmetic, so an "
-                "excess this large means either a layer that touches the "
-                "residual stream was missed, or a norm carries a bias. Note "
-                "that rotation_plan() already checks coverage structurally, so "
-                "if it passed, suspect the norms first.\n"
-                f"Loading in float32 (--dtype float32) drops the floor to "
-                f"{dtype_invariance_tol('float32'):.0e} and makes this "
-                "diagnostic sharp.\n"
-            )
+    if worst <= tol:
+        return report
 
-        raise RuntimeError(
-            f"rotation changed the model's output by {worst:.3e}, past the "
-            f"{cfg.dtype} noise floor of {tol:.1e}.\n"
-            + routing_note
-            + "\n" + report.summary()
+    agreement = report.worst_routing_agreement
+    routing_moved = agreement is not None and agreement < 1.0
+
+    if routing_moved and cfg.dtype != "float32":
+        # The check has no discriminating power in this combination, and
+        # failing on it would block every bf16 run of an MoE for a reason it
+        # cannot establish.  What guards against a missed layer is the
+        # structural coverage in rotation_plan(); this number was its backstop,
+        # and the backstop is unavailable here -- say so rather than pretend
+        # either way.
+        report.decisive = False
+        warnings.warn(
+            f"invariance came out at {worst:.3e} against a {cfg.dtype} floor of "
+            f"{tol:.1e}, but routing also moved (as low as "
+            f"{100 * agreement:.1f}% of each token's experts kept), which "
+            "accounts for a change of this size on its own. Rotation shifts "
+            "the router's logits by the last bits of the stored weights, and "
+            "top-k turns that into a different expert -- so in this precision "
+            "the check cannot separate a missed layer from rounding.\n"
+            "Verify the rotation itself once in float32 (--dtype float32), "
+            "where routing holds and the floor is "
+            f"{dtype_invariance_tol('float32'):.0e}; rerun that whenever the "
+            "rotation plan changes.\n" + report.summary(),
+            RuntimeWarning,
         )
-    return report
+        return report
+
+    raise RuntimeError(
+        f"rotation changed the model's output by {worst:.3e}, past the "
+        f"{cfg.dtype} noise floor of {tol:.1e}.\n\n"
+        "Rotation is exactly invariant in exact arithmetic, so an excess this "
+        "large means either a layer that touches the residual stream was "
+        "missed, or a norm carries a bias. Note that rotation_plan() already "
+        "checks coverage structurally, so if it passed, suspect the norms "
+        "first."
+        + (
+            "\nRouting was identical across the rotation, so the change is not "
+            "the router's doing."
+            if agreement is not None
+            else ""
+        )
+        + f"\nLoading in float32 (--dtype float32) drops the floor to "
+        f"{dtype_invariance_tol('float32'):.0e} and makes this diagnostic "
+        "sharp.\n\n" + report.summary()
+    )
 
 
 def dtype_invariance_tol(dtype: str) -> float:
@@ -267,6 +285,13 @@ def dtype_invariance_tol(dtype: str) -> float:
     in the model's dtype. bf16 keeps 7 mantissa bits, fp16 keeps 10, and the
     error compounds across blocks -- so what counts as "exactly invariant"
     differs by two orders of magnitude between bf16 and fp32.
+
+    These floors are calibrated on a dense model, where rounding perturbs the
+    output continuously.  A model that routes cannot be judged by them: there
+    the same rounding changes *which experts run*, and the output moves by far
+    more than any floor set from mantissa bits.  ``apply_quarot`` handles that
+    case separately rather than by inflating the number here, which would blind
+    the check for dense models too.
     """
     return {
         "float32": 1e-4,

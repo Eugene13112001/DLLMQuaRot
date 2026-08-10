@@ -281,6 +281,76 @@ def test_a_v_block_that_overruns_the_projection_is_refused():
         )
 
 
+class _WitnessRouter(nn.Module):
+    """Reports one routing before the weights move and another after.
+
+    Stands in for a real router without needing an MoE: what matters to the
+    check is only that the routing came back different.
+    """
+
+    def __init__(self, watched: torch.Tensor, flips: bool):
+        super().__init__()
+        self.watched = watched  # the live Parameter, so .data swaps show up
+        self.snapshot = watched.detach().clone()
+        self.flips = flips
+
+    def forward(self, x):
+        moved = self.flips and not torch.equal(self.watched, self.snapshot)
+        return torch.tensor([[1, 3]]) if moved else torch.tensor([[1, 2]])
+
+
+def _adapter_that_routes(flips: bool):
+    """A model whose invariance check cannot pass, with a router attached."""
+    torch.manual_seed(0)
+    cfg = _config()
+    cfg.rotation = RotationConfig(enabled=True)
+    cfg.rotation.invariance_tol = 1e-12  # nothing in floating point clears this
+    cfg.dtype = "bfloat16"  # the precision label, not the model's storage
+    adapter = TinyAdapter(cfg)
+    adapter.load()
+
+    router = _WitnessRouter(adapter.model.wte.weight, flips)
+    adapter.model.router = router
+    inner = adapter.model.forward
+
+    def forward(input_ids, **kw):
+        router(input_ids)
+        return inner(input_ids, **kw)
+
+    adapter.model.forward = forward
+    adapter.routers = lambda: [router]
+    return adapter, cfg
+
+
+def test_moved_routing_downgrades_the_verdict_instead_of_failing():
+    """In bf16 an MoE cannot be judged by this number, and pretending it can
+    would block every run for a reason the check cannot establish."""
+    adapter, cfg = _adapter_that_routes(flips=True)
+
+    with pytest.warns(RuntimeWarning, match="routing also moved"):
+        report = apply_quarot(adapter, cfg)
+
+    assert report.decisive is False
+    assert report.worst_routing_agreement < 1.0
+
+
+def test_unchanged_routing_still_fails_the_check():
+    """The downgrade is specific to routing having moved -- otherwise the
+    number means what it always meant."""
+    adapter, cfg = _adapter_that_routes(flips=False)
+
+    with pytest.raises(RuntimeError, match="not the router's doing"):
+        apply_quarot(adapter, cfg)
+
+
+def test_a_dense_model_is_judged_as_before():
+    adapter, cfg = _rotated_adapter()
+    cfg.rotation.invariance_tol = 1e-12
+
+    with pytest.raises(RuntimeError, match="noise floor"):
+        apply_quarot(adapter, cfg)
+
+
 def test_r4_preserves_attention_scores_exactly():
     """(QH)(KH)ᵀ = QKᵀ -- the rotation cancels inside the score matmul."""
     torch.manual_seed(4)
