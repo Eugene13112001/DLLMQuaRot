@@ -557,6 +557,14 @@ class ModelAdapter(ABC):
         """
         return []
 
+    def routers(self) -> List[nn.Module]:
+        """Modules whose output is a discrete routing decision.
+
+        Empty for a dense model, which has nothing discrete to disagree about
+        after a rotation or a rounding.
+        """
+        return []
+
     def rotation_plan(self):
         """Which modules take part in the QuaRot residual-stream rotation."""
         raise NotImplementedError(

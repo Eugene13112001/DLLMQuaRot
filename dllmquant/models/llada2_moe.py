@@ -293,6 +293,10 @@ class LLaDA2MoEAdapter(LLaDAAdapter):
                 out.append((leaf, module))
         return out
 
+    def routers(self) -> List[nn.Module]:
+        return [m for block in self.blocks
+                for _, m in self._extra_residual_readers(block)]
+
     def _probe_rotary_dim(self) -> Optional[int]:
         """LLaDA2.0 rotates ``head_dim * partial_rotary_factor`` channels only."""
         cfg = self.model.config

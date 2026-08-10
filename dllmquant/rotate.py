@@ -38,6 +38,9 @@ class RotationReport:
     invariance: Dict[str, float] = field(default_factory=dict)
     outliers_before: Dict[str, float] = field(default_factory=dict)
     outliers_after: Dict[str, float] = field(default_factory=dict)
+    # Fraction of expert slots that route the same way after rotation.
+    # Empty for dense models, which have nothing discrete to disagree about.
+    routing_agreement: Dict[str, float] = field(default_factory=dict)
 
     def summary(self) -> str:
         lines = [
@@ -48,11 +51,65 @@ class RotationReport:
         for key in sorted(self.invariance, key=float, reverse=True):
             before = self.outliers_before.get(key, float("nan"))
             after = self.outliers_after.get(key, float("nan"))
-            lines.append(
+            line = (
                 f"  mask ratio {key}: rel. output change {self.invariance[key]:.2e}, "
                 f"outlier factor {before:.1f} -> {after:.1f}"
             )
+            if key in self.routing_agreement:
+                line += f", routing kept {100 * self.routing_agreement[key]:.1f}%"
+            lines.append(line)
         return "\n".join(lines)
+
+    @property
+    def worst_routing_agreement(self) -> Optional[float]:
+        return min(self.routing_agreement.values()) if self.routing_agreement else None
+
+
+@torch.no_grad()
+def routing_fingerprint(
+    adapter: ModelAdapter, ids: torch.Tensor
+) -> Optional[torch.Tensor]:
+    """Which experts every token was sent to, as one flat tensor.
+
+    Rotation is exact in real arithmetic but the weights are stored in bf16,
+    and in an MoE that rounding does not stay small: routing is a *discrete*
+    function of the residual stream, so a perturbation of the router's logits
+    below the last mantissa bit can still swap one expert for another, and the
+    token's MLP output then changes by a lot rather than a little.
+
+    That mechanism does not exist in a dense model, which is why the flat bf16
+    noise floor -- calibrated on LLaDA-1.5 -- cannot be read the same way here.
+    Measuring the routing separately says which of the two is happening: an
+    unchanged routing with a large output change means a layer was genuinely
+    missed, while flipped routing explains the change without implicating the
+    rotation at all.
+
+    Indices are sorted per token before comparison: ``topk(sorted=False)``
+    leaves the order of the chosen experts unspecified, and comparing the raw
+    order would count reshuffles as changes.
+    """
+    routers = adapter.routers()
+    if not routers:
+        return None
+
+    seen: List[torch.Tensor] = []
+
+    def hook(module, args, output):
+        parts = output if isinstance(output, (tuple, list)) else (output,)
+        for t in parts:
+            if isinstance(t, torch.Tensor) and t.numel() and not t.is_floating_point():
+                idx = t if t.dim() > 1 else t.unsqueeze(0)
+                seen.append(idx.sort(dim=-1).values.reshape(-1).cpu())
+                return
+
+    handles = [m.register_forward_hook(hook) for m in routers]
+    try:
+        adapter.model(ids, **adapter.forward_kwargs(ids))
+    finally:
+        for h in handles:
+            h.remove()
+
+    return torch.cat(seen) if seen else None
 
 
 def crest_factor(x: torch.Tensor) -> float:
@@ -96,6 +153,7 @@ def apply_quarot(adapter: ModelAdapter, cfg: DLLMQuantConfig) -> RotationReport:
     }
     for k, v in states.items():
         report.outliers_before[k] = crest_factor(_hidden_at_block0(adapter, v))
+    routes_before = {k: routing_fingerprint(adapter, v) for k, v in states.items()}
 
     # --- fuse norms so rotation commutes ------------------------------------
     for norm, consumers in plan.norm_groups:
@@ -140,22 +198,49 @@ def apply_quarot(adapter: ModelAdapter, cfg: DLLMQuantConfig) -> RotationReport:
         report.invariance[k] = float((after - reference[k]).abs().mean() / denom)
         report.outliers_after[k] = crest_factor(_hidden_at_block0(adapter, v))
 
+        before_routes = routes_before.get(k)
+        if before_routes is not None:
+            now = routing_fingerprint(adapter, v)
+            if now is not None and now.shape == before_routes.shape:
+                report.routing_agreement[k] = float((now == before_routes).float().mean())
+
     tol = rot.invariance_tol or dtype_invariance_tol(cfg.dtype)
     worst = max(report.invariance.values()) if report.invariance else 0.0
     report.tolerance = tol
 
     if worst > tol:
+        agreement = report.worst_routing_agreement
+        if agreement is not None and agreement < 1.0:
+            # The rotation did not miss anything: the model took a different
+            # path. Saying "suspect the norms" here would send the reader to
+            # audit code that is behaving correctly.
+            routing_note = (
+                f"\nRouting is not identical after rotation -- as low as "
+                f"{100 * agreement:.1f}% of expert slots kept -- and that alone "
+                "produces an output change of this size. Rotation perturbs the "
+                "router's logits by the last bits of bf16, and top-k selection "
+                "turns that into a different expert. Confirm by rerunning with "
+                "--dtype float32: if the change collapses toward "
+                f"{dtype_invariance_tol('float32'):.0e} and routing goes to "
+                "100%, nothing is missed and this is the storage precision.\n"
+            )
+        else:
+            routing_note = (
+                "\nRotation is exactly invariant in exact arithmetic, so an "
+                "excess this large means either a layer that touches the "
+                "residual stream was missed, or a norm carries a bias. Note "
+                "that rotation_plan() already checks coverage structurally, so "
+                "if it passed, suspect the norms first.\n"
+                f"Loading in float32 (--dtype float32) drops the floor to "
+                f"{dtype_invariance_tol('float32'):.0e} and makes this "
+                "diagnostic sharp.\n"
+            )
+
         raise RuntimeError(
             f"rotation changed the model's output by {worst:.3e}, past the "
-            f"{cfg.dtype} noise floor of {tol:.1e}.\n\n"
-            "Rotation is exactly invariant in exact arithmetic, so an excess "
-            "this large means either a layer that touches the residual stream "
-            "was missed, or a norm carries a bias. Note that rotation_plan() "
-            "already checks coverage structurally, so if it passed, suspect "
-            "the norms first.\n"
-            f"Loading in float32 (--dtype float32) drops the floor to "
-            f"{dtype_invariance_tol('float32'):.0e} and makes this diagnostic "
-            "sharp.\n\n" + report.summary()
+            f"{cfg.dtype} noise floor of {tol:.1e}.\n"
+            + routing_note
+            + "\n" + report.summary()
         )
     return report
 

@@ -286,6 +286,79 @@ def test_a_dense_block_contributes_no_extra_readers():
     assert Plain()._extra_residual_readers(_MoEBlock()) == []
 
 
+# -------------------------------------------------------- routing stability
+
+
+class _RoutingModel(nn.Module):
+    """Two routers whose choices are set by the test."""
+
+    def __init__(self):
+        super().__init__()
+        self.a = _Gate()
+        self.b = _Gate()
+
+    def forward(self, input_ids, **kwargs):
+        self.a(input_ids)
+        self.b(input_ids)
+        return _Out(torch.zeros(1, 1, 4))
+
+
+def _routing_adapter():
+    adapter = _adapter()
+    adapter.model = _RoutingModel()
+    adapter.routers = lambda: [adapter.model.a, adapter.model.b]
+    return adapter
+
+
+def test_a_dense_model_has_no_routing_to_compare():
+    """LLaDA-1.5 must not grow a second forward pass per state."""
+    from dllmquant.rotate import routing_fingerprint
+
+    class Plain(ModelAdapter):
+        def __init__(self):
+            self.model = _Tiny()
+
+        def load(self):
+            pass
+
+        @property
+        def blocks(self):
+            return nn.ModuleList()
+
+        def make_probe(self, block):
+            raise NotImplementedError
+
+    assert routing_fingerprint(Plain(), torch.zeros(1, 4, dtype=torch.long)) is None
+
+
+def test_routing_fingerprint_ignores_the_order_of_the_chosen_experts():
+    """topk(sorted=False) leaves the order free; a reshuffle is not a change."""
+    from dllmquant.rotate import routing_fingerprint
+
+    adapter = _routing_adapter()
+    ids = torch.zeros(1, 2, dtype=torch.long)
+
+    before = routing_fingerprint(adapter, ids)
+    adapter.model.a.routed = adapter.model.a.routed.flip(-1)  # same set, other order
+    after = routing_fingerprint(adapter, ids)
+
+    assert torch.equal(before, after)
+
+
+def test_routing_fingerprint_sees_a_real_flip():
+    from dllmquant.rotate import routing_fingerprint
+
+    adapter = _routing_adapter()
+    ids = torch.zeros(1, 2, dtype=torch.long)
+
+    before = routing_fingerprint(adapter, ids)
+    adapter.model.a.routed = torch.tensor([[0, 3], [0, 2]])  # expert 1 -> 3
+    after = routing_fingerprint(adapter, ids)
+
+    agreement = float((before == after).float().mean())
+    assert 0.0 < agreement < 1.0
+
+
 # --------------------------------------------------------- expert coverage
 
 
