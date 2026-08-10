@@ -50,6 +50,12 @@ _ATTN_IN_NAMES = _QKV_FUSED_NAMES + _Q_NAMES + _K_NAMES + _V_NAMES
 _RESIDUAL_IN_NAMES = _ATTN_IN_NAMES + (
     "ff_proj", "gate_proj", "up_proj", "w1", "w3",
 )
+# Projections that carry V, fused or separate. IA-AQ attaches to one of these;
+# selfcheck checks the same list rather than a copy of it, because the copy is
+# what reported "IA-AQ would be a no-op" for a model whose fused projection is
+# simply called `query_key_value`.
+VALUE_BEARING_NAMES = _QKV_FUSED_NAMES + _V_NAMES
+
 _ATTN_OUT_NAMES = ("attn_out", "o_proj", "out_proj", "dense")
 _RESIDUAL_OUT_NAMES = _ATTN_OUT_NAMES + ("ff_out", "down_proj", "w2")
 

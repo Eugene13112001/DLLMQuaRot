@@ -3,15 +3,17 @@
 LLaDA2.0-mini is 16B-A1B and -flash is 100B-A6B, so only ~6% of the parameters
 see any given token.  That breaks an assumption CGQ inherits from GPTQ: the
 Hessian of an expert's projection is estimated from the tokens routed to *that*
-expert, not from the whole calibration set.  With 128 snapshots x 256 tokens
-and 64 experts picking top-2, an expert sees roughly
+expert, not from the whole calibration set.  mini's own config -- 256 experts,
+top-8, hidden 2048 -- puts a number on it.  With 128 snapshots of 256 tokens:
 
-    128 * 256 * 2 / 64  ~  1000 tokens
+    128 * 256 * 8 / 256  ~  1000 tokens per expert
 
-against an input dimension in the thousands -- a rank-deficient Hessian.  This
-adapter therefore reports per-expert token coverage so the calibration budget
-can be raised before a long run, and the solver's damping backoff keeps the
-factorization alive when coverage is thin.
+``gate_proj`` and ``up_proj`` take the full hidden width, so their Hessian is
+2048x2048 and a thousand tokens leaves it rank-deficient by a factor of two.
+``down_proj`` reads the 512-wide expert intermediate and is comfortable at the
+same budget.  So the shortfall is specific, not general, and it is the reason
+this adapter reports per-expert coverage before a long run rather than after;
+the solver's damping backoff keeps the factorization alive when it is thin.
 
 Two further caveats, both surfaced by ``scripts/selfcheck.py`` rather than
 silently absorbed:
@@ -29,7 +31,7 @@ from __future__ import annotations
 
 import warnings
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -48,34 +50,74 @@ _EXPERT_CONTAINER_NAMES = ("experts", "mlp_experts", "moe_experts")
 
 
 class ExpertCoverage:
-    """Counts how many calibration tokens reach each expert."""
+    """Counts how many calibration tokens reach each expert.
+
+    A router is not necessarily an ``nn.Linear``: LLaDA2.0's ``gate`` holds a
+    bare ``nn.Parameter`` and calls ``F.linear`` itself, which is why an
+    isinstance check on Linear found no routers at all on a checkpoint with
+    nineteen of them.  It is recognised by what it exposes instead.
+    """
 
     def __init__(self):
         self.counts: Dict[str, torch.Tensor] = {}
+        self.exact: Dict[str, bool] = {}
         self._handles: List = []
+
+    @staticmethod
+    def _is_router(module: nn.Module) -> bool:
+        if isinstance(module, nn.Linear):
+            return True
+        # A routing module announces the shape of its decision.
+        return hasattr(module, "num_experts") and hasattr(module, "top_k")
 
     def attach(self, model: nn.Module) -> "ExpertCoverage":
         for name, module in model.named_modules():
-            if name.split(".")[-1] in _ROUTER_NAMES and isinstance(module, nn.Linear):
+            if name.split(".")[-1] in _ROUTER_NAMES and self._is_router(module):
                 self._handles.append(
                     module.register_forward_hook(self._make_hook(name))
                 )
         return self
 
+    @staticmethod
+    def _routed_experts(output) -> Tuple[Optional[torch.Tensor], bool, int]:
+        """Which experts got tokens, whether that is exact, and how many exist.
+
+        An integer tensor is the router's own top-k choice, counted as is:
+        every route, not just the strongest, because every route puts a token
+        into that expert's Hessian.  Float logits are all a plain Linear
+        router gives, and there top-1 is an estimate, not the answer.
+
+        The expert count is returned separately because it cannot be recovered
+        from the routes: an expert that received nothing is exactly the one
+        worth reporting, and inferring the count from ``idx.max()`` would drop
+        it off the end of the histogram.
+        """
+        parts = output if isinstance(output, (tuple, list)) else (output,)
+        tensors = [t for t in parts if isinstance(t, torch.Tensor) and t.numel()]
+        if not tensors:
+            return None, False, 0
+
+        for t in tensors:
+            if not t.is_floating_point():
+                return t.reshape(-1), True, 0
+
+        logits = tensors[0]
+        if logits.dim() < 2:
+            return None, False, 0
+        width = logits.shape[-1]
+        return logits.reshape(-1, width).argmax(dim=-1), False, width
+
     def _make_hook(self, name: str):
         def hook(module, args, output):
-            logits = output if isinstance(output, torch.Tensor) else output[0]
-            if logits.dim() < 2:
+            idx, exact, width = self._routed_experts(output)
+            if idx is None:
                 return
-            n_experts = logits.shape[-1]
-            flat = logits.reshape(-1, n_experts)
-            # Top-1 is enough to spot starvation; top-k only scales it.
-            top = flat.argmax(dim=-1)
-            counts = torch.bincount(top.cpu(), minlength=n_experts)
-            if name in self.counts:
-                self.counts[name] = self.counts[name] + counts
-            else:
-                self.counts[name] = counts
+            n_experts = (
+                int(getattr(module, "num_experts", 0)) or width or int(idx.max()) + 1
+            )
+            counts = torch.bincount(idx.cpu(), minlength=n_experts)
+            self.counts[name] = self.counts.get(name, 0) + counts
+            self.exact[name] = exact
 
         return hook
 
@@ -87,7 +129,12 @@ class ExpertCoverage:
     def report(self, min_tokens: int = 512) -> str:
         if not self.counts:
             return "no routers observed -- is this actually an MoE checkpoint?"
-        lines = ["expert coverage (top-1 routing):"]
+        how = (
+            "top-k routes"
+            if self.exact and all(self.exact.values())
+            else "top-1 estimate"
+        )
+        lines = [f"expert coverage ({how}):"]
         starved_total = 0
         for name, counts in sorted(self.counts.items()):
             starved = int((counts < min_tokens).sum())

@@ -199,6 +199,85 @@ def test_layout_updates_the_mask_grid():
     assert adapter.block_length == 8
 
 
+# --------------------------------------------------------- expert coverage
+
+
+class _Gate(nn.Module):
+    """LLaDA2.0's router: a bare Parameter, and it returns its own top-k."""
+
+    def __init__(self, num_experts=4, top_k=2):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.weight = nn.Parameter(torch.zeros(num_experts, 4))
+        self.routed = torch.tensor([[0, 1], [0, 2]])
+
+    def forward(self, hidden_states):
+        logits = torch.zeros(2, self.num_experts)
+        return self.routed, torch.ones_like(self.routed, dtype=torch.float), logits
+
+
+class _MoEBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate = _Gate()
+
+    def forward(self, x):
+        return self.gate(x)
+
+
+def test_a_router_that_is_not_a_linear_is_still_found():
+    """The isinstance(nn.Linear) check found zero routers in 19 MoE layers."""
+    from dllmquant.models.llada2_moe import ExpertCoverage
+
+    model = _MoEBlock()
+    cov = ExpertCoverage().attach(model)
+    model(torch.zeros(1, 2, 4))
+    cov.detach()
+
+    assert "gate" in cov.counts
+
+
+def test_coverage_counts_every_route_not_just_the_strongest():
+    """Each of a token's k routes puts it in that expert's Hessian."""
+    from dllmquant.models.llada2_moe import ExpertCoverage
+
+    model = _MoEBlock()
+    cov = ExpertCoverage().attach(model)
+    model(torch.zeros(1, 2, 4))
+    cov.detach()
+
+    # routed = [[0, 1], [0, 2]] -> expert 0 twice, 1 and 2 once, 3 starved.
+    assert cov.counts["gate"].tolist() == [2, 1, 1, 0]
+    assert cov.exact["gate"] is True
+    assert "top-k routes" in cov.report(min_tokens=1)
+
+
+def test_a_linear_router_falls_back_to_top1_and_says_so():
+    from dllmquant.models.llada2_moe import ExpertCoverage
+
+    class LinearRouter(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = nn.Linear(4, 3, bias=False)
+
+        def forward(self, x):
+            return self.gate(x)
+
+    model = LinearRouter()
+    with torch.no_grad():
+        model.gate.weight.copy_(torch.tensor(
+            [[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0]]))
+
+    cov = ExpertCoverage().attach(model)
+    model(torch.eye(4)[:2])  # picks expert 0, then 1
+    cov.detach()
+
+    assert cov.counts["gate"].tolist() == [1, 1, 0]
+    assert cov.exact["gate"] is False
+    assert "top-1 estimate" in cov.report(min_tokens=1)
+
+
 # ------------------------------------------------------------ sampler runs
 
 

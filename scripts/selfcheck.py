@@ -22,10 +22,28 @@ from dllmquant.algos.ia_aq import InteractionCollector  # noqa: E402
 from dllmquant.calib.prompts import load_prompts  # noqa: E402
 from dllmquant.config import DLLMQuantConfig, TMASConfig  # noqa: E402
 from dllmquant.models import build_adapter  # noqa: E402
+from dllmquant.models.llada import VALUE_BEARING_NAMES  # noqa: E402
 from dllmquant.modules import wrap_linears  # noqa: E402
 from dllmquant.rotate import apply_quarot  # noqa: E402
 
 OK, FAIL, WARN = "  [ok]  ", "  [FAIL]", "  [warn]"
+
+
+def representative_block(adapter):
+    """The first block that has experts, else block 0.
+
+    Blocks are not interchangeable in an MoE: LLaDA2.0 replaces the first
+    ``first_k_dense_replace`` layers with dense MLPs, so block 0 carries no
+    experts at all.  Checking it would exercise 3 linears and say nothing
+    about the 768 that hold almost all of the model's weights.
+    """
+    import torch.nn as nn
+
+    for i, block in enumerate(adapter.blocks):
+        for name, module in block.named_modules():
+            if name.split(".")[-1] == "experts" and isinstance(module, nn.ModuleList):
+                return i, block
+    return 0, adapter.blocks[0]
 
 
 def main() -> int:
@@ -118,8 +136,8 @@ def main() -> int:
         failures += 1
 
     # 4 -- the attention probe fires ----------------------------------------
-    print("\n=== 4. IA-AQ attention probe ===")
-    block = adapter.blocks[0]
+    block_idx, block = representative_block(adapter)
+    print(f"\n=== 4. IA-AQ attention probe (block {block_idx}) ===")
     try:
         probe = adapter.make_probe(block)
         captured = None
@@ -185,7 +203,8 @@ def main() -> int:
     print("\n=== 6. QuantLinear wrapping ===")
     try:
         replaced = wrap_linears(
-            block, cfg.weight, cfg.activation, skip=cfg.skip, prefix="blocks.0"
+            block, cfg.weight, cfg.activation, skip=cfg.skip,
+            prefix=f"blocks.{block_idx}",
         )
         print(OK, f"wrapped {len(replaced)} linears: {sorted(n.split('.')[-1] for n in replaced)}")
         if not replaced:
@@ -199,7 +218,7 @@ def main() -> int:
     # 7 -- value projection is reachable for IA-AQ ---------------------------
     print("\n=== 7. value projection ===")
     leaves = {n.split(".")[-1] for n in replaced} if replaced else set()
-    v_like = leaves & {"v_proj", "wv", "value", "att_proj", "qkv_proj", "Wqkv"}
+    v_like = leaves & set(VALUE_BEARING_NAMES)
     if v_like:
         print(OK, f"IA-AQ will attach to {sorted(v_like)}")
     else:
@@ -215,7 +234,12 @@ def main() -> int:
             for _ in range(2):
                 adapter.model(ids, **adapter.forward_kwargs(ids))
             adapter.coverage.detach()
-            print(adapter.coverage.report())
+            # Threshold 1, not the default: two forwards of one short prompt
+            # route a handful of tokens per expert, so every expert would be
+            # "starved" and the warning would mean nothing. What this check
+            # answers is whether routing is observable at all -- the budget
+            # question needs a real calibration run.
+            print(adapter.coverage.report(min_tokens=1))
         except Exception:
             print(WARN, "expert coverage probe failed:")
             traceback.print_exc()
