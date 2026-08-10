@@ -331,32 +331,36 @@ def test_a_dense_model_has_no_routing_to_compare():
     assert routing_fingerprint(Plain(), torch.zeros(1, 4, dtype=torch.long)) is None
 
 
-def test_routing_fingerprint_ignores_the_order_of_the_chosen_experts():
-    """topk(sorted=False) leaves the order free; a reshuffle is not a change."""
-    from dllmquant.rotate import routing_fingerprint
+def test_a_reshuffle_is_not_a_routing_change():
+    """topk(sorted=False) leaves the order free; the same set is the same set."""
+    from dllmquant.rotate import routing_fingerprint, routing_overlap
 
     adapter = _routing_adapter()
     ids = torch.zeros(1, 2, dtype=torch.long)
 
     before = routing_fingerprint(adapter, ids)
-    adapter.model.a.routed = adapter.model.a.routed.flip(-1)  # same set, other order
+    adapter.model.a.routed = adapter.model.a.routed.flip(-1)
     after = routing_fingerprint(adapter, ids)
 
-    assert torch.equal(before, after)
+    assert routing_overlap(before, after) == 1.0
 
 
-def test_routing_fingerprint_sees_a_real_flip():
-    from dllmquant.rotate import routing_fingerprint
+def test_one_swapped_expert_counts_once():
+    """Positionally, replacing one expert shifts the rest and reads as several.
+
+    routed goes from [[0,1],[0,2]] to [[0,3],[0,2]] on one of two routers:
+    one slot of eight lost, so seven eighths kept.
+    """
+    from dllmquant.rotate import routing_fingerprint, routing_overlap
 
     adapter = _routing_adapter()
     ids = torch.zeros(1, 2, dtype=torch.long)
 
     before = routing_fingerprint(adapter, ids)
-    adapter.model.a.routed = torch.tensor([[0, 3], [0, 2]])  # expert 1 -> 3
+    adapter.model.a.routed = torch.tensor([[0, 3], [0, 2]])
     after = routing_fingerprint(adapter, ids)
 
-    agreement = float((before == after).float().mean())
-    assert 0.0 < agreement < 1.0
+    assert routing_overlap(before, after) == pytest.approx(7 / 8)
 
 
 # --------------------------------------------------------- expert coverage

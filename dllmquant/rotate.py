@@ -84,9 +84,8 @@ def routing_fingerprint(
     missed, while flipped routing explains the change without implicating the
     rotation at all.
 
-    Indices are sorted per token before comparison: ``topk(sorted=False)``
-    leaves the order of the chosen experts unspecified, and comparing the raw
-    order would count reshuffles as changes.
+    Returned as ``[rows, k]`` -- one row per token per router -- because the
+    comparison has to be by set (see :func:`routing_overlap`).
     """
     routers = adapter.routers()
     if not routers:
@@ -98,8 +97,8 @@ def routing_fingerprint(
         parts = output if isinstance(output, (tuple, list)) else (output,)
         for t in parts:
             if isinstance(t, torch.Tensor) and t.numel() and not t.is_floating_point():
-                idx = t if t.dim() > 1 else t.unsqueeze(0)
-                seen.append(idx.sort(dim=-1).values.reshape(-1).cpu())
+                idx = t if t.dim() > 1 else t.unsqueeze(-1)
+                seen.append(idx.reshape(-1, idx.shape[-1]).cpu())
                 return
 
     handles = [m.register_forward_hook(hook) for m in routers]
@@ -109,7 +108,23 @@ def routing_fingerprint(
         for h in handles:
             h.remove()
 
-    return torch.cat(seen) if seen else None
+    if not seen or len({t.shape[-1] for t in seen}) != 1:
+        return torch.cat(seen, dim=0) if len(seen) == 1 else None
+    return torch.cat(seen, dim=0)
+
+
+def routing_overlap(before: torch.Tensor, after: torch.Tensor) -> float:
+    """Fraction of each token's expert set that survived, averaged over tokens.
+
+    By set, not position by position: ``topk(sorted=False)`` returns the chosen
+    experts in no particular order, and even sorted, swapping one expert shifts
+    the rest along -- which a positional comparison counts as several changes,
+    inflating the damage several-fold.
+    """
+    if before.shape != after.shape:
+        return float("nan")
+    kept = (before.unsqueeze(-1) == after.unsqueeze(-2)).any(dim=-1)
+    return float(kept.float().mean())
 
 
 def crest_factor(x: torch.Tensor) -> float:
@@ -201,8 +216,8 @@ def apply_quarot(adapter: ModelAdapter, cfg: DLLMQuantConfig) -> RotationReport:
         before_routes = routes_before.get(k)
         if before_routes is not None:
             now = routing_fingerprint(adapter, v)
-            if now is not None and now.shape == before_routes.shape:
-                report.routing_agreement[k] = float((now == before_routes).float().mean())
+            if now is not None:
+                report.routing_agreement[k] = routing_overlap(before_routes, now)
 
     tol = rot.invariance_tol or dtype_invariance_tol(cfg.dtype)
     worst = max(report.invariance.values()) if report.invariance else 0.0
