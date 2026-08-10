@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence  # noqa: F401
 
+from .cache import KVCacheConfig
+
 
 @dataclass
 class QuantConfig:
@@ -245,6 +247,7 @@ class DLLMQuantConfig:
     cgq: CGQConfig = field(default_factory=CGQConfig)
     ia_aq: IAAQConfig = field(default_factory=IAAQConfig)
     rotation: RotationConfig = field(default_factory=RotationConfig)
+    kv_cache: KVCacheConfig = field(default_factory=KVCacheConfig)
 
     # Layers left in FP.  Two different matches, because substring matching
     # alone is a trap on these architectures:

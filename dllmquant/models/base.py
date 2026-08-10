@@ -74,14 +74,55 @@ def preflight_memory(required_gb: float, strict: bool = True) -> float:
     return free_gb
 
 
+def checkpoint_size_gb(model_path: str) -> Optional[float]:
+    """Actual checkpoint size, read from the safetensors index if downloaded.
+
+    Guessing from the model name does not survive contact with a MoE: LLaDA-8B
+    and LLaDA2.0-mini differ by 2x in weights while the second is advertised as
+    "16B-A1B", and the active-parameter count is not what has to fit in memory.
+    """
+    import glob
+    import json
+    import os
+
+    slug = "models--" + model_path.replace("/", "--")
+    root = os.path.join(
+        os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
+        "hub", slug,
+    )
+    for index in glob.glob(os.path.join(root, "snapshots", "*", "*.index.json")):
+        try:
+            with open(index, encoding="utf-8") as f:
+                total = json.load(f).get("metadata", {}).get("total_size")
+            if total:
+                return float(total) / 2**30
+        except (OSError, ValueError):
+            continue
+
+    shards = glob.glob(os.path.join(root, "snapshots", "*", "*.safetensors"))
+    if shards:
+        seen, total = set(), 0
+        for s in shards:
+            real = os.path.realpath(s)
+            if real not in seen:
+                seen.add(real)
+                total += os.path.getsize(real)
+        if total:
+            return float(total) / 2**30
+    return None
+
+
 def estimate_required_gb(cfg) -> float:
-    """Weights in the compute dtype, plus working room for the solver."""
+    """Weights plus working room for the solver."""
+    measured = checkpoint_size_gb(cfg.model_path)
+    if measured is not None:
+        bytes_per = {"float32": 4, "float16": 2, "bfloat16": 2}.get(cfg.dtype, 2)
+        # The checkpoint is normally stored in bf16; loading in float32 doubles
+        # it, and Hessians for the widest layer add roughly a gigabyte.
+        return measured * (bytes_per / 2.0) + 4.0
+
     bytes_per = {"float32": 4, "float16": 2, "bfloat16": 2}.get(cfg.dtype, 2)
-    # LLaDA-8B is the reference point; other sizes scale from the model name
-    # only loosely, so this is deliberately a floor, not a prediction.
-    weights_gb = 8.0 * bytes_per
-    working_gb = 4.0
-    return weights_gb + working_gb
+    return 8.0 * bytes_per + 4.0  # not downloaded yet: assume 8B
 
 
 def _dtype_kwargs(dtype) -> dict:
@@ -97,36 +138,77 @@ def _dtype_kwargs(dtype) -> dict:
     return {key: dtype}
 
 
-# LLaDA ships `modeling_llada.py` as remote code written against
-# transformers 4.38.2.  Small shims can bridge a few minor releases; a major
-# release cannot be bridged this way -- `tie_weights()` alone changed
-# signature, and every patch just moves the failure further down the loading
-# path.  Refuse early instead of crashing 16 GB later.
-MAX_TESTED_TRANSFORMERS_MAJOR = 4
+# Each checkpoint ships its own remote code, written against whatever
+# transformers existed at release, and the windows do NOT overlap:
+#
+#   LLaDA-1.5   4.38 - 4.46   breaks above on `tie_weights()` and friends
+#   LLaDA2.0    4.56+         needs `dynamic_rope_update`, `TransformersKwargs`
+#
+# So the supported range belongs to the adapter, not to this module. A single
+# global bound cannot express "one model needs an old library and the other
+# needs a new one", and pretending otherwise sends you round the loop of
+# installing a version, hitting one missing symbol, installing another.
+MAX_TESTED_TRANSFORMERS_MAJOR = 4  # kept for backwards compatibility
+
+VersionBound = Optional[Tuple[int, int]]
 
 
-def check_transformers_version(strict: bool = True) -> str:
+def _parse_version(version: str) -> Optional[Tuple[int, int]]:
+    try:
+        parts = version.split(".")
+        return int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def check_transformers_version(
+    minimum: VersionBound = None,
+    maximum: VersionBound = None,
+    strict: bool = True,
+    model: str = "this checkpoint",
+) -> str:
+    """Verify the installed transformers falls in the adapter's window.
+
+    ``maximum`` is exclusive: (4, 47) means "below 4.47".
+    """
     import transformers
 
     version = transformers.__version__
-    try:
-        major = int(version.split(".")[0])
-    except (ValueError, IndexError):
+    parsed = _parse_version(version)
+    if parsed is None or not strict:
         return version
 
-    if strict and major > MAX_TESTED_TRANSFORMERS_MAJOR:
-        raise RuntimeError(
-            f"transformers {version} is a major release ahead of what LLaDA's "
-            f"remote code targets (4.38.2). Loading will fail somewhere inside "
-            f"modeling_utils -- the exact spot varies by release.\n\n"
-            f"Pin the library:\n"
-            f"    pip install 'transformers==4.46.3'\n"
-            f"and if that still trips, the authors' own pin:\n"
-            f"    pip install 'transformers==4.38.2'\n\n"
-            f"Weights already downloaded are reused; only the library changes. "
-            f"To try anyway, pass --allow-untested-transformers."
-        )
-    return version
+    too_old = minimum is not None and parsed < minimum
+    too_new = maximum is not None and parsed >= maximum
+    if not (too_old or too_new):
+        return version
+
+    window = []
+    if minimum:
+        window.append(f">={minimum[0]}.{minimum[1]}")
+    if maximum:
+        window.append(f"<{maximum[0]}.{maximum[1]}")
+    wanted = " and ".join(window) if window else "any"
+
+    raise RuntimeError(
+        f"transformers {version} is {'older' if too_old else 'newer'} than the "
+        f"remote code of {model} supports (needs {wanted}).\n\n"
+        f"Loading would fail inside the checkpoint's own modelling file, on a "
+        f"missing symbol whose name tells you nothing useful.\n\n"
+        f"    pip install 'transformers=={_suggest(minimum, maximum)}'\n\n"
+        f"Note the two LLaDA families need incompatible versions -- 1.5 wants "
+        f"4.38-4.46, 2.0 wants 4.56+ -- so keep a separate venv if you need "
+        f"both. Weights on disk are reused either way.\n"
+        f"To try anyway, pass --allow-untested-transformers."
+    )
+
+
+def _suggest(minimum: VersionBound, maximum: VersionBound) -> str:
+    if maximum == (4, 47):
+        return "4.46.3"
+    if minimum and minimum >= (4, 56):
+        return "4.57.1"
+    return "4.46.3"
 
 
 def ensure_tied_weights_attr(cfg) -> bool:
@@ -175,7 +257,12 @@ def ensure_tied_weights_attr(cfg) -> bool:
     return True
 
 
-def load_pretrained(auto_class, cfg):
+def load_pretrained(
+    auto_class,
+    cfg,
+    minimum: VersionBound = None,
+    maximum: VersionBound = None,
+):
     """Load a checkpoint, avoiding accelerate's device-map inference by default.
 
     LLaDA ships as remote code written against an older transformers.  Newer
@@ -187,7 +274,12 @@ def load_pretrained(auto_class, cfg):
     """
     import torch as _torch
 
-    check_transformers_version(strict=not getattr(cfg, "allow_untested", False))
+    check_transformers_version(
+        minimum=minimum,
+        maximum=maximum,
+        strict=not getattr(cfg, "allow_untested", False),
+        model=cfg.model_path or "this checkpoint",
+    )
     if ensure_tied_weights_attr(cfg):
         print("[compat] installed PreTrainedModel.all_tied_weights_keys = {} "
               "(checkpoint reports weight_tying=False)")

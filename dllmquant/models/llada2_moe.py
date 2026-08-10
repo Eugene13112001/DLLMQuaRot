@@ -120,7 +120,10 @@ class LLaDA2MoEAdapter(LLaDAAdapter):
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.cfg.model_path, trust_remote_code=True
         )
-        self.model = load_pretrained(AutoModelForCausalLM, self.cfg)
+        self.model = load_pretrained(
+            AutoModelForCausalLM, self.cfg,
+            self.TRANSFORMERS_MIN, self.TRANSFORMERS_MAX,
+        )
         self.model.eval()
         self.mask_id = self._discover_mask_id()
         self._validate()
