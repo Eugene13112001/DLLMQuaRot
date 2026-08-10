@@ -80,38 +80,92 @@ def test_shim_checks_the_llama_style_config_key_too(monkeypatch):
         ensure_tied_weights_attr(_Cfg())
 
 
-def test_version_guard_rejects_a_major_release_ahead(monkeypatch):
+def test_version_guard_rejects_a_release_past_the_window(monkeypatch):
     """Fail in a second, not after downloading 16 GB and crashing inside
     modeling_utils with a traceback that names none of the real cause."""
     import transformers
 
     from dllmquant.models.base import check_transformers_version
+    from dllmquant.models.llada import LLaDAAdapter
 
     monkeypatch.setattr(transformers, "__version__", "5.14.1")
     with pytest.raises(RuntimeError) as exc:
-        check_transformers_version()
+        check_transformers_version(
+            LLaDAAdapter.TRANSFORMERS_MIN, LLaDAAdapter.TRANSFORMERS_MAX
+        )
     msg = str(exc.value)
-    assert "4.46.3" in msg and "4.38.2" in msg
+    assert "4.46.3" in msg
     assert "--allow-untested-transformers" in msg
 
 
-def test_version_guard_passes_supported_releases(monkeypatch):
+def test_version_guard_rejects_a_release_below_the_window(monkeypatch):
+    """The two LLaDA families pull in opposite directions: 4.46 is fine for
+    1.5 and too old for 2.0, whose remote code needs `dynamic_rope_update`."""
     import transformers
 
     from dllmquant.models.base import check_transformers_version
+    from dllmquant.models.llada2_moe import LLaDA2MoEAdapter
 
-    for v in ("4.38.2", "4.46.3", "4.57.0"):
+    monkeypatch.setattr(transformers, "__version__", "4.46.3")
+    with pytest.raises(RuntimeError) as exc:
+        check_transformers_version(
+            LLaDA2MoEAdapter.TRANSFORMERS_MIN, LLaDA2MoEAdapter.TRANSFORMERS_MAX
+        )
+    msg = str(exc.value)
+    assert "older" in msg
+    assert "4.57.1" in msg
+
+
+def test_the_two_llada_windows_do_not_overlap(monkeypatch):
+    """One venv cannot serve both models. Asserting it here keeps the fact
+    from being rediscovered as a confusing ImportError."""
+    import transformers
+
+    from dllmquant.models.base import check_transformers_version
+    from dllmquant.models.llada import LLaDAAdapter
+    from dllmquant.models.llada2_moe import LLaDA2MoEAdapter
+
+    for v in ("4.38.2", "4.46.3", "4.56.2", "4.57.1", "5.0.0"):
         monkeypatch.setattr(transformers, "__version__", v)
-        assert check_transformers_version() == v
+        ok = []
+        for adapter in (LLaDAAdapter, LLaDA2MoEAdapter):
+            try:
+                check_transformers_version(
+                    adapter.TRANSFORMERS_MIN, adapter.TRANSFORMERS_MAX
+                )
+                ok.append(adapter.__name__)
+            except RuntimeError:
+                pass
+        assert len(ok) == 1, f"{v} accepted by {ok}"
+
+
+def test_version_guard_passes_releases_inside_the_window(monkeypatch):
+    import transformers
+
+    from dllmquant.models.base import check_transformers_version
+    from dllmquant.models.llada import LLaDAAdapter
+
+    for v in ("4.38.2", "4.46.3"):
+        monkeypatch.setattr(transformers, "__version__", v)
+        got = check_transformers_version(
+            LLaDAAdapter.TRANSFORMERS_MIN, LLaDAAdapter.TRANSFORMERS_MAX
+        )
+        assert got == v
 
 
 def test_version_guard_can_be_waived(monkeypatch):
     import transformers
 
     from dllmquant.models.base import check_transformers_version
+    from dllmquant.models.llada import LLaDAAdapter
 
     monkeypatch.setattr(transformers, "__version__", "5.14.1")
-    assert check_transformers_version(strict=False) == "5.14.1"
+    got = check_transformers_version(
+        LLaDAAdapter.TRANSFORMERS_MIN,
+        LLaDAAdapter.TRANSFORMERS_MAX,
+        strict=False,
+    )
+    assert got == "5.14.1"
 
 
 def test_dtype_kwarg_follows_the_transformers_rename(monkeypatch):

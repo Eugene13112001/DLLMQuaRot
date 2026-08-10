@@ -109,6 +109,14 @@ class ExpertCoverage:
 class LLaDA2MoEAdapter(LLaDAAdapter):
     """LLaDA2.0-mini (16B-A1B) and LLaDA2.0-flash (100B-A6B)."""
 
+    # `modeling_llada2_moe.py` imports `dynamic_rope_update` (the RoPE refactor)
+    # and `TransformersKwargs`; neither exists before 4.56.  No upper bound --
+    # unlike LLaDA-1.5's, this remote code is recent enough that no later
+    # release has been shown to break it.  Note the two windows do not overlap
+    # with LLaDA-1.5's (4.38-4.46), so one venv cannot serve both models.
+    TRANSFORMERS_MIN = (4, 56)
+    TRANSFORMERS_MAX = None
+
     def __init__(self, cfg: DLLMQuantConfig):
         super().__init__(cfg)
         self.mask_id = -1  # discovered from the checkpoint
