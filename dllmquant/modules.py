@@ -146,13 +146,23 @@ def wrap_linears(
     the qualified name and returns True for layers that must stay FP.
     """
     replaced: dict[str, QuantLinear] = {}
+    # The list has to be materialised -- the tree is mutated as we go, and
+    # walking a module tree while replacing its children is not safe.  But
+    # holding it whole keeps every original weight alive until the loop ends,
+    # which doubles the block's footprint at the peak: for one LLaDA2.0 MoE
+    # block that is 256 experts x 3 projections, about 1.6 GB of bf16 that has
+    # already been superseded.  Each entry is therefore dropped as soon as its
+    # replacement is installed, so the peak is the block plus one weight.
     targets = list(_iter_named_linears(block, prefix))
-    for full, attr, parent, linear in targets:
+    for i, (full, attr, parent, linear) in enumerate(targets):
         if skip is not None and skip(full):
+            targets[i] = None
             continue
         q = QuantLinear.from_linear(linear, w_cfg, a_cfg, name=full)
         setattr(parent, attr, q)
         replaced[full] = q
+        targets[i] = None
+        del linear, parent
     return replaced
 
 

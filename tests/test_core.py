@@ -578,6 +578,36 @@ def test_wrap_linears_replaces_and_skips():
     assert out.shape == (4, 8)
 
 
+def test_wrapping_frees_each_linear_before_taking_the_next():
+    """Peak memory, measured by reference rather than by megabytes.
+
+    The cost is paid *during* the walk, not after it: holding the list of
+    targets keeps every superseded weight resident until the loop ends, which
+    doubles a block's footprint at the peak -- about 1.6 GB for one LLaDA2.0
+    MoE block, enough to lose a run on a shared card.  Checking after the call
+    proves nothing, since the list dies with the function either way, so the
+    skip callback is used as a window into the middle of the loop.
+    """
+    import gc
+    import weakref
+
+    net = torch.nn.Sequential(*[torch.nn.Linear(16, 16) for _ in range(4)])
+    ghosts = [weakref.ref(m) for m in net]
+    already_freed = []
+
+    def probe(name: str) -> bool:
+        gc.collect()
+        already_freed.append(sum(g() is None for g in ghosts))
+        return False
+
+    w_cfg = QuantConfig(n_bits=4, granularity="per_channel")
+    a_cfg = QuantConfig(n_bits=4, granularity="per_token")
+    wrap_linears(net, w_cfg, a_cfg, skip=probe)
+
+    # Entering the n-th iteration, the n-1 already replaced must be gone.
+    assert already_freed == [0, 1, 2, 3]
+
+
 def test_quant_linear_matches_fp_when_quantization_is_off():
     linear = torch.nn.Linear(16, 8)
     q = QuantLinear(
