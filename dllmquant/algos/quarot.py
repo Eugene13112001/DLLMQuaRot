@@ -205,10 +205,10 @@ def fuse_norm_into_linears(norm: nn.Module, consumers: Sequence[nn.Linear]) -> N
 
     g = weight.data.to(torch.float64)
     for lin in consumers:
-        if lin.in_features != g.numel():
+        if in_width(lin) != g.numel():
             raise ValueError(
                 f"norm width {g.numel()} does not match consumer in_features "
-                f"{lin.in_features}"
+                f"{in_width(lin)}"
             )
         lin.weight.data = (
             lin.weight.data.to(torch.float64) * g.unsqueeze(0)
@@ -218,6 +218,22 @@ def fuse_norm_into_linears(norm: nn.Module, consumers: Sequence[nn.Linear]) -> N
 
 
 # ------------------------------------------------------------- rotations
+
+
+def in_width(module: nn.Module) -> int:
+    """Input width of a linear map, whether or not it is an ``nn.Linear``.
+
+    An MoE router is a plain ``nn.Parameter`` of shape ``[experts, hidden]``
+    with an ``F.linear`` call around it -- no ``in_features`` -- and it reads
+    the residual stream like any projection, so the rotation has to reach it.
+    """
+    n = getattr(module, "in_features", None)
+    return int(n) if n is not None else int(module.weight.shape[-1])
+
+
+def out_width(module: nn.Module) -> int:
+    n = getattr(module, "out_features", None)
+    return int(n) if n is not None else int(module.weight.shape[0])
 
 
 @dataclass
@@ -238,14 +254,14 @@ class RotationPlan:
                     f"embedding width {e.weight.shape[-1]} != d_model {d_model}"
                 )
         for lin in self.input_linears:
-            if lin.in_features != d_model:
+            if in_width(lin) != d_model:
                 raise ValueError(
-                    f"input linear expects {lin.in_features}, d_model is {d_model}"
+                    f"input linear expects {in_width(lin)}, d_model is {d_model}"
                 )
         for lin in self.output_linears:
-            if lin.out_features != d_model:
+            if out_width(lin) != d_model:
                 raise ValueError(
-                    f"output linear yields {lin.out_features}, d_model is {d_model}"
+                    f"output linear yields {out_width(lin)}, d_model is {d_model}"
                 )
 
 

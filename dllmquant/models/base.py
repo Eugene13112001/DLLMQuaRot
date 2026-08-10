@@ -548,6 +548,15 @@ class ModelAdapter(ABC):
 
     # -------------------------------------------------------------- rotation
 
+    def _extra_residual_readers(self, block: nn.Module) -> List[Tuple[str, nn.Module]]:
+        """``(leaf, module)`` pairs that read the residual but are not Linear.
+
+        Nothing in a dense block qualifies, so the rotation planner's scan for
+        ``nn.Linear`` sees everything there is.  An MoE router does not: it is
+        a bare ``nn.Parameter`` with an ``F.linear`` call around it.
+        """
+        return []
+
     def rotation_plan(self):
         """Which modules take part in the QuaRot residual-stream rotation."""
         raise NotImplementedError(

@@ -178,6 +178,54 @@ def test_value_head_rotation_leaves_the_function_unchanged():
     assert torch.allclose(adapter.model(ids).logits, before, atol=2e-3)
 
 
+def _adapter_with_final_norm_named(*names: str):
+    """A TinyAdapter whose final norm carries the given leaf name(s)."""
+    cfg = _config()
+    adapter = TinyAdapter(cfg)
+    adapter.load()
+    original = adapter.model.ln_f
+    del adapter.model.ln_f
+    for name in names:
+        setattr(adapter.model, name, original if name == names[0] else TinyRMSNorm(D))
+    return adapter
+
+
+def test_a_final_norm_called_norm_is_found():
+    """LLaDA2.0 calls it `norm`; LLaDA-1.5 calls it `ln_f`.
+
+    Not finding it is not an error at plan time -- the head simply rotates
+    without its norm being fused, and the only symptom is a broken invariance
+    number that looks like a bug in the rotation itself.
+    """
+    adapter = _adapter_with_final_norm_named("norm")
+    plan = adapter.rotation_plan()
+
+    fused = [n for n, _ in plan.norm_groups]
+    assert adapter.model.norm in fused
+    assert len(plan.norm_groups) == 2 * len(adapter.blocks) + 1
+
+
+def test_a_specific_final_norm_wins_over_the_generic_one():
+    adapter = _adapter_with_final_norm_named("ln_f", "norm")
+    plan = adapter.rotation_plan()
+
+    fused = [n for n, _ in plan.norm_groups]
+    assert adapter.model.ln_f in fused
+    assert adapter.model.norm not in fused
+
+
+def test_a_head_with_no_final_norm_is_refused():
+    from dllmquant.models.base import ArchitectureMismatch
+
+    cfg = _config()
+    adapter = TinyAdapter(cfg)
+    adapter.load()
+    del adapter.model.ln_f
+
+    with pytest.raises(ArchitectureMismatch, match="final norm"):
+        adapter.rotation_plan()
+
+
 def _gqa_pieces(n_heads=4, n_kv_heads=2, head_dim=4):
     d = n_heads * head_dim
     qkv = nn.Linear(d, (n_heads + 2 * n_kv_heads) * head_dim, bias=False)

@@ -40,7 +40,11 @@ _V_NAMES = ("v_proj", "wv", "value")
 # MLP's norm and silently feed the projection the wrong tensor.
 _ATTN_NORM_NAMES = ("attn_norm", "input_layernorm", "ln_1", "norm1", "ln_attn")
 _FF_NORM_NAMES = ("ff_norm", "post_attention_layernorm", "ln_2", "norm2", "ln_mlp")
-_FINAL_NORM_NAMES = ("ln_f", "final_layernorm", "norm_f", "final_norm")
+# Ordered by specificity: the first name present wins, so a model that has
+# both `ln_f` and something generically called `norm` outside its blocks keeps
+# the one it meant.  LLaDA2.0's is the bare `norm`, which is why it is here at
+# all -- and why it is last.
+_FINAL_NORM_NAMES = ("ln_f", "final_layernorm", "norm_f", "final_norm", "norm")
 _EMBED_NAMES = ("wte", "embed_tokens", "embed_in", "word_embeddings")
 _LM_HEAD_NAMES = ("ff_out", "lm_head", "embed_out")
 
@@ -393,6 +397,10 @@ class LLaDAAdapter(ModelAdapter):
                 elif leaf in _RESIDUAL_OUT_NAMES:
                     outs.append((leaf, module))
 
+            # Modules that read the residual stream without being nn.Linear.
+            # Empty for LLaDA-1.5; an MoE router lives here.
+            ins.extend(self._extra_residual_readers(block))
+
             if not ins or not outs:
                 raise ArchitectureMismatch(
                     f"block exposes {[n for n, _ in ins]} inputs and "
@@ -441,20 +449,42 @@ class LLaDAAdapter(ModelAdapter):
         # In LLaDA it is called `ff_out` -- the same leaf name as the MLP
         # down-projection inside every block -- so it must be located strictly
         # outside the block list.
-        head, final_norm = None, None
+        head = None
+        norm_candidates = {}
+        outside_norms = set()
         for name, module in self.model.named_modules():
             if name.startswith(blocks_prefix) or name == self._blocks_path:
                 continue
             leaf = name.split(".")[-1]
             if is_linear(module) and leaf in _LM_HEAD_NAMES:
                 head = module
-            elif leaf in _FINAL_NORM_NAMES and hasattr(module, "weight"):
-                final_norm = module
+                continue
+            if not is_linear(module) and hasattr(module, "weight"):
+                if getattr(module, "weight", None) is not None:
+                    outside_norms.add(leaf)
+                if leaf in _FINAL_NORM_NAMES:
+                    norm_candidates.setdefault(leaf, module)
+
+        final_norm = next(
+            (norm_candidates[n] for n in _FINAL_NORM_NAMES if n in norm_candidates),
+            None,
+        )
 
         if head is not None:
             input_linears.append(head)
-            if final_norm is not None:
-                norm_groups.append((final_norm, [head]))
+            if final_norm is None:
+                # Skipping quietly is what turns a naming mismatch into a
+                # wrong number: the head rotates, the norm's per-channel
+                # weight does not follow, and the only symptom is an
+                # invariance error large enough to look like a deeper bug.
+                raise ArchitectureMismatch(
+                    "the LM head rotates with the residual stream, but no "
+                    f"final norm was found among {_FINAL_NORM_NAMES} outside "
+                    "the blocks. Its weight has to be fused into the head "
+                    "before rotating, or invariance breaks. Norm-like modules "
+                    f"outside the blocks: {sorted(outside_norms)}"
+                )
+            norm_groups.append((final_norm, [head]))
 
         return RotationPlan(
             embeddings=embeddings,

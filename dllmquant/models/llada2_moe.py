@@ -262,6 +262,37 @@ class LLaDA2MoEAdapter(LLaDAAdapter):
             )
         }
 
+    # -------------------------------------------------------------- rotation
+
+    def _extra_residual_readers(self, block: nn.Module) -> List[tuple]:
+        """The routers, which read the residual stream but are not Linear.
+
+        A router computes ``F.linear(h, self.weight)`` from a bare Parameter,
+        so it is invisible to a scan for ``nn.Linear`` -- and it was, in both
+        directions at once: its weight never took the rotation, and it never
+        received the norm gain that the fusion moved out of the norm and into
+        the other consumers.  Either alone breaks invariance; both together
+        change which experts a token is routed to, which is not a numerical
+        error at all.
+
+        It stays out of the *quantization* set regardless -- `gate` is in
+        skip_leaf_names -- and that is a separate decision from rotation:
+        rotating a weight is exact, quantizing it is not.
+        """
+        out = []
+        for name, module in block.named_modules():
+            leaf = name.split(".")[-1]
+            if leaf not in _ROUTER_NAMES:
+                continue
+            weight = getattr(module, "weight", None)
+            if weight is not None and weight.dim() == 2:
+                # Linear routers are collected here too: the main scan only
+                # takes leaf names it knows, and `gate` is not one of them, so
+                # a Linear router would otherwise trip the unclassified-layer
+                # guard instead of simply being rotated.
+                out.append((leaf, module))
+        return out
+
     def _probe_rotary_dim(self) -> Optional[int]:
         """LLaDA2.0 rotates ``head_dim * partial_rotary_factor`` channels only."""
         cfg = self.model.config

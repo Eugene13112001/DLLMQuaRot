@@ -199,17 +199,104 @@ def test_layout_updates_the_mask_grid():
     assert adapter.block_length == 8
 
 
+# ------------------------------------------------------------ router rotation
+
+
+def test_router_logits_are_unchanged_by_the_rotation():
+    """The router reads the residual stream, so R1 has to reach it.
+
+    It is a bare Parameter, so the scan for nn.Linear missed it twice over:
+    the weight never took the rotation, and the norm gain that fusion moved
+    into the other consumers never reached it either.  The consequence is not
+    a small numerical error -- different experts get selected.
+    """
+    import torch.nn.functional as F
+
+    from dllmquant.algos.quarot import (
+        RotationPlan,
+        fuse_norm_into_linears,
+        random_hadamard_matrix,
+        rotate_residual_stream,
+    )
+    from test_pipeline_e2e import TinyRMSNorm
+
+    torch.manual_seed(0)
+    d, n_experts = 8, 4
+
+    gate = _Gate(num_experts=n_experts, top_k=2, hidden=d)
+    with torch.no_grad():
+        gate.weight.copy_(torch.randn(n_experts, d))
+    norm = TinyRMSNorm(d)
+    with torch.no_grad():
+        norm.weight.copy_(torch.rand(d) + 0.5)  # a gain that actually bites
+
+    h = torch.randn(2, 5, d)
+    before = F.linear(norm(h), gate.weight)
+
+    fuse_norm_into_linears(norm, [gate])
+    q = random_hadamard_matrix(d, seed=1)
+    rotate_residual_stream(
+        RotationPlan(
+            embeddings=[], input_linears=[gate], output_linears=[],
+            norm_groups=[], head_pairs=[],
+        ),
+        q,
+    )
+
+    after = F.linear(norm(h @ q), gate.weight)
+    assert torch.allclose(after, before, atol=1e-5)
+
+
+def test_the_router_is_collected_as_a_residual_reader():
+    adapter = _adapter()
+    block = _MoEBlock()
+
+    found = adapter._extra_residual_readers(block)
+    assert [leaf for leaf, _ in found] == ["gate"]
+    assert found[0][1] is block.gate
+
+
+def test_a_linear_router_is_collected_too():
+    adapter = _adapter()
+
+    class LinearRouterBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = nn.Linear(4, 3, bias=False)
+
+    block = LinearRouterBlock()
+    assert [m for _, m in adapter._extra_residual_readers(block)] == [block.gate]
+
+
+def test_a_dense_block_contributes_no_extra_readers():
+    """LLaDA-1.5 must see exactly what it saw before."""
+    from dllmquant.models.base import ModelAdapter
+
+    class Plain(ModelAdapter):
+        def load(self):
+            pass
+
+        @property
+        def blocks(self):
+            return nn.ModuleList()
+
+        def make_probe(self, block):
+            raise NotImplementedError
+
+    assert Plain()._extra_residual_readers(_MoEBlock()) == []
+
+
 # --------------------------------------------------------- expert coverage
 
 
 class _Gate(nn.Module):
     """LLaDA2.0's router: a bare Parameter, and it returns its own top-k."""
 
-    def __init__(self, num_experts=4, top_k=2):
+    def __init__(self, num_experts=4, top_k=2, hidden=4):
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
-        self.weight = nn.Parameter(torch.zeros(num_experts, 4))
+        self.weight = nn.Parameter(torch.zeros(num_experts, hidden))
         self.routed = torch.tensor([[0, 1], [0, 2]])
 
     def forward(self, hidden_states):
