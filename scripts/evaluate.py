@@ -147,6 +147,11 @@ def main() -> int:
                         "certainty_weighting": not args.no_cgq_weights,
                         "rotation": args.rotate,
                         "a_group_size": args.a_group_size,
+                        # Weights had no entry here while activations did, so a
+                        # finished run could not be asked what granularity its
+                        # weights used -- the one question that decides whether
+                        # two results belong on the same axis.
+                        "group_size": args.group_size,
                         # The generation budget belongs in the record: two runs
                         # at different gen_length are not comparable, and a
                         # file that does not say which one it was cannot be
