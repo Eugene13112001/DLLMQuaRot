@@ -591,3 +591,26 @@ def test_rotation_and_ia_aq_address_different_axes():
     )
     per_feature.find_params(x)
     assert per_feature.scale.shape == (1, d)
+
+
+def test_r2_fuses_into_exactly_what_it_wraps():
+    """The online Hadamard cancels only if both halves name the same modules.
+
+    H^T is fused into the down-projection's weight and H is applied to its
+    input at runtime. A module in one set and not the other is not an error --
+    it is a rotation that never cancels, and the only symptom is worse output.
+    """
+    from dllmquant.algos.quarot import OnlineHadamard
+
+    adapter, _ = _rotated_adapter()
+    fused = {id(m) for m in adapter.down_projections()}
+    assert fused, "no down-projections found at all"
+
+    adapter.install_online_hadamards()
+    wrapped = sum(
+        1
+        for block in adapter.blocks
+        for _, m in block.named_modules()
+        if isinstance(m, OnlineHadamard)
+    )
+    assert wrapped == len(fused)

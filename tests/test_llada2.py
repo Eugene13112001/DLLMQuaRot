@@ -565,3 +565,81 @@ def test_blocks_fully_inside_the_prompt_are_not_decoded():
     _, bounds = adapter._sequence_layout(8, TMASConfig(
         gen_length=4, block_length=4, steps=2))
     assert bounds == [(8, 12)]
+
+
+def test_every_router_name_is_kept_out_of_quantization():
+    """Rotating a router is exact; quantizing one changes which expert runs.
+
+    The two lists -- what counts as a router, and what stays in FP -- are the
+    same list for that reason.
+    """
+    from dllmquant.config import ROUTER_NAMES, DLLMQuantConfig
+
+    cfg = DLLMQuantConfig()
+    for name in ROUTER_NAMES:
+        assert cfg.skip(f"model.layers.1.mlp.{name}"), f"{name} would be quantized"
+
+
+def test_the_experts_own_gate_is_still_quantized():
+    """`gate` is a prefix of `gate_proj`, and skipping by substring would take
+    out 256 ordinary MLP layers per block along with the router."""
+    from dllmquant.config import DLLMQuantConfig
+
+    cfg = DLLMQuantConfig()
+    assert not cfg.skip("model.layers.1.mlp.experts.0.gate_proj")
+    assert not cfg.skip("model.layers.1.mlp.shared_experts.gate_proj")
+
+
+# --------------------------------------------------------- shape provenance
+
+
+class _OddConfig:
+    """A config where head_dim is deliberately not hidden // n_heads."""
+
+    hidden_size = 2048
+    num_attention_heads = 16
+    num_key_value_heads = 4
+    head_dim = 256
+    vocab_size = 1000
+
+
+class _OddModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList([_Layer(2) for _ in range(2)])
+        self.config = _OddConfig()
+
+
+def test_head_dim_is_read_from_the_config_not_derived():
+    """`hidden // n_heads` is right for both LLaDA families and wrong as a rule.
+
+    A config that states head_dim states it for a reason; deriving it instead
+    would reshape every attention tensor against the wrong width, and nothing
+    would raise -- the shapes still multiply out.
+    """
+    from dllmquant.models.llada import LLaDAAdapter
+
+    adapter = LLaDAAdapter.__new__(LLaDAAdapter)
+    adapter.mask_id = 0
+    adapter.model = _OddModel()
+    adapter._validate()
+
+    assert adapter.head_dim == 256, "head_dim was derived instead of read"
+    assert adapter.d_model == 2048, "d_model must be the hidden size"
+    assert adapter.n_heads * adapter.head_dim != adapter.d_model
+
+
+def test_head_dim_still_falls_back_when_the_config_is_silent():
+    from dllmquant.models.llada import LLaDAAdapter
+
+    class Silent(_OddConfig):
+        head_dim = None
+
+    model = _OddModel()
+    model.config = Silent()
+    adapter = LLaDAAdapter.__new__(LLaDAAdapter)
+    adapter.mask_id = 0
+    adapter.model = model
+    adapter._validate()
+
+    assert adapter.head_dim == 2048 // 16

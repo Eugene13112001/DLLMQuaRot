@@ -32,6 +32,14 @@ _ATTENTION_NAMES = (
     "q_proj", "wq", "qkv_proj", "Wqkv",
 )
 
+# The MLP's down-projection, under every name the supported families use.
+# Written once because R2 needs it twice, for two halves of the same trick:
+# H^T is fused into these weights, and the online Hadamard is wrapped around
+# these modules. If the two lists ever named different sets, the rotation
+# would stop cancelling and the model would be quietly wrong -- no exception,
+# just worse output.
+DOWN_PROJECTION_NAMES = ("ff_out", "down_proj", "w2")
+
 
 class ArchitectureMismatch(RuntimeError):
     """Raised when the loaded checkpoint does not look like what we expect."""
@@ -592,7 +600,7 @@ class ModelAdapter(ABC):
         for block in self.blocks:
             for name, module in block.named_modules():
                 if (
-                    name.split(".")[-1] in ("ff_out", "down_proj", "w2")
+                    name.split(".")[-1] in DOWN_PROJECTION_NAMES
                     and isinstance(module, nn.Linear)
                 ):
                     out.append(module)
@@ -605,7 +613,7 @@ class ModelAdapter(ABC):
         for block in self.blocks:
             for parent_name, parent in list(block.named_modules()):
                 for attr, child in list(parent.named_children()):
-                    if attr in ("ff_out", "down_proj", "w2") and isinstance(
+                    if attr in DOWN_PROJECTION_NAMES and isinstance(
                         child, nn.Linear
                     ):
                         setattr(parent, attr, OnlineHadamard(child, name=attr))

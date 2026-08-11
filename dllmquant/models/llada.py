@@ -16,6 +16,7 @@ import torch.nn as nn
 
 from ..config import DLLMQuantConfig
 from .base import (
+    DOWN_PROJECTION_NAMES,
     ArchitectureMismatch,
     AttentionParts,
     AttentionProbe,
@@ -55,7 +56,7 @@ _RESIDUAL_IN_NAMES = _ATTN_IN_NAMES + (
     "ff_proj", "gate_proj", "up_proj", "w1", "w3",
 )
 _ATTN_OUT_NAMES = ("attn_out", "o_proj", "out_proj", "dense")
-_RESIDUAL_OUT_NAMES = _ATTN_OUT_NAMES + ("ff_out", "down_proj", "w2")
+_RESIDUAL_OUT_NAMES = _ATTN_OUT_NAMES + DOWN_PROJECTION_NAMES
 
 # Public, and derived rather than retyped. Three places used to keep their own
 # copy of these lists and the copies drifted: selfcheck reported "IA-AQ would
@@ -295,7 +296,19 @@ class LLaDAAdapter(ModelAdapter):
         self.n_kv_heads = self._cfg_get(
             cfg, ["n_kv_heads", "num_key_value_heads"], default=self.n_heads
         )
-        self.head_dim = hidden // self.n_heads
+
+        # Read, not derived. `hidden // n_heads` happens to be right for both
+        # LLaDA families, but a config that states head_dim outright is stating
+        # it for a reason, and a model where the two differ would get every
+        # attention-shaped reshape wrong without raising anything.
+        declared = getattr(cfg, "head_dim", None)
+        self.head_dim = int(declared) if declared else hidden // self.n_heads
+
+        # The residual stream is `hidden` wide. That is the same as
+        # n_heads * head_dim in both families here, and code elsewhere has
+        # taken the product as a stand-in; keep the real number so it does not
+        # have to.
+        self.d_model = int(hidden)
 
         if self.n_heads % self.n_kv_heads != 0:
             raise ArchitectureMismatch(

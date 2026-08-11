@@ -154,7 +154,11 @@ def apply_quarot(adapter: ModelAdapter, cfg: DLLMQuantConfig) -> RotationReport:
     """
     rot = cfg.rotation
     plan = adapter.rotation_plan()
-    d_model = adapter.n_heads * adapter.head_dim
+    # The rotation acts on the residual stream, so its width is the model's
+    # hidden size -- equal to n_heads * head_dim in both LLaDA families, but
+    # only equal, not the same thing. Adapters that do not report it fall back
+    # to the product they used to be asked for.
+    d_model = getattr(adapter, "d_model", None) or adapter.n_heads * adapter.head_dim
     device = next(adapter.model.parameters()).device
 
     report = RotationReport(

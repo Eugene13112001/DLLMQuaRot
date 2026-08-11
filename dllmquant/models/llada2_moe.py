@@ -46,7 +46,7 @@ from .base import (
 )
 from .llada import LLaDAAdapter
 
-_ROUTER_NAMES = ("gate", "router", "wg", "gate_proj_moe")
+from ..config import ROUTER_NAMES as _ROUTER_NAMES  # noqa: E402  (see config.py)
 _EXPERT_CONTAINER_NAMES = ("experts", "mlp_experts", "moe_experts")
 
 

@@ -13,6 +13,14 @@ from typing import List, Optional, Sequence  # noqa: F401
 
 from .cache import KVCacheConfig
 
+# An MoE router, by every name the supported families give it. One definition
+# because it answers two questions that must not disagree: which modules are
+# routers (they read the residual stream, so the rotation has to reach them)
+# and which must stay in FP (an error in a router does not degrade an answer,
+# it sends the token to a different expert). A name known to one list and not
+# the other would mean a router that is rotated and then quantized.
+ROUTER_NAMES = ("gate", "router", "wg", "gate_proj_moe")
+
 
 @dataclass
 class QuantConfig:
@@ -257,7 +265,7 @@ class DLLMQuantConfig:
     #     `gate_proj` (an ordinary MLP layer, which must not be skipped).
     # So routers are matched on the exact leaf name, paths on substrings.
     skip_leaf_names: List[str] = field(
-        default_factory=lambda: ["gate", "router", "wg", "lm_head"]
+        default_factory=lambda: list(ROUTER_NAMES) + ["lm_head"]
     )
     skip_patterns: List[str] = field(
         default_factory=lambda: ["lm_head", "embed_tokens", "wte", "embeddings"]
