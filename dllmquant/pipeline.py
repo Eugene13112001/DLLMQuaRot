@@ -74,6 +74,14 @@ class QuantReport:
     ia_aq: Dict[str, Dict[str, float]] = field(default_factory=dict)
     n_calibration: int = 0
     unweighted_layers: List[str] = field(default_factory=list)
+    # Layers no calibration token reached, quantized by plain rounding. In an
+    # MoE this is most of them, and it is the number that decides whether the
+    # calibration budget means anything.
+    starved_layers: List[str] = field(default_factory=list)
+    # Layers whose factorization needed more damping than configured. Their
+    # proxy loss is deflated by that damping and cannot be compared with the
+    # rest.
+    damped_layers: List[str] = field(default_factory=list)
     rotation: Optional[object] = None  # RotationReport, if --rotate was used
     restored_blocks: set = field(default_factory=set)
     seconds: float = 0.0
@@ -88,8 +96,25 @@ class QuantReport:
         out += [
             f"quantized {len(self.layers)} layers in {self.seconds:.1f}s",
             f"  calibration snapshots: {self.n_calibration}",
+        ]
+        if self.starved_layers:
+            share = 100 * len(self.starved_layers) / len(self.layers)
+            out.append(
+                f"  !! {len(self.starved_layers)} layers ({share:.0f}%) saw no "
+                "calibration tokens and were rounded, not solved -- the proxy "
+                "loss below is computed over the rest"
+            )
+        if self.damped_layers:
+            out.append(
+                f"  {len(self.damped_layers)} layers needed extra damping; a "
+                "proxy loss from those is deflated by it, not small on merit"
+            )
+        solved = [l for l in self.layers if l.name not in set(self.starved_layers)]
+        solved = solved or self.layers
+        losses = [l.proxy_loss for l in solved]
+        out += [
             f"  proxy loss  mean {sum(losses) / len(losses):.5f}  "
-            f"max {max(losses):.5f} ({max(self.layers, key=lambda l: l.proxy_loss).name})",
+            f"max {max(losses):.5f} ({max(solved, key=lambda l: l.proxy_loss).name})",
         ]
         if self.ia_aq:
             gains = [
@@ -477,10 +502,16 @@ class DLLMQuantPipeline:
             for layer in layers.values():
                 layer._input_callback = None
 
+        starved = []
         for name, layer in layers.items():
             t0 = time.time()
             q, loss = solvers[name].quantize()
             layer.set_weight(q)
+            if solvers[name].starved:
+                starved.append(name)
+                self.report.starved_layers.append(name)
+            elif solvers[name].damping_used > self.cfg.cgq.percdamp:
+                self.report.damped_layers.append(name)
             self.report.layers.append(
                 LayerReport(
                     name=name,
@@ -492,9 +523,15 @@ class DLLMQuantPipeline:
                 )
             )
             solvers[name].free()
-            if verbose:
+            if verbose and not solvers[name].starved:
                 print(f"    {name}: proxy loss {loss:.5f} "
                       f"({time.time() - t0:.1f}s)")
+
+        if verbose and starved:
+            # Printed as one line, not 768: this is the normal case for an MoE
+            # and the per-layer lines would bury everything else.
+            print(f"    {len(starved)}/{len(layers)} layers saw no calibration "
+                  f"tokens and fell back to RTN")
 
 
 __all__ = ["DLLMQuantPipeline", "QuantReport", "LayerReport", "SEQUENTIAL_GROUPS"]

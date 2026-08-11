@@ -119,6 +119,14 @@ class CGQ:
         )
         self.total_weight = 0.0
         self.n_batches = 0
+        # Set when the layer had to be quantized without calibration data.
+        self.starved = False
+        # Damping the factorization actually needed. Worth recording because
+        # the proxy loss divides by the inverse-Hessian diagonal: heavy damping
+        # inflates that diagonal and shrinks the reported loss towards zero,
+        # so a small number from a heavily damped layer says nothing about how
+        # well it was quantized.
+        self.damping_used = cfg.percdamp
 
     # ------------------------------------------------------------------ input
 
@@ -157,9 +165,43 @@ class CGQ:
     # -------------------------------------------------------------- the solve
 
     @torch.no_grad()
+    def round_to_nearest(self) -> torch.Tensor:
+        """Quantize the weight on its own terms, with no calibration data.
+
+        In a 256-expert MoE most experts see nothing at all from a calibration
+        set of a few hundred sequences -- routing is concentrated, so the
+        median expert is starved however large the budget gets.  There is no
+        Hessian to compensate against and nothing to measure, but the layer
+        still has to be quantized: refusing would abandon hours of work over a
+        weight that plain rounding handles about as well as anything could.
+        """
+        W = self.layer.weight.data.clone().to(torch.float32)
+        rq = _RowQuantizer(self.w_cfg, W)
+        Q = torch.zeros_like(W)
+
+        if rq.group_size > 0:
+            for g0 in range(0, self.columns, rq.group_size):
+                g1 = min(g0 + rq.group_size, self.columns)
+                rq.find_params_group(W[:, g0:g1], g0 // rq.group_size)
+                for col in range(g0, g1):
+                    Q[:, col] = rq.quantize_column(W[:, col])
+        else:
+            rq.find_params_rows(W)
+            for col in range(self.columns):
+                Q[:, col] = rq.quantize_column(W[:, col])
+        return Q
+
+    @torch.no_grad()
     def quantize(self) -> tuple[torch.Tensor, float]:
         """Return (quantized weight, mean squared proxy loss)."""
         cfg = self.cfg
+        if self.total_weight <= 0:
+            # No tokens reached this layer. The proxy loss is reported as 0
+            # because there is no calibration distribution to measure against
+            # -- not because the rounding was free.
+            self.starved = True
+            return self.round_to_nearest(), 0.0
+
         W = self.layer.weight.data.clone().to(torch.float32)
         H = self._normalized_hessian().clone()
 
@@ -205,6 +247,7 @@ class CGQ:
                 break
             except Exception:
                 damp_scale *= 10.0
+        self.damping_used = damp_scale
         if Hinv is None:
             raise RuntimeError(
                 f"{self.layer.name}: Hessian not positive definite even at "

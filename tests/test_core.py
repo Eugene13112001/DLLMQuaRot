@@ -415,17 +415,45 @@ def test_certainty_weighting_helps_on_the_tokens_it_prioritises():
     assert err_on(q_weighted, x_masked) < err_on(q_plain, x_masked)
 
 
-def test_cgq_refuses_to_solve_without_data():
+def _starved_solver(n_bits=4):
     linear = torch.nn.Linear(8, 8, bias=False)
-    w_cfg = QuantConfig(n_bits=4, granularity="per_channel")
+    w_cfg = QuantConfig(n_bits=n_bits, granularity="per_channel")
     layer = QuantLinear(linear, w_cfg, QuantConfig(n_bits=16, granularity="per_token"))
-    solver = CGQ(layer, CGQConfig(), w_cfg)
-    try:
-        solver.quantize()
-    except RuntimeError as e:
-        assert "no calibration data" in str(e)
-    else:
-        raise AssertionError("expected a RuntimeError")
+    return layer, CGQ(layer, CGQConfig(), w_cfg)
+
+
+def test_a_layer_with_no_calibration_falls_back_to_rounding():
+    """In a 256-expert MoE most experts are reached by nothing at all.
+
+    Refusing to quantize them means abandoning an hours-long run over a weight
+    that plain rounding handles about as well as anything could without data.
+    """
+    layer, solver = _starved_solver()
+    q, loss = solver.quantize()
+
+    assert solver.starved is True
+    assert loss == 0.0
+    assert q.shape == layer.weight.shape
+    assert torch.isfinite(q).all()
+    # It really was quantized, not passed through.
+    assert not torch.allclose(q, layer.weight.data.float())
+    assert len(q.unique()) <= 8 * 2**4  # per-row scales, 4 bits each
+
+
+def test_the_fallback_is_not_silent():
+    """A zero proxy loss on a starved layer means 'nothing to measure', not
+    'no error' -- so the flag, not the loss, is what callers must read."""
+    _, solver = _starved_solver()
+    assert solver.starved is False
+    solver.quantize()
+    assert solver.starved is True
+
+
+def test_a_solved_layer_is_not_marked_starved():
+    layer, solver = _starved_solver()
+    solver.add_batch(torch.randn(64, 8))
+    solver.quantize()
+    assert solver.starved is False
 
 
 # ---------------------------------------------------------------------- IA-AQ
