@@ -522,3 +522,64 @@ def test_ia_aq_beats_minmax_on_the_value_matrix():
             f"{block}: IA-AQ {stats['weighted_mse']:.6f} > "
             f"min-max {stats['minmax_weighted_mse']:.6f}"
         )
+
+
+# ------------------------------------------------- naming, across the seams
+
+
+def test_every_projection_name_lands_in_a_sequential_group():
+    """A name that matches no group is not refused -- it is quantized last.
+
+    LLaDA2.0 calls its projections `query_key_value` and `dense`, neither of
+    which the hand-written group list contained, so attention fell through to
+    the leftovers and ran *after* the MLP. The MLP was then calibrated against
+    attention that was still in FP, which is the error compounding the groups
+    exist to prevent, and nothing in the output said so.
+    """
+    from dllmquant.models.llada import (
+        ATTENTION_IN_NAMES,
+        ATTENTION_OUT_NAMES,
+        MLP_IN_NAMES,
+        MLP_OUT_NAMES,
+    )
+    from dllmquant.pipeline import SEQUENTIAL_GROUPS
+
+    canonical = set(
+        ATTENTION_IN_NAMES + ATTENTION_OUT_NAMES + MLP_IN_NAMES + MLP_OUT_NAMES
+    )
+    grouped = [name for group in SEQUENTIAL_GROUPS for name in group]
+
+    assert canonical == set(grouped)
+    assert len(grouped) == len(set(grouped)), "a name appears in two groups"
+
+
+def test_the_groups_run_in_execution_order():
+    from dllmquant.pipeline import SEQUENTIAL_GROUPS
+
+    into_attention, out_of_attention, into_mlp, out_of_mlp = SEQUENTIAL_GROUPS
+    assert "query_key_value" in into_attention and "att_proj" in into_attention
+    assert "dense" in out_of_attention and "attn_out" in out_of_attention
+    assert "gate_proj" in into_mlp and "up_proj" in into_mlp
+    assert "down_proj" in out_of_mlp and "ff_out" in out_of_mlp
+
+
+def test_ia_aq_attaches_to_a_fused_projection_under_gqa():
+    """The V columns of a fused QKV start after Q and K, and under grouped
+    query attention K is narrower than Q -- so the offset is not 2/3 of the
+    width."""
+    n_heads, n_kv_heads, head_dim = 16, 4, 128
+    d_q, d_kv = n_heads * head_dim, n_kv_heads * head_dim
+
+    cfg = _config()
+    adapter = TinyAdapter(cfg)
+    adapter.n_heads, adapter.n_kv_heads, adapter.head_dim = n_heads, n_kv_heads, head_dim
+
+    linear = nn.Linear(2048, d_q + 2 * d_kv, bias=False)
+    layer = QuantLinear(linear, cfg.weight, cfg.activation, name="attention.query_key_value")
+    layers = {"blocks.1.attention.query_key_value": layer}
+
+    pipeline = DLLMQuantPipeline(cfg, adapter)
+    pipeline._attach_value_quantizer(layers, nn.Identity(), verbose=False, bi=1)
+
+    assert layer.out_quantizer is not None, "IA-AQ never attached"
+    assert layer.out_slice == (d_q + d_kv, d_q + 2 * d_kv)

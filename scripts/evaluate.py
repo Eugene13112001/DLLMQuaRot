@@ -147,10 +147,19 @@ def main() -> int:
                         "certainty_weighting": not args.no_cgq_weights,
                         "rotation": args.rotate,
                         "a_group_size": args.a_group_size,
+                        # The generation budget belongs in the record: two runs
+                        # at different gen_length are not comparable, and a
+                        # file that does not say which one it was cannot be
+                        # placed next to another one later.
+                        "gen_length": args.gen_length,
+                        "eval_steps": args.eval_steps,
+                        "n_eval": args.n_eval,
                     },
                     "accuracy": result.accuracy,
                     "correct": result.correct,
                     "total": result.total,
+                    "cut_off": result.cut_off,
+                    "cut_off_wrong": result.cut_off_wrong,
                     # Every completion, not a sample of them: generation costs
                     # hours and a change to answer extraction must not require
                     # re-running it. scripts/rescore.py re-parses these.

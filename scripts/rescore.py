@@ -19,6 +19,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from dllmquant.eval import extract_answer  # noqa: E402
+from dllmquant.eval.gsm8k import EvalResult  # noqa: E402
 from dllmquant.report import round_floats, sibling_csv, write_csv  # noqa: E402
 
 
@@ -61,6 +62,19 @@ def main() -> int:
         gained = sum(1 for c in changed if c["now_correct"] and not c["was_correct"])
         lost = sum(1 for c in changed if c["was_correct"] and not c["now_correct"])
         print(f"  {len(changed)} parses changed: +{gained} correct, -{lost}")
+
+        # Reported here too, because the completions of every past run are
+        # stored: a result recorded before this metric existed can still be
+        # asked how much of its error was the generation budget, without
+        # re-running a single forward pass.
+        result = EvalResult(correct=correct, total=n, samples=samples)
+        if result.cut_off:
+            print(f"  {result.cut_off} replies cut off mid-answer; they are "
+                  f"{result.cut_off_wrong} of the {n - correct} errors "
+                  f"({100 * result.cut_off_wrong / max(n - correct, 1):.0f}%)")
+        budget = data.get("config", {}).get("gen_length")
+        print(f"  generation budget: "
+              f"{budget if budget is not None else 'not recorded in this file'}")
 
         for c in changed[:10]:
             print(f"    gold {c['gold']}: {c['was_pred']} -> {c['now_pred']}"

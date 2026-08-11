@@ -82,3 +82,47 @@ def test_real_completions_from_the_w4a4_run():
     ]
     for text, want in cases:
         assert extract_answer(text) == want, text
+
+
+# ------------------------------------------------------- truncation counting
+
+
+def _result(completions):
+    from dllmquant.eval.gsm8k import EvalResult
+
+    samples = [
+        {"question": "q", "completion": c, "pred": 1.0, "gold": 1.0, "correct": ok}
+        for c, ok in completions
+    ]
+    return EvalResult(
+        correct=sum(ok for _, ok in completions),
+        total=len(completions),
+        samples=samples,
+    )
+
+
+def test_a_reply_that_stops_on_an_operator_is_counted_as_cut_off():
+    """A diffusion LM fills a fixed canvas: needing one more line does not get
+    you one, it gets you a wrong answer. Reporting accuracy without this
+    invites reading a shortfall in gen_length as a shortfall in reasoning."""
+    res = _result([
+        ("Total = 40 + 20 +", False),
+        ("So the total is 60.\n\nThe answer is 60", True),
+    ])
+    assert res.cut_off == 1
+    assert res.cut_off_wrong == 1
+    assert "cut off mid-answer" in res.summary()
+
+
+def test_a_finished_reply_is_not_counted():
+    res = _result([("The answer is 18", True), ("The answer is 26.", True)])
+    assert res.cut_off == 0
+    assert "cut off" not in res.summary()
+
+
+def test_the_count_is_a_floor_not_a_guess():
+    """'The answer is 8' for a model that meant 800 looks complete, and is
+    deliberately not counted -- overstating truncation would be worse than
+    understating it."""
+    res = _result([("Total = $800\n\nThe answer is 8", False)])
+    assert res.cut_off == 0

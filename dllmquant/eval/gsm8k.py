@@ -68,6 +68,16 @@ def gold_answer(answer_field: str) -> Optional[float]:
     return extract_answer(answer_field.split("####")[-1])
 
 
+# A reply that ends on an operator, an open bracket or a dangling lead-in did
+# not finish -- it ran out of canvas. Deliberately conservative: "The answer is
+# 8" where the model meant 800 and lost the zeros looks complete and is not
+# counted, so this is a floor on truncation, never an overestimate.
+_CUT_OFF = re.compile(
+    r"(?:[+\-*/=,:(]|\\times|\btimes\b|\bis\b|\bthe\b|\bof\b|\band\b|\bto\b)[\s$*]*$",
+    re.IGNORECASE,
+)
+
+
 @dataclass
 class EvalResult:
     correct: int
@@ -78,8 +88,36 @@ class EvalResult:
     def accuracy(self) -> float:
         return self.correct / max(self.total, 1)
 
+    @property
+    def cut_off(self) -> int:
+        """Replies that stop mid-expression, having run out of generation budget.
+
+        A diffusion LM fills a canvas whose length was fixed before decoding
+        started, so a reply that needs one more line does not get one -- it is
+        scored wrong. That is a property of the budget, not of the model, and
+        an accuracy reported without it invites reading a shortfall in
+        `gen_length` as a shortfall in reasoning.
+        """
+        return sum(1 for s in self.samples if _CUT_OFF.search(s["completion"].rstrip()))
+
+    @property
+    def cut_off_wrong(self) -> int:
+        return sum(
+            1 for s in self.samples
+            if not s["correct"] and _CUT_OFF.search(s["completion"].rstrip())
+        )
+
     def summary(self) -> str:
-        return f"GSM8K: {self.correct}/{self.total} = {100 * self.accuracy:.2f}%"
+        lines = [f"GSM8K: {self.correct}/{self.total} = {100 * self.accuracy:.2f}%"]
+        wrong = self.total - self.correct
+        if self.cut_off:
+            share = 100 * self.cut_off_wrong / max(wrong, 1)
+            lines.append(
+                f"  {self.cut_off} replies were cut off mid-answer; they account "
+                f"for {share:.0f}% of the errors -- raise --gen-length before "
+                "reading this as accuracy"
+            )
+        return "\n".join(lines)
 
 
 # Asking for an explicit marker is not cosmetic: without one, extraction has

@@ -25,15 +25,31 @@ from .calib.tmas import Snapshot, build_calibration_set, text_calibration_set
 from .checkpoint import BlockCheckpoints, config_fingerprint
 from .config import DLLMQuantConfig
 from .models.base import ModelAdapter
+from .models.llada import (
+    ATTENTION_IN_NAMES,
+    ATTENTION_OUT_NAMES,
+    MLP_IN_NAMES,
+    MLP_OUT_NAMES,
+    QKV_FUSED_NAMES,
+    V_PROJECTION_NAMES,
+)
 from .modules import QuantLinear, find_quant_linears, wrap_linears
 
 # Linears are quantized in these groups, each group calibrated against the
-# already-quantized output of the previous one.
+# already-quantized output of the previous one -- so the order is execution
+# order: into attention, out of attention, into the MLP, out of it.
+#
+# Derived from the naming lists rather than retyped. The retyped version was
+# missing LLaDA2.0's `query_key_value` and `dense`, so attention matched no
+# group at all and fell through to the leftovers, which run *last*: the MLP
+# was calibrated against attention that had not been quantized yet, and then
+# attention was quantized under it. That is precisely the error compounding
+# these groups exist to prevent, and nothing in the output said so.
 SEQUENTIAL_GROUPS: List[List[str]] = [
-    ["att_proj", "qkv_proj", "Wqkv", "q_proj", "k_proj", "v_proj"],
-    ["attn_out", "o_proj", "out_proj"],
-    ["ff_proj", "up_proj", "gate_proj", "w1", "w3"],
-    ["ff_out", "down_proj", "w2"],
+    list(ATTENTION_IN_NAMES),
+    list(ATTENTION_OUT_NAMES),
+    list(MLP_IN_NAMES),
+    list(MLP_OUT_NAMES),
 ]
 
 
@@ -421,11 +437,11 @@ class DLLMQuantPipeline:
 
         for name, layer in layers.items():
             leaf = name.split(".")[-1]
-            if leaf in ("v_proj", "wv", "value"):
+            if leaf in V_PROJECTION_NAMES:
                 layer.out_quantizer = quantizer
                 layer.out_slice = None
                 return
-            if leaf in ("att_proj", "qkv_proj", "Wqkv"):
+            if leaf in QKV_FUSED_NAMES:
                 layer.out_quantizer = quantizer
                 layer.out_slice = (d_q + d_kv, d_q + 2 * d_kv)
                 return
