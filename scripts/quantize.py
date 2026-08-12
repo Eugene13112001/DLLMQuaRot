@@ -254,7 +254,9 @@ def main() -> int:
     }, indent=2))
 
     # Fail in two seconds on a full GPU, not twenty minutes in.
-    preflight_memory(estimate_required_gb(cfg), strict=not args.force)
+    preflight_memory(
+        estimate_required_gb(cfg), strict=not args.force, device_map=cfg.device_map
+    )
 
     adapter = build_adapter(cfg)
     adapter.load()

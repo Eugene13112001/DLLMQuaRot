@@ -53,23 +53,53 @@ class AttentionParts:
     attn_probs: torch.Tensor  # [B, heads, Q, K], rows sum to 1
 
 
-def preflight_memory(required_gb: float, strict: bool = True) -> float:
+def preflight_memory(
+    required_gb: float, strict: bool = True, device_map=None
+) -> float:
     """Refuse to start a long job on a GPU that cannot hold it.
 
     On a shared node the free memory at launch is not the free memory five
     minutes later, but checking up front still turns the common case -- the
     card was already full -- from a twenty-minute wait into a two-second
     message naming the emptier GPU to use.
+
+    ``device_map`` changes what "the GPU" means: the model is then spread over
+    every visible card, so the budget is their sum. Checking card 0 alone
+    refused a job that had 59 GB across two cards because one of them held
+    only 29 -- the guard was right about the number and wrong about the
+    question.
     """
     import torch as _torch
 
     if not _torch.cuda.is_available():
         return 0.0
 
-    free, total = _torch.cuda.mem_get_info()
-    free_gb, total_gb = free / 2**30, total / 2**30
-    print(f"GPU 0: {free_gb:.1f} GB free of {total_gb:.1f} GB "
-          f"(need about {required_gb:.0f} GB)")
+    if device_map:
+        per_device = [
+            _torch.cuda.mem_get_info(i)[0] / 2**30
+            for i in range(_torch.cuda.device_count())
+        ]
+        free_gb = sum(per_device)
+        listed = ", ".join(f"{i}: {g:.1f}" for i, g in enumerate(per_device))
+        print(f"GPUs ({listed}) = {free_gb:.1f} GB free across {len(per_device)} "
+              f"devices (need about {required_gb:.0f} GB)")
+        where = (
+            "With a device map the budget is the sum over visible cards, so "
+            "make more of them visible:\n"
+            "    export CUDA_VISIBLE_DEVICES=<i>,<j>,<k>\n"
+        )
+    else:
+        free, total = _torch.cuda.mem_get_info()
+        free_gb, total_gb = free / 2**30, total / 2**30
+        print(f"GPU 0: {free_gb:.1f} GB free of {total_gb:.1f} GB "
+              f"(need about {required_gb:.0f} GB)")
+        where = (
+            "On a shared node, pick an emptier GPU, or spread the model with "
+            "--device-map auto:\n"
+            "    nvidia-smi --query-gpu=index,memory.used,memory.total "
+            "--format=csv\n"
+            "    export CUDA_VISIBLE_DEVICES=<index>\n"
+        )
 
     if free_gb >= required_gb:
         return free_gb
@@ -77,11 +107,8 @@ def preflight_memory(required_gb: float, strict: bool = True) -> float:
     msg = (
         f"only {free_gb:.1f} GB free, this job needs about {required_gb:.0f} GB "
         f"(weights plus Hessians and the calibration cache).\n"
-        "On a shared node, pick an emptier GPU:\n"
-        "    nvidia-smi --query-gpu=index,memory.used,memory.total "
-        "--format=csv\n"
-        "    export CUDA_VISIBLE_DEVICES=<index>\n"
-        "    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+        + where
+        + "    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
         "Pass --force to start anyway."
     )
     if strict:

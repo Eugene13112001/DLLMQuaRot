@@ -6,6 +6,7 @@ small synthetic tensors.  Run with:  python -m pytest tests -q
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from dllmquant.algos.cgq import CGQ, certainty_weights
@@ -662,3 +663,38 @@ def test_collect_inputs_captures_post_activation_quant():
     # What the matmul saw is the quantized input, not the raw one.
     assert not torch.allclose(captured, x)
     assert captured.shape == x.shape
+
+
+# ------------------------------------------------------- preflight budgeting
+
+
+def test_a_device_map_budget_is_the_sum_over_cards(monkeypatch):
+    """Checking card 0 alone refused a job with 59 GB across two cards.
+
+    With a device map the model is spread over every visible GPU, so the
+    question is not "does card 0 hold it" -- the guard was right about the
+    number and wrong about the question.
+    """
+    from dllmquant.models.base import preflight_memory
+
+    free = {0: 29.4 * 2**30, 1: 29.6 * 2**30}
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda i=0: (free[i], 140 * 2**30))
+
+    assert preflight_memory(34.0, strict=True, device_map="auto") > 34.0
+
+    with pytest.raises(RuntimeError, match="only"):
+        preflight_memory(34.0, strict=True)
+
+
+def test_a_single_card_job_still_checks_that_card(monkeypatch):
+    from dllmquant.models.base import preflight_memory
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
+    monkeypatch.setattr(
+        torch.cuda, "mem_get_info", lambda i=0: (40 * 2**30, 140 * 2**30)
+    )
+
+    assert preflight_memory(34.0, strict=True) == pytest.approx(40.0)
