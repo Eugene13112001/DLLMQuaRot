@@ -105,6 +105,16 @@ def main() -> int:
                          "the whole head and anything larger is the same run.")
     ap.add_argument("--mask-ratios", type=float, nargs="+",
                     default=[1.0, 0.5, 0.0])
+    ap.add_argument("--kv-pairs", nargs="*",
+                    default=["4,4", "8,4", "4,8", "3,4", "4,3", "2,4", "4,2"],
+                    help="K,V bit pairs for the asymmetry sweep. Pairs are "
+                         "listed so that mirror images sit next to each other: "
+                         "8,4 and 4,8 cost the same memory, so whichever wins "
+                         "says which side of attention is worth the bits. "
+                         "Empty to skip.")
+    ap.add_argument("--kv-pair-group", type=int, default=128,
+                    help="group size for the asymmetry sweep, kept fixed so "
+                         "the only thing varying is where the bits go")
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(
@@ -166,7 +176,63 @@ def main() -> int:
           "untouched there, so it measures the windowed forward against the "
           "full one and nothing else. It has to be ~0 before any other row "
           "means anything.")
+
+    if args.kv_pairs:
+        run_kv_asymmetry(
+            adapter, model, states, args, n_layers, head_dim, device, prefix_len, total
+        )
     return 0
+
+
+def run_kv_asymmetry(
+    adapter, model, states, args, n_layers, head_dim, device, prefix_len, total
+) -> None:
+    """Does K deserve more bits than V, or the other way round?
+
+    K and V are stored identically everywhere in this codebase, and there is no
+    reason they should be. K is consumed by the softmax: an error there is
+    exponentiated and redistributes attention mass across every position. V is
+    summed against weights that are by then already decided, so its error
+    passes through linearly. Which asymmetry that produces is an empirical
+    question nobody has asked for a diffusion LM.
+
+    Mirror pairs cost identical memory, so the comparison is free of any
+    budget argument: if 8,4 beats 4,8, the bits belong on K.
+    """
+    pairs = []
+    for spec in args.kv_pairs:
+        k_bits, v_bits = (int(p) for p in spec.split(","))
+        pairs.append((k_bits, v_bits))
+
+    group = min(args.kv_pair_group, head_dim)
+    prompt = adapter.encode_prompts(load_prompts(1), max_len=args.block_length)[0]
+
+    print(f"\n=== K/V asymmetry, group {group} " + "=" * 34)
+    print("mirror pairs cost the same memory; the winner says where bits belong")
+
+    for mask_ratio in args.mask_ratios:
+        x = masked_canvas(adapter, prompt, total, mask_ratio).to(device)
+        reference = full_logits(model, x, args.block_length)[:, prefix_len:]
+        print(f"\n--- mask ratio {mask_ratio:.2f} " + "-" * 44)
+        print(f"{'K bits':>7} {'V bits':>7} {'rel. logit error':>18} {'argmax kept':>13}")
+
+        for k_bits, v_bits in pairs:
+            cache = BlockKVCache(
+                KVCacheConfig(
+                    enabled=True, group_size=group,
+                    key_bits=k_bits, value_bits=v_bits,
+                ),
+                n_layers,
+            )
+            for state in states:
+                state.cache = cache
+
+            refresh_prefix(model, states, x, prefix_len, args.block_length)
+            windowed = logits_for_window(
+                model, states, x, prefix_len, total, args.block_length
+            )
+            rel, agree = compare(reference, windowed)
+            print(f"{k_bits:>7} {v_bits:>7} {rel:>18.3e} {100*agree:>12.2f}%")
 
 
 if __name__ == "__main__":

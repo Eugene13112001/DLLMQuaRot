@@ -216,3 +216,68 @@ def test_reading_an_empty_layer_is_an_error():
     cache = BlockKVCache(KVCacheConfig(), n_layers=1)
     with pytest.raises(KeyError):
         cache.read(0)
+
+
+# ------------------------------------------------------------ K/V asymmetry
+
+
+def test_key_and_value_can_be_stored_at_different_widths():
+    """K is consumed by the softmax, V is summed against fixed weights.
+
+    Storing them identically is an assumption this codebase made everywhere
+    and never tested; making it an option is what allows testing it.
+    """
+    cfg = KVCacheConfig(enabled=True, group_size=4, key_bits=16, value_bits=2)
+    cache = BlockKVCache(cfg, n_layers=1)
+
+    torch.manual_seed(0)
+    k = torch.randn(1, 2, 6, 4)
+    v = torch.randn(1, 2, 6, 4)
+    kq, vq = cache.write(0, k, v)
+
+    assert torch.equal(kq, k), "16 bits must store K untouched"
+    assert not torch.allclose(vq, v), "2 bits must visibly damage V"
+
+
+def test_the_split_defaults_to_the_old_behaviour():
+    """Unset, both sides follow the status-based widths exactly as before."""
+    plain = KVCacheConfig(enabled=True, group_size=4, decoded_bits=4, masked_bits=4)
+    split = KVCacheConfig(enabled=True, group_size=4, decoded_bits=4, masked_bits=4,
+                          key_bits=4, value_bits=4)
+
+    torch.manual_seed(0)
+    k, v = torch.randn(1, 2, 6, 4), torch.randn(1, 2, 6, 4)
+
+    a = BlockKVCache(plain, n_layers=1).write(0, k.clone(), v.clone())
+    b = BlockKVCache(split, n_layers=1).write(0, k.clone(), v.clone())
+
+    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+
+
+def test_the_two_splits_stay_independent():
+    """Position status and K/V side answer different questions; overriding one
+    must not silently answer the other."""
+    cfg = KVCacheConfig(
+        enabled=True, group_size=4,
+        decoded_bits=8, masked_bits=2,   # status split
+        key_bits=16,                     # K opts out of it entirely
+    )
+    cache = BlockKVCache(cfg, n_layers=1)
+
+    torch.manual_seed(0)
+    k, v = torch.randn(1, 2, 4, 4), torch.randn(1, 2, 4, 4)
+    mask = torch.tensor([[True, True, False, False]])
+    kq, vq = cache.write(0, k, v, mask=mask)
+
+    assert torch.equal(kq, k), "key_bits=16 must override both status widths"
+    # V still honours the status split: masked positions are coarser.
+    masked_err = (vq[:, :, :2] - v[:, :, :2]).abs().mean()
+    decoded_err = (vq[:, :, 2:] - v[:, :, 2:]).abs().mean()
+    assert masked_err > decoded_err
+
+
+def test_a_bad_width_is_still_refused():
+    with pytest.raises(ValueError):
+        KVCacheConfig(key_bits=1)
+    with pytest.raises(ValueError):
+        KVCacheConfig(value_bits=17)

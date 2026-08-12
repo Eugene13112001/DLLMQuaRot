@@ -56,6 +56,14 @@ class KVCacheConfig:
     # Equal to decoded_bits by default -- the asymmetry is an experiment, not
     # an assumption.
     masked_bits: int = 4
+    # Override the bit width for one side of the cache. K and V are not
+    # symmetric consumers of their own error: K goes into the softmax, where a
+    # perturbation is exponentiated and reshapes the whole attention
+    # distribution, while V is summed against weights that are already fixed.
+    # Left as None both sides follow the status-based widths above, which is
+    # what every implementation here did before this was measurable.
+    key_bits: Optional[int] = None
+    value_bits: Optional[int] = None
     # Group size along head_dim. 128 is QuaRot's KV setting, and the
     # per-token-across-all-channels alternative measured 52 GSM8K points worse
     # on this model's activations, so grouping is not optional here.
@@ -83,9 +91,9 @@ class KVCacheConfig:
         valid = {"never", "every_n", "block", "mask_ratio"}
         if self.policy not in valid:
             raise ValueError(f"policy must be one of {sorted(valid)}")
-        for name in ("decoded_bits", "masked_bits"):
+        for name in ("decoded_bits", "masked_bits", "key_bits", "value_bits"):
             b = getattr(self, name)
-            if not 2 <= b <= 16:
+            if b is not None and not 2 <= b <= 16:
                 raise ValueError(f"{name} must be in [2, 16], got {b}")
         if self.group_size <= 0:
             raise ValueError("group_size must be positive")
@@ -254,8 +262,8 @@ class BlockKVCache:
         the two bit widths differ, masked and decoded positions are quantized
         separately.
         """
-        kq = self._quantize_with_mask(k, mask)
-        vq = self._quantize_with_mask(v, mask)
+        kq = self._quantize_with_mask(k, mask, "key")
+        vq = self._quantize_with_mask(v, mask, "value")
 
         self._k[layer], self._v[layer] = kq, vq
         self._written_at[layer] = self.step
@@ -263,14 +271,29 @@ class BlockKVCache:
         self.stats.entries_written += int(k.shape[-2]) if k.dim() >= 2 else 0
         return kq, vq
 
+    def _bits_for(self, kind: str, status: str) -> int:
+        """Bit width for one side of the cache at one position status.
+
+        ``key_bits`` / ``value_bits`` override the status-based widths when
+        set: the question "does K need more precision than V" is separate from
+        "does a masked position need less than a decoded one", and answering
+        one must not silently answer the other.
+        """
+        override = self.cfg.key_bits if kind == "key" else self.cfg.value_bits
+        if override is not None:
+            return override
+        return self.cfg.decoded_bits if status == "decoded" else self.cfg.masked_bits
+
     def _quantize_with_mask(
-        self, x: torch.Tensor, mask: Optional[torch.Tensor]
+        self, x: torch.Tensor, mask: Optional[torch.Tensor], kind: str = "key"
     ) -> torch.Tensor:
         cfg = self.cfg
-        same_bits = cfg.decoded_bits == cfg.masked_bits
-        if mask is None or same_bits:
+        decoded_bits = self._bits_for(kind, "decoded")
+        masked_bits = self._bits_for(kind, "masked")
+
+        if mask is None or decoded_bits == masked_bits:
             return quantize_kv(
-                x, cfg.decoded_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio
+                x, decoded_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio
             )
 
         # x is [B, heads, T, head_dim]; mask is [B, T].
@@ -282,10 +305,10 @@ class BlockKVCache:
         m = m.unsqueeze(-1).expand_as(x)
 
         masked = quantize_kv(
-            x, cfg.masked_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio
+            x, masked_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio
         )
         decoded = quantize_kv(
-            x, cfg.decoded_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio
+            x, decoded_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio
         )
         return torch.where(m, masked, decoded)
 
@@ -324,7 +347,7 @@ class BlockKVCache:
         """
         k_cached, v_cached = self._k[layer], self._v[layer]
         k_fresh_q = quantize_kv(
-            k_fresh, self.cfg.decoded_bits, self.cfg.group_size,
+            k_fresh, self._bits_for("key", "decoded"), self.cfg.group_size,
             self.cfg.symmetric, self.cfg.clip_ratio,
         )
 
