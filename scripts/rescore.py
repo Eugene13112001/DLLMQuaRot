@@ -59,6 +59,25 @@ def main() -> int:
         old = data.get("accuracy", float("nan"))
         print(f"\n{p.name}: {data.get('correct', '?')}/{n} = {100 * old:.2f}%"
               f"  ->  {correct}/{n} = {100 * correct / n:.2f}%")
+
+        # The header and the stored answers can disagree -- a run cut short
+        # mid-write, or two runs merged. The old print showed both numbers side
+        # by side and left it to the reader to notice that 87 correct out of 20
+        # is impossible. Say it instead: a file in this state cannot support
+        # either figure, and quietly re-scoring the surviving 20 answers
+        # manufactures a third one that looks just as citable.
+        stated_total = data.get("total")
+        stated_correct = data.get("correct")
+        problems = []
+        if isinstance(stated_total, int) and stated_total != n:
+            problems.append(f"header says {stated_total} answers, {n} are stored")
+        if isinstance(stated_correct, int) and stated_correct > n:
+            problems.append(f"header claims {stated_correct} correct out of {n}")
+        if problems:
+            print("  !! INCONSISTENT: " + "; ".join(problems))
+            print("     Neither the header nor the re-scored figure describes a "
+                  "complete run. Find out what produced this file before using "
+                  "any number from it.")
         gained = sum(1 for c in changed if c["now_correct"] and not c["was_correct"])
         lost = sum(1 for c in changed if c["was_correct"] and not c["now_correct"])
         print(f"  {len(changed)} parses changed: +{gained} correct, -{lost}")
