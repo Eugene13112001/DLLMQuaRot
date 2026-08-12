@@ -42,7 +42,8 @@ from dllmquant.report import round_floats, sibling_csv, write_csv  # noqa: E402
 
 
 def recipes(args) -> list[dict]:
-    """Eight rows: two anchors, the method, three ablations, two rotated.
+    """Nine rows: two anchors, the method, three ablations, two rotated,
+    and the combination.
 
     The ablations are leave-one-out rather than add-one-in, deliberately.  The
     paper's claim is that the three components are complementary plug-ins, so
