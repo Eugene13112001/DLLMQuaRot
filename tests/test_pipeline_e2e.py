@@ -583,3 +583,54 @@ def test_ia_aq_attaches_to_a_fused_projection_under_gqa():
 
     assert layer.out_quantizer is not None, "IA-AQ never attached"
     assert layer.out_slice == (d_q + d_kv, d_q + 2 * d_kv)
+
+
+def test_a_group_is_solved_in_chunks_but_only_once():
+    """Every layer exactly once, no chunk over the limit, group order intact.
+
+    One MoE block's gate/up group is 512 layers, and each holds an
+    in_features^2 Hessian for the whole calibration pass -- 8.6 GB asked for
+    before a single token is seen. Chunking is safe only *within* a group,
+    whose members are parallel branches reading the same input; across groups
+    the order carries the error compensation and must not be disturbed.
+    """
+    cfg = _config()
+    cfg.max_group_layers = 3
+    adapter = TinyAdapter(cfg)
+    adapter.load()
+    pipeline = DLLMQuantPipeline(cfg, adapter)
+
+    layers = {}
+    for kind, n in [("gate_proj", 7), ("down_proj", 4), ("att_proj", 1), ("attn_out", 1)]:
+        for i in range(n):
+            layers[f"blocks.0.mlp.experts.{i}.{kind}"] = object()
+
+    calls = []
+    pipeline._solve_group = lambda bi, block, sel, *a, **k: calls.append(list(sel))
+    pipeline._run_cgq(0, None, layers, [], [], [], verbose=False)
+
+    seen = [name for chunk in calls for name in chunk]
+    assert sorted(seen) == sorted(layers), "a layer was solved twice or not at all"
+    assert all(len(chunk) <= 3 for chunk in calls), "a chunk exceeded the limit"
+
+    def kind_of(name):
+        return name.split(".")[-1]
+
+    order = [kind_of(chunk[0]) for chunk in calls]
+    assert order.index("att_proj") < order.index("attn_out") < order.index("gate_proj")
+    assert order.index("gate_proj") < order.index("down_proj")
+
+
+def test_one_chunk_per_group_when_the_limit_is_generous():
+    cfg = _config()
+    cfg.max_group_layers = 1000
+    adapter = TinyAdapter(cfg)
+    adapter.load()
+    pipeline = DLLMQuantPipeline(cfg, adapter)
+
+    layers = {f"blocks.0.mlp.experts.{i}.gate_proj": object() for i in range(9)}
+    calls = []
+    pipeline._solve_group = lambda bi, block, sel, *a, **k: calls.append(list(sel))
+    pipeline._run_cgq(0, None, layers, [], [], [], verbose=False)
+
+    assert len(calls) == 1 and len(calls[0]) == 9

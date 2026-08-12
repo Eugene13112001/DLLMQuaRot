@@ -65,6 +65,12 @@ def main() -> int:
                     help="activation group size: one scale per N channels "
                          "instead of one per token; -1 = per token")
     ap.add_argument("--nsamples", type=int, default=128)
+    ap.add_argument("--max-group-layers", type=int, default=64,
+                    help="layers of one group calibrated at a time; each holds "
+                         "an in_features^2 Hessian, so a 512-expert group asks "
+                         "for 8.6 GB at once. Lower it on a shared card; the "
+                         "result does not depend on it")
+
     ap.add_argument("--nprompts", type=int, default=32)
     ap.add_argument("--no-ia-aq", action="store_true")
     ap.add_argument("--no-cgq-weights", action="store_true",
@@ -111,6 +117,7 @@ def main() -> int:
         cgq=cgq,
         ia_aq=IAAQConfig(enabled=not args.no_ia_aq, n_bits=args.a_bits),
         rotation=RotationConfig(enabled=args.rotate, online_mlp=args.online_mlp),
+        max_group_layers=args.max_group_layers,
     )
 
     adapter = build_adapter(cfg)

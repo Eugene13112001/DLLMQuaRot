@@ -77,6 +77,7 @@ def build_config(args) -> DLLMQuantConfig:
         cfg.tmas.proportions = tuple(args.proportions)
         cfg.rotation.online_mlp = not args.no_online_mlp
         cfg.checkpoint_dir = args.checkpoint_dir
+        cfg.max_group_layers = args.max_group_layers
         return cfg
 
     if args.recipe in ("quarot-baseline", "quarot-diffusion"):
@@ -99,6 +100,7 @@ def build_config(args) -> DLLMQuantConfig:
         cfg.rotation.online_mlp = not args.no_online_mlp
         cfg.device_map = args.device_map or None
         cfg.checkpoint_dir = args.checkpoint_dir
+        cfg.max_group_layers = args.max_group_layers
         return cfg
 
     return DLLMQuantConfig(
@@ -108,6 +110,7 @@ def build_config(args) -> DLLMQuantConfig:
         device=args.device,
         device_map=args.device_map or None,
         checkpoint_dir=args.checkpoint_dir,
+        max_group_layers=args.max_group_layers,
         seed=args.seed,
         weight=QuantConfig(
             n_bits=args.w_bits,
@@ -161,6 +164,12 @@ def main() -> int:
                     help="only when the model does not fit on one GPU "
                          "(e.g. 'auto' for LLaDA2.0-flash)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--max-group-layers", type=int, default=64,
+                    help="layers of one group calibrated at a time; each holds "
+                         "an in_features^2 Hessian, so a 512-expert group asks "
+                         "for 8.6 GB at once. Lower it on a shared card; the "
+                         "result does not depend on it")
+
     ap.add_argument(
         "--recipe",
         default="dllmquant",

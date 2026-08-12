@@ -477,7 +477,24 @@ class DLLMQuantPipeline:
             for n in selected:
                 remaining.pop(n, None)
 
-            self._solve_group(bi, block, selected, inps, kwargs_list, snapshots, verbose)
+            # Solved in chunks, because every layer of the group holds a
+            # Hessian of in_features^2 floats for as long as the group is being
+            # calibrated. A dense block's group is three layers and 50 MB; one
+            # MoE block's gate/up group is 512 layers and 8.6 GB, allocated in
+            # one breath before a single token has been seen.
+            #
+            # Splitting is safe *within* a group and only there: its members
+            # are parallel branches reading the same input, so quantizing one
+            # does not change what another sees. Across groups the order is
+            # load-bearing and stays sequential. The cost is one extra pass
+            # over the calibration set per chunk.
+            names = list(selected)
+            limit = max(1, int(self.cfg.max_group_layers))
+            for start in range(0, len(names), limit):
+                chunk = {n: selected[n] for n in names[start : start + limit]}
+                self._solve_group(
+                    bi, block, chunk, inps, kwargs_list, snapshots, verbose
+                )
 
     def _solve_group(
         self,

@@ -270,6 +270,13 @@ class DLLMQuantConfig:
     skip_patterns: List[str] = field(
         default_factory=lambda: ["lm_head", "embed_tokens", "wte", "embeddings"]
     )
+    # How many layers of one sequential group are calibrated at a time. Each
+    # holds a Hessian of in_features^2 float32 -- 16.8 MB at width 2048 -- for
+    # the whole calibration pass, so a 512-expert group would ask for 8.6 GB
+    # up front. 64 keeps that near 1 GB at the price of one extra pass over
+    # the calibration set per chunk. Raise it when memory is plentiful; the
+    # result does not depend on it.
+    max_group_layers: int = 64
     device: str = "cuda"
     dtype: str = "bfloat16"
     # None -> load normally and move to `device`. Only set this ("auto", or an
