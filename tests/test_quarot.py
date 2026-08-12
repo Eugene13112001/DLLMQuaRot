@@ -614,3 +614,59 @@ def test_r2_fuses_into_exactly_what_it_wraps():
         if isinstance(m, OnlineHadamard)
     )
     assert wrapped == len(fused)
+
+
+# ------------------------------------------------------- split across cards
+
+
+class _Elsewhere(torch.Tensor):
+    """A tensor that reports a device it is not on.
+
+    A device map cannot be simulated on a CPU-only test machine, but the code
+    path that broke is a device *comparison* -- so a tensor that lies about
+    its device exercises it exactly, and the copy it triggers is a no-op.
+    """
+
+    fake_device = None
+
+    @property
+    def device(self):
+        return self.fake_device or super().device
+
+    def to(self, *args, **kwargs):
+        return torch.Tensor(self)
+
+
+def test_the_rotation_follows_the_weight_to_its_card():
+    """Under a device map the rotation matrix and the weights live apart.
+
+    The failure is not subtle -- 'Expected all tensors to be on the same
+    device' -- but it lands after the model has loaded and the plan has been
+    built, minutes into a run.
+    """
+    from dllmquant.algos import quarot as q
+
+    torch.manual_seed(0)
+    w = torch.randn(8, 16)
+    rot = random_hadamard_matrix(16, seed=1).to(torch.float64)
+
+    moved = _Elsewhere(rot)
+    moved.fake_device = torch.device("cuda", 3)  # claims to be elsewhere
+
+    expected = (w.to(torch.float64) @ rot).to(w.dtype)
+    assert torch.allclose(q._rotate_right(w, moved), expected, atol=1e-10)
+
+
+def test_norm_fusion_follows_its_consumers():
+    torch.manual_seed(0)
+    norm = TinyRMSNorm(D)
+    lin = nn.Linear(D, 8, bias=False)
+    x = torch.randn(2, 3, D)
+
+    before = lin(norm(x))
+    original = norm.weight.data
+    norm.weight.data = _Elsewhere(original)
+    norm.weight.data.fake_device = torch.device("cuda", 1)
+
+    fuse_norm_into_linears(norm, [lin])
+    assert torch.allclose(lin(norm(x)), before, atol=1e-5)

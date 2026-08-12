@@ -210,8 +210,11 @@ def fuse_norm_into_linears(norm: nn.Module, consumers: Sequence[nn.Linear]) -> N
                 f"norm width {g.numel()} does not match consumer in_features "
                 f"{in_width(lin)}"
             )
+        # A norm and the layers reading it can sit on different cards under a
+        # device map.
+        gain = g if g.device == lin.weight.device else g.to(lin.weight.device)
         lin.weight.data = (
-            lin.weight.data.to(torch.float64) * g.unsqueeze(0)
+            lin.weight.data.to(torch.float64) * gain.unsqueeze(0)
         ).to(lin.weight.dtype)
 
     weight.data = torch.ones_like(weight.data)
@@ -281,6 +284,7 @@ def _rotate_right(w: torch.Tensor, qd: torch.Tensor) -> torch.Tensor:
     is 2.6 GB each way, which is the difference between rotating on a shared
     card and not.  Chunking bounds the temporary without touching the result.
     """
+    qd = qd if qd.device == w.device else qd.to(w.device)
     rows = max(1, _ROTATE_CHUNK_ELEMS // max(w.shape[-1], 1))
     if w.shape[0] <= rows:
         return (w.to(torch.float64) @ qd).to(w.dtype)
@@ -294,6 +298,7 @@ def _rotate_right(w: torch.Tensor, qd: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def _rotate_left(w: torch.Tensor, qd: torch.Tensor) -> torch.Tensor:
     """``qd.T @ w``, chunked along w's columns for the same reason."""
+    qd = qd if qd.device == w.device else qd.to(w.device)
     cols = max(1, _ROTATE_CHUNK_ELEMS // max(w.shape[0], 1))
     if w.shape[-1] <= cols:
         return (qd.t() @ w.to(torch.float64)).to(w.dtype)
@@ -311,19 +316,33 @@ def rotate_residual_stream(plan: RotationPlan, q: torch.Tensor) -> None:
     """Apply h -> h @ Q throughout, leaving the function unchanged."""
     d = q.shape[0]
     plan.check(d)
-    qd = q.to(torch.float64)
+
+    # With a device map the model is spread over several cards, so there is no
+    # single device the rotation lives on. One copy per device, made once:
+    # moving a 2048x2048 float64 matrix is 33 MB, and this loop touches ~10000
+    # linears in an MoE.
+    base = q.to(torch.float64)
+    per_device = {base.device: base}
+
+    def rotation_for(t: torch.Tensor) -> torch.Tensor:
+        if t.device not in per_device:
+            per_device[t.device] = base.to(t.device)
+        return per_device[t.device]
 
     for emb in plan.embeddings:
-        emb.weight.data = _rotate_right(emb.weight.data, qd)
+        w = emb.weight.data
+        emb.weight.data = _rotate_right(w, rotation_for(w))
 
     for lin in plan.input_linears:
-        lin.weight.data = _rotate_right(lin.weight.data, qd)
+        w = lin.weight.data
+        lin.weight.data = _rotate_right(w, rotation_for(w))
 
     for lin in plan.output_linears:
-        lin.weight.data = _rotate_left(lin.weight.data, qd)
+        w = lin.weight.data
+        lin.weight.data = _rotate_left(w, rotation_for(w))
         if lin.bias is not None:
             b = lin.bias.data
-            lin.bias.data = (b.to(torch.float64) @ qd).to(b.dtype)
+            lin.bias.data = (b.to(torch.float64) @ rotation_for(b)).to(b.dtype)
 
 
 @torch.no_grad()
@@ -353,12 +372,14 @@ def rotate_value_heads(
     unaffected by the grouping -- but the V side is, and reshaping 4 KV heads
     as if they were 16 reinterprets the matrix instead of rotating it.
     """
-    hd = h.to(torch.float64)
     if h.shape != (head_dim, head_dim):
         raise ValueError(f"head rotation must be {head_dim}x{head_dim}, got {h.shape}")
 
     kv_heads = n_kv_heads or n_heads
     w = v_proj.weight.data
+    # The V projection and the out projection of one layer are on the same
+    # card, but a device map puts different layers on different ones.
+    hd = h.to(torch.float64).to(w.device)
     lo = 0 if v_offset is None else v_offset
     hi = lo + kv_heads * head_dim
     if hi > w.shape[0]:
@@ -378,7 +399,9 @@ def rotate_value_heads(
 
     wo = out_proj.weight.data
     blk = wo.to(torch.float64).reshape(-1, n_heads, head_dim)
-    blk = torch.einsum("onh,hk->onk", blk, hd)
+    blk = torch.einsum(
+        "onh,hk->onk", blk, hd if hd.device == wo.device else hd.to(wo.device)
+    )
     out_proj.weight.data = blk.reshape(wo.shape).to(wo.dtype)
 
 
