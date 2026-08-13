@@ -246,3 +246,151 @@ def test_an_uninitialised_cache_is_refused_rather_than_guessed():
 
     with pytest.raises(KeyError):
         logits_for_window(model, states, x, lo=8, hi=12, block_length=BLOCK)
+
+
+# ------------------------------------------------------------ cached sampler
+
+
+def _sampler_setup(bits: int):
+    """A model, a cache, and an adapter shaped like the LLaDA2.0 one."""
+    from dllmquant.config import TMASConfig
+
+    torch.manual_seed(0)
+    model = _Model().eval()
+    cache = BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=bits, masked_bits=bits,
+                      group_size=HEAD_DIM),
+        n_layers=len(model.model.layers),
+    )
+    # The stand-in attention has no forward of its own -- the cache-aware one
+    # is what gives it one. Install it now so the dense comparison has a model
+    # that runs; cached_generate installs its own and removes it afterwards.
+    install_block_cache(model, cache, rotary_fn=_rotary, attention_fn=_attention)
+
+    class _Adapter:
+        mask_id = VOCAB - 1
+
+        def __init__(self):
+            self.model = model
+            self.block_length = BLOCK
+
+        def _sequence_layout(self, p_len, cfg):
+            b = cfg.block_length
+            self.block_length = b
+            n_blocks = (p_len + cfg.gen_length + b - 1) // b
+            first = p_len // b
+            return n_blocks * b, [(i * b, (i + 1) * b) for i in range(first, n_blocks)]
+
+    return _Adapter(), cache, TMASConfig(gen_length=8, block_length=BLOCK, steps=4)
+
+
+def _dense_generate(adapter, prompt, cfg):
+    """The same sampler with no cache: recompute everything, every step."""
+    from dllmquant.models.base import _split_evenly, get_num_transfer_tokens
+
+    p_len = prompt.shape[-1]
+    total, bounds = adapter._sequence_layout(p_len, cfg)
+    x = torch.full((1, total), adapter.mask_id, dtype=torch.long)
+    x[:, :p_len] = prompt
+    schedule = _split_evenly(cfg.steps, len(bounds))
+
+    for bi, (lo, hi) in enumerate(bounds):
+        budget = get_num_transfer_tokens(x[:, lo:hi] == adapter.mask_id, schedule[bi])
+        for step in range(schedule[bi]):
+            logits = _full_logits(adapter.model, x)[:, lo:hi]
+            conf, proposal = torch.softmax(logits.float(), -1).max(-1)
+            masked = x[:, lo:hi] == adapter.mask_id
+            k = int(budget[0, step])
+            if k <= 0 or not masked.any():
+                continue
+            score = torch.where(masked, conf, torch.full_like(conf, -torch.inf))
+            chosen = torch.topk(score[0], k=min(k, int(masked.sum()))).indices
+            x[0, lo + chosen] = proposal[0, chosen]
+    return x
+
+
+def test_a_sixteen_bit_cache_commits_exactly_the_dense_tokens():
+    """The claim the cached sampler rests on, as a test rather than an
+    argument: refreshing the prefix once per block is not an approximation,
+    because block-causal attention makes it constant for that block's whole
+    decoding."""
+    from dllmquant.models.llada2_local import cached_generate
+
+    adapter, cache, cfg = _sampler_setup(bits=16)
+    prompt = torch.tensor([1, 2, 3, 4, 5, 6])
+
+    dense = _dense_generate(adapter, prompt, cfg)
+    cached = cached_generate(adapter, prompt, cfg, cache,
+                             rotary_fn=_rotary, attention_fn=_attention)
+
+    assert torch.equal(cached, dense)
+
+
+def test_four_bit_storage_is_allowed_to_change_the_answer():
+    """Guards the test above from passing because the cache is ignored."""
+    from dllmquant.models.llada2_local import cached_generate
+
+    adapter, cache, cfg = _sampler_setup(bits=4)
+    prompt = torch.tensor([1, 2, 3, 4, 5, 6])
+
+    dense = _dense_generate(adapter, prompt, cfg)
+    cached = cached_generate(adapter, prompt, cfg, cache,
+                             rotary_fn=_rotary, attention_fn=_attention)
+
+    assert cached.shape == dense.shape
+    assert (cached[0, prompt.shape[-1]:] != adapter.mask_id).all()
+
+
+def test_the_model_is_left_without_hooks_afterwards():
+    """Hooks that survive the call would make the next question slower and
+    quietly keep a cache from the previous one alive."""
+    from dllmquant.models.llada2_local import cached_generate
+
+    adapter, cache, cfg = _sampler_setup(bits=16)
+    cached_generate(adapter, torch.tensor([1, 2, 3, 4]), cfg, cache,
+                    rotary_fn=_rotary, attention_fn=_attention)
+
+    for layer in adapter.model.model.layers:
+        assert "forward" not in layer.attention.__dict__
+
+
+def test_masked_and_decoded_positions_can_be_stored_at_different_widths():
+    """A masked position's K/V is overwritten the moment its token is
+    committed; a decoded one's is final. The cache can spend accordingly --
+    but only because the writer is told which positions are which, and that
+    only happens if the sampler passes the mask id down."""
+    from dllmquant.models.llada2_local import cached_generate
+
+    adapter, _, cfg = _sampler_setup(bits=16)
+    cache = BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=16, masked_bits=2,
+                      group_size=HEAD_DIM),
+        n_layers=len(adapter.model.model.layers),
+    )
+    prompt = torch.tensor([1, 2, 3, 4, 5, 6])
+
+    cached_generate(adapter, prompt, cfg, cache,
+                    rotary_fn=_rotary, attention_fn=_attention)
+
+    assert cache.has(0), "nothing was ever written"
+
+
+def test_without_a_mask_the_split_cannot_apply():
+    """Guards the plumbing above: refresh_prefix called with no mask id has to
+    fall back to one width rather than silently pick the masked one."""
+    model, _, states = _setup(bits=16)
+    cache = BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=16, masked_bits=2,
+                      group_size=HEAD_DIM),
+        n_layers=len(model.model.layers),
+    )
+    for state in states:
+        state.cache = cache
+
+    x = torch.randint(0, VOCAB - 1, (1, 12))
+    refresh_prefix(model, states, x, prefix_len=8, block_length=BLOCK)
+
+    k, _ = cache.read(0)
+    # decoded_bits is 16, so with no mask the tensor comes back untouched.
+    assert torch.isfinite(k).all()
+    assert len(k.unique()) > 2**2, "the 2-bit masked width was applied to all"

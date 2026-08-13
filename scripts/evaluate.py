@@ -81,6 +81,26 @@ def main() -> int:
                     help="QuaRot rotations (not part of the paper)")
     ap.add_argument("--online-mlp", action="store_true")
 
+    g = ap.add_argument_group("KV cache (LLaDA2.0 only; block diffusion makes "
+                              "the prefix exactly reusable)")
+    g.add_argument("--kv-cache", action="store_true",
+                   help="read the prefix from a quantized cache instead of "
+                        "recomputing it at every denoising step")
+    g.add_argument("--kv-bits", type=int, default=4)
+    g.add_argument("--kv-group-size", type=int, default=128,
+                   help="channels sharing one scale along head_dim; 128 is "
+                        "the whole head on LLaDA2.0-mini")
+    g.add_argument("--kv-key-bits", type=int, default=0,
+                   help="override the width for K only (0 = same as --kv-bits)")
+    g.add_argument("--kv-value-bits", type=int, default=0,
+                   help="override the width for V only (0 = same as --kv-bits)")
+    g.add_argument("--kv-masked-bits", type=int, default=0,
+                   help="width for positions still carrying the mask token "
+                        "(0 = same as --kv-bits). Their K/V is overwritten as "
+                        "soon as the token is committed, so precision spent "
+                        "there has a short shelf life -- which is a claim this "
+                        "flag exists to test rather than assume")
+
     ap.add_argument("--n-eval", type=int, default=200)
     ap.add_argument("--gen-length", type=int, default=256)
     ap.add_argument("--eval-steps", type=int, default=256)
@@ -138,7 +158,40 @@ def main() -> int:
     gen_cfg = TMASConfig(
         gen_length=args.gen_length, block_length=32, steps=args.eval_steps
     )
-    result = evaluate_gsm8k(adapter, n_samples=args.n_eval, gen_cfg=gen_cfg)
+
+    generate = None
+    if args.kv_cache:
+        if args.model_type != "llada2_moe":
+            raise SystemExit(
+                "--kv-cache needs block-causal attention. LLaDA-1.5 attends "
+                "over the whole sequence in both directions, so no position's "
+                "K/V is ever final and there is nothing to reuse."
+            )
+        from dllmquant.cache import BlockKVCache, KVCacheConfig
+        from dllmquant.models.llada2_local import cached_generate
+
+        kv_cfg = KVCacheConfig(
+            enabled=True,
+            decoded_bits=args.kv_bits,
+            masked_bits=args.kv_masked_bits or args.kv_bits,
+            key_bits=args.kv_key_bits or None,
+            value_bits=args.kv_value_bits or None,
+            group_size=args.kv_group_size,
+        )
+        n_layers = len(adapter.blocks)
+        print(f"\nKV cache on: {args.kv_bits} bits, group {args.kv_group_size}"
+              + (f", K at {args.kv_key_bits}" if args.kv_key_bits else "")
+              + (f", V at {args.kv_value_bits}" if args.kv_value_bits else ""))
+
+        def generate(prompt, cfg_):
+            # A cache per question: entries are about this sequence and
+            # carrying them across would be measuring a different thing.
+            return cached_generate(adapter, prompt, cfg_,
+                                   BlockKVCache(kv_cfg, n_layers))
+
+    result = evaluate_gsm8k(
+        adapter, n_samples=args.n_eval, gen_cfg=gen_cfg, generate=generate
+    )
     print("\n" + result.summary())
 
     if args.out:
@@ -166,6 +219,12 @@ def main() -> int:
                         "gen_length": args.gen_length,
                         "eval_steps": args.eval_steps,
                         "n_eval": args.n_eval,
+                        "kv_cache": args.kv_cache,
+                        "kv_bits": args.kv_bits if args.kv_cache else None,
+                        "kv_group_size": args.kv_group_size if args.kv_cache else None,
+                        "kv_key_bits": args.kv_key_bits or None,
+                        "kv_value_bits": args.kv_value_bits or None,
+                        "kv_masked_bits": args.kv_masked_bits or None,
                     },
                     "accuracy": result.accuracy,
                     "correct": result.correct,

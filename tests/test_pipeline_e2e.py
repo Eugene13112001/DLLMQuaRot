@@ -634,3 +634,104 @@ def test_one_chunk_per_group_when_the_limit_is_generous():
     pipeline._run_cgq(0, None, layers, [], [], [], verbose=False)
 
     assert len(calls) == 1 and len(calls[0]) == 9
+
+
+# ------------------------------------------- certainty weights for experts
+
+
+def _reference_gather(topk_ids, expert):
+    """The gather LLaDA2.0's moe_infer performs, written out.
+
+    Kept as an independent transcription of the vendored code so the pipeline's
+    reconstruction is checked against the model's actual behaviour rather than
+    against itself.
+    """
+    k = topk_ids.shape[-1]
+    idxs = topk_ids.reshape(-1).argsort()
+    token_of_row = idxs // k
+    expert_of_row = topk_ids.reshape(-1)[idxs]
+    return token_of_row[expert_of_row == expert]
+
+
+def test_expert_index_is_read_out_of_the_layer_name():
+    from dllmquant.pipeline import _expert_index
+
+    assert _expert_index("blocks.1.mlp.experts.137.gate_proj") == 137
+    assert _expert_index("blocks.1.mlp.shared_experts.up_proj") is None
+    assert _expert_index("blocks.1.attention.query_key_value") is None
+
+
+def test_weights_follow_the_rows_the_router_actually_sent():
+    """Certainty weighting is the diffusion-specific half of CGQ, and on an
+    MoE it was reaching 3% of the layers: an expert sees a gathered subset, the
+    token count stops matching, and the weights were dropped. Order matters as
+    much as membership -- the same weights in the wrong order would reweight
+    one token's activations by another token's certainty."""
+    from dllmquant.pipeline import _weights_for_expert
+
+    torch.manual_seed(0)
+    n_tokens, k, n_experts = 12, 2, 4
+    routes = torch.randint(0, n_experts, (n_tokens, k))
+    weights = torch.arange(n_tokens, dtype=torch.float32)
+
+    for expert in range(n_experts):
+        expected_tokens = _reference_gather(routes, expert)
+        got = _weights_for_expert(
+            f"blocks.1.mlp.experts.{expert}.gate_proj",
+            weights, routes, len(expected_tokens),
+        )
+        if len(expected_tokens) == 0:
+            continue
+        assert got is not None, f"expert {expert} got no weights"
+        assert torch.equal(got, weights[expected_tokens])
+
+
+def test_a_mismatch_falls_back_instead_of_guessing():
+    from dllmquant.pipeline import _weights_for_expert
+
+    routes = torch.randint(0, 4, (12, 2))
+    weights = torch.arange(12, dtype=torch.float32)
+
+    # A row count that cannot be right for this expert.
+    assert _weights_for_expert(
+        "blocks.1.mlp.experts.0.gate_proj", weights, routes, n_rows=999
+    ) is None
+    # No routing captured at all.
+    assert _weights_for_expert(
+        "blocks.1.mlp.experts.0.gate_proj", weights, None, n_rows=3
+    ) is None
+    # Not an expert layer.
+    assert _weights_for_expert(
+        "blocks.1.attention.dense", weights, routes, n_rows=12
+    ) is None
+
+
+def test_the_router_watcher_captures_the_discrete_choice():
+    from dllmquant.pipeline import _watch_routers
+
+    class Gate(nn.Module):
+        num_experts = 4
+        top_k = 2
+
+        def forward(self, x):
+            idx = torch.tensor([[0, 1], [2, 3]])
+            return idx, torch.ones_like(idx, dtype=torch.float), torch.zeros(2, 4)
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = Gate()
+
+        def forward(self, x):
+            return self.gate(x)
+
+    block, state = Block(), {"routes": None}
+    handles = _watch_routers(block, state)
+    try:
+        block(torch.zeros(2, 4))
+    finally:
+        for h in handles:
+            h.remove()
+
+    assert state["routes"] is not None
+    assert state["routes"].tolist() == [[0, 1], [2, 3]]

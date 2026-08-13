@@ -23,7 +23,7 @@ from .algos.cgq import CGQ, certainty_weights
 from .algos.ia_aq import InteractionCollector
 from .calib.tmas import Snapshot, build_calibration_set, text_calibration_set
 from .checkpoint import BlockCheckpoints, config_fingerprint
-from .config import DLLMQuantConfig
+from .config import ROUTER_NAMES, DLLMQuantConfig
 from .models.base import ModelAdapter
 from .models.llada import (
     ATTENTION_IN_NAMES,
@@ -155,6 +155,77 @@ class QuantReport:
                 f"expected for MoE experts): e.g. {self.unweighted_layers[:3]}"
             )
         return "\n".join(out)
+
+
+def _expert_index(name: str) -> Optional[int]:
+    """The expert a layer belongs to, from `...experts.137.gate_proj`."""
+    parts = name.split(".")
+    for i, part in enumerate(parts):
+        if part == "experts" and i + 1 < len(parts) and parts[i + 1].isdigit():
+            return int(parts[i + 1])
+    return None
+
+
+def _watch_routers(block: nn.Module, state: dict) -> List:
+    """Record each router's top-k choice for the forward now running.
+
+    The choice is what makes an expert's rows traceable back to tokens. It is
+    captured rather than recomputed because recomputing means re-deriving the
+    router's group-limited selection, and a second implementation of that is a
+    second thing to get wrong.
+    """
+    handles = []
+
+    def hook(module, args, output):
+        parts = output if isinstance(output, (tuple, list)) else (output,)
+        for t in parts:
+            if isinstance(t, torch.Tensor) and t.numel() and not t.is_floating_point():
+                state["routes"] = t.detach()
+                return
+
+    for name, module in block.named_modules():
+        if name.split(".")[-1] in ROUTER_NAMES and hasattr(module, "num_experts"):
+            handles.append(module.register_forward_hook(hook))
+    return handles
+
+
+def _weights_for_expert(
+    name: str, weights: torch.Tensor, routes: Optional[torch.Tensor], n_rows: int
+) -> Optional[torch.Tensor]:
+    """Per-token certainty weights, gathered into one expert's row order.
+
+    The model feeds an expert its tokens sorted by expert id::
+
+        idxs = topk_ids.view(-1).argsort()
+        sorted_tokens = x[idxs // k]
+
+    so row *j* of expert *e* came from token ``idxs[j] // k``. Reproducing that
+    with the identical call on the identical tensor gives the identical
+    permutation -- which matters, because a permutation that merely contained
+    the right weights in the wrong order would reweight one token's activations
+    by another token's certainty, and the Hessian would be quietly wrong rather
+    than obviously so.
+
+    Returns None when the mapping cannot be established, so the caller falls
+    back to uniform weights instead of guessing.
+    """
+    expert = _expert_index(name)
+    if expert is None or routes is None or routes.dim() < 2:
+        return None
+
+    k = routes.shape[-1]
+    flat = routes.reshape(-1, k).reshape(-1)
+    order = flat.argsort()
+    token_of_row = order // k
+    chosen = token_of_row[flat[order] == expert]
+
+    if chosen.numel() != n_rows:
+        # Shapes disagree: a different batch layout, or a router whose output
+        # is not what this assumes. Uniform weights are wrong but honest.
+        return None
+    if chosen.numel() and int(chosen.max()) >= weights.numel():
+        return None
+    return weights[chosen]
 
 
 class DLLMQuantPipeline:
@@ -508,14 +579,23 @@ class DLLMQuantPipeline:
     ) -> None:
         device = next(block.parameters()).device
         solvers = {n: CGQ(l, self.cfg.cgq, self.cfg.weight) for n, l in layers.items()}
-        state = {"weights": None, "expected": 0}
+        state = {"weights": None, "routes": None}
+        router_handles = _watch_routers(block, state)
 
         def make_cb(name: str):
             def cb(x: torch.Tensor):
                 n_tokens = x.numel() // x.shape[-1]
                 w = state["weights"]
+
+                if w is not None and w.numel() != n_tokens:
+                    # An expert sees only the tokens the router sent it, so the
+                    # per-token weights no longer line up one to one. They can
+                    # still be matched: the router's own top-k indices say
+                    # which token each of the expert's rows came from.
+                    w = _weights_for_expert(name, w, state["routes"], n_tokens)
+
                 if w is None or w.numel() != n_tokens:
-                    if name not in self.report.unweighted_layers and w is not None:
+                    if name not in self.report.unweighted_layers:
                         self.report.unweighted_layers.append(name)
                     solvers[name].add_batch(x, None)
                 else:
@@ -530,10 +610,13 @@ class DLLMQuantPipeline:
                 state["weights"] = certainty_weights(
                     snap.mask, snap.confidence, self.cfg.cgq
                 ).to(device)
+                state["routes"] = None
                 block(x, **kw)
         finally:
             for layer in layers.values():
                 layer._input_callback = None
+            for h in router_handles:
+                h.remove()
 
         starved = []
         for name, layer in layers.items():

@@ -150,7 +150,14 @@ def evaluate_gsm8k(
     gen_cfg: Optional[TMASConfig] = None,
     split: str = "test",
     verbose: bool = True,
+    generate=None,
 ) -> EvalResult:
+    """``generate(prompt, cfg)`` overrides how tokens are produced.
+
+    The cached sampler is a different function, not a flag inside the dense
+    one, so the way to score it is to hand it in here rather than to teach the
+    adapter about caches.
+    """
     from datasets import load_dataset
 
     cfg = gen_cfg or TMASConfig(gen_length=256, block_length=32, steps=256)
@@ -163,7 +170,7 @@ def evaluate_gsm8k(
     for i in range(n):
         item = ds[i]
         prompt = build_prompt(adapter, item["question"])
-        out = adapter.generate(prompt, cfg)
+        out = (generate or adapter.generate)(prompt, cfg)
         completion = adapter.tokenizer.decode(
             out[0, prompt.shape[-1]:], skip_special_tokens=True
         )

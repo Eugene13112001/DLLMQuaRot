@@ -45,6 +45,7 @@ import torch
 import torch.nn as nn
 
 from ..cache import BlockKVCache
+from .base import _split_evenly, get_num_transfer_tokens
 
 
 class CacheState:
@@ -55,12 +56,17 @@ class CacheState:
     test meaningful.
     """
 
-    __slots__ = ("mode", "cache", "prefix_len")
+    __slots__ = ("mode", "cache", "prefix_len", "mask")
 
     def __init__(self) -> None:
         self.mode = "off"  # off | record | use
         self.cache: Optional[BlockKVCache] = None
         self.prefix_len = 0
+        # Which cached positions still carry the mask token. Passed through to
+        # the cache because a masked position's K/V is about to be overwritten
+        # and a decoded one's is final, so the two need not be stored at the
+        # same width -- but only if the writer knows which is which.
+        self.mask: Optional[torch.Tensor] = None
 
 
 def _default_kernels():
@@ -123,6 +129,7 @@ def _make_forward(rotary_fn: Callable, attention_fn: Callable):
                 self.layer_idx,
                 key[..., : state.prefix_len, :].contiguous(),
                 value[..., : state.prefix_len, :].contiguous(),
+                mask=state.mask,
             )
         elif state.mode == "use":
             past_key, past_value = state.cache.read(self.layer_idx)
@@ -189,10 +196,16 @@ def remove_block_cache(model: nn.Module) -> None:
         attn.__dict__.pop("_dllm_cache_state", None)
 
 
-def _set_mode(states: List[CacheState], mode: str, prefix_len: int = 0) -> None:
+def _set_mode(
+    states: List[CacheState],
+    mode: str,
+    prefix_len: int = 0,
+    mask: Optional[torch.Tensor] = None,
+) -> None:
     for state in states:
         state.mode = mode
         state.prefix_len = prefix_len
+        state.mask = mask
 
 
 @torch.no_grad()
@@ -259,6 +272,7 @@ def refresh_prefix(
     x: torch.Tensor,
     prefix_len: int,
     block_length: int,
+    mask_id: Optional[int] = None,
 ) -> None:
     """Recompute and store the K/V of everything before the current block.
 
@@ -274,7 +288,8 @@ def refresh_prefix(
     )
     position_ids = torch.arange(total, device=x.device).unsqueeze(0)
 
-    _set_mode(states, "record", prefix_len)
+    status = None if mask_id is None else (x[:, :prefix_len] == mask_id)
+    _set_mode(states, "record", prefix_len, mask=status)
     try:
         forward_window(model, x, position_ids, mask)
     finally:
@@ -305,8 +320,93 @@ def logits_for_window(
         _set_mode(states, "off")
 
 
+@torch.no_grad()
+def cached_generate(
+    adapter,
+    prompt_ids: torch.Tensor,
+    cfg,
+    cache: BlockKVCache,
+    *,
+    rotary_fn: Optional[Callable] = None,
+    attention_fn: Optional[Callable] = None,
+):
+    """The block-diffusion sampler, reading the prefix from a quantized cache.
+
+    Deliberately a separate function rather than a branch inside
+    ``ModelAdapter._denoise``. That sampler produced the measured LLaDA-1.5
+    numbers, and a conditional inside it puts them one careless edit away from
+    changing; here the untouched path stays untouched by construction.
+
+    This is the *exact* variant of the cache: the prefix is refreshed once at
+    each block boundary and the current block is recomputed at every step, so
+    staleness is structurally zero and the only error is what four-bit storage
+    put there. Reusing the current block across steps -- where staleness
+    actually arises -- is the next increment, and it needs the refresh policies
+    that this one deliberately does not exercise.
+
+    Because staleness is zero, correctness is checkable rather than arguable:
+    with a 16-bit cache this must commit exactly the tokens the dense sampler
+    commits.
+    """
+    device = next(adapter.model.parameters()).device
+    prompt_ids = prompt_ids.to(device)
+    if prompt_ids.dim() == 1:
+        prompt_ids = prompt_ids.unsqueeze(0)
+
+    p_len = prompt_ids.shape[1]
+    total, bounds = adapter._sequence_layout(p_len, cfg)
+    block_length = cfg.block_length
+
+    x = torch.full((1, total), adapter.mask_id, dtype=torch.long, device=device)
+    x[:, :p_len] = prompt_ids
+
+    if cfg.steps < len(bounds):
+        raise ValueError(
+            f"{cfg.steps} steps cannot cover {len(bounds)} blocks -- some block "
+            "would never be visited and stay masked"
+        )
+    schedule = _split_evenly(cfg.steps, len(bounds))
+
+    states = install_block_cache(
+        adapter.model, cache, rotary_fn=rotary_fn, attention_fn=attention_fn
+    )
+    try:
+        for block_idx, (lo, hi) in enumerate(bounds):
+            # One full forward per block, not per step: this is the saving.
+            refresh_prefix(
+                adapter.model, states, x, lo, block_length, mask_id=adapter.mask_id
+            )
+
+            block_mask = x[:, lo:hi] == adapter.mask_id
+            budget = get_num_transfer_tokens(block_mask, schedule[block_idx])
+
+            for step in range(schedule[block_idx]):
+                logits = logits_for_window(
+                    adapter.model, states, x, lo, hi, block_length
+                )
+                probs = torch.softmax(logits.to(torch.float32), dim=-1)
+                confidence, proposal = probs.max(dim=-1)
+
+                still_masked = x[:, lo:hi] == adapter.mask_id
+                k = int(budget[0, step])
+                if k <= 0 or not still_masked.any():
+                    continue
+
+                score = torch.where(
+                    still_masked, confidence, torch.full_like(confidence, -torch.inf)
+                )
+                take = min(k, int(still_masked.sum()))
+                chosen = torch.topk(score[0], k=take).indices
+                x[0, lo + chosen] = proposal[0, chosen]
+    finally:
+        remove_block_cache(adapter.model)
+
+    return x
+
+
 __all__ = [
     "CacheState",
+    "cached_generate",
     "install_block_cache",
     "remove_block_cache",
     "forward_window",
