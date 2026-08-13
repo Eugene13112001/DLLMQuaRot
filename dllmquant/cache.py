@@ -165,6 +165,12 @@ class CacheStats:
     # measured whenever ``measure_drift`` is called.
     staleness_error: List[float] = field(default_factory=list)
     quantization_error: List[float] = field(default_factory=list)
+    # Which layer each of those came from. Kept because the two errors are
+    # expected to behave differently with depth and the averages hide it:
+    # a layer's K/V are computed from the previous layer's already-stale
+    # output, so staleness should compound down the stack, while rounding is
+    # redrawn at every write and should not.
+    drift_layers: List[int] = field(default_factory=list)
 
     @property
     def hit_rate(self) -> float:
@@ -174,6 +180,28 @@ class CacheStats:
     @property
     def mean_age(self) -> float:
         return sum(self.ages) / len(self.ages) if self.ages else 0.0
+
+    def drift_by_layer(self) -> Dict[int, Dict[str, float]]:
+        """Mean staleness and rounding per layer, and how many samples each.
+
+        The aggregate over all layers answers "how wrong is the cache"; this
+        answers "where", which is the question a refresh policy is tuned
+        against -- refreshing every layer at the same interval is only right
+        if the error is flat across depth.
+        """
+        out: Dict[int, Dict[str, float]] = {}
+        for layer, stale, quant in zip(
+            self.drift_layers, self.staleness_error, self.quantization_error
+        ):
+            acc = out.setdefault(layer, {"staleness": 0.0, "quantization": 0.0, "n": 0})
+            acc["staleness"] += stale
+            acc["quantization"] += quant
+            acc["n"] += 1
+        for acc in out.values():
+            n = max(acc["n"], 1)
+            acc["staleness"] /= n
+            acc["quantization"] /= n
+        return out
 
     def summary(self) -> str:
         lines = [
@@ -192,6 +220,20 @@ class CacheStats:
             q = sum(self.quantization_error) / len(self.quantization_error)
             if q > 0:
                 lines.append(f"  ratio staleness/quantization: {s / q:.2f}")
+
+        by_layer = self.drift_by_layer()
+        if len(by_layer) > 1:
+            # First and last, because the question is whether it compounds.
+            layers = sorted(by_layer)
+            first, last = by_layer[layers[0]], by_layer[layers[-1]]
+            lines.append(
+                f"  by depth: layer {layers[0]} staleness {first['staleness']:.5f} "
+                f"/ rounding {first['quantization']:.5f}"
+            )
+            lines.append(
+                f"            layer {layers[-1]} staleness {last['staleness']:.5f} "
+                f"/ rounding {last['quantization']:.5f}"
+            )
         return "\n".join(lines)
 
 
@@ -362,6 +404,7 @@ class BlockKVCache:
 
         self.stats.staleness_error.append(stale)
         self.stats.quantization_error.append(quant)
+        self.stats.drift_layers.append(layer)
         return {
             "total": total, "staleness": stale, "quantization": quant,
             "age": float(self.age(layer)),

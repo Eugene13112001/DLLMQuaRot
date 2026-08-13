@@ -90,8 +90,15 @@ reported next to accuracy.
 prompt the median expert receives nothing and the busiest takes an eighth of
 the layer's routes. Most expert projections therefore reach CGQ with no
 calibration data at all and fall back to plain rounding. Solving that is a
-prerequisite for any claim about *weight* quantization on this model, and it
-is orthogonal to the cache.
+prerequisite for any claim about *weight* quantization on this model.
+
+It is not, however, orthogonal to the cache, as an earlier draft of this
+document said. The deployment-regime cache measurements run on top of a
+quantized rotated model, so how well that model was quantized sets the floor
+under them -- and R3, which makes V quantizable in the first place, is part of
+the same pipeline. Starvation therefore bounds the quality of the substrate
+the cache study stands on, even though it has nothing to do with the cache's
+own error.
 
 ### A hypothesis this project raised and then refuted
 
@@ -153,6 +160,32 @@ one uses a signal that is free at every step: everything moves early in the
 trajectory and almost nothing moves late, so the interval can follow the mask
 ratio. Written, never measured.
 
+**Where the scales come from.** Currently nowhere: `quantize_kv` computes
+amax/amin per group at write time, so the cache is dynamically quantized and
+never calibrated. That is the right default -- the distribution moves along
+the trajectory, and on LLaDA-1.5 the activation crest factor is 39.1 at full
+mask against 6.9 at none, so one static scale fitted at one end is badly wrong
+at the other.
+
+But dynamic scales *are part of the cache*: one scale and one zero point per
+group per token per head, which is the 6.25% overhead at group 128 and 25% at
+group 32. For a structure whose entire purpose is to save memory, that is not
+a rounding error -- it eats a sixth of what four-bit storage buys.
+
+Static scales cost nothing per token but need calibration and break under
+distribution shift. And here diffusion offers something an autoregressive
+model cannot: **the mask ratio is known for free at every step**, so scales
+can be calibrated per mask-ratio bucket -- the same four buckets TMAS already
+sorts snapshots into -- and selected by the current state. Static storage
+cost, distribution-following precision. Whether the shift within a bucket is
+small enough for this to work is exactly the sort of question this project is
+positioned to answer, and nothing in the autoregressive literature asks it
+because there is no such signal there.
+
+Three settings to compare: dynamic per group (what exists), one static set,
+and static per mask-ratio bucket -- at equal *total* bits including the
+scales, which is the only comparison that means anything.
+
 **Correction.** Quantized matrix plus a low-rank approximation of the
 residual, `W ≈ Q(W) + AB^T`. Not implemented.
 
@@ -205,9 +238,28 @@ divergence, drift decomposition, routing stability across the trajectory, and
 the refresh-policy sweep. Answers the actual research question: how drift and
 rounding interact, and whether the adaptive policy beats a fixed interval.
 
-**Tier 2 — end task.** GSM8K on the handful of configurations Tier 1
-selects, with FP16 weights first so that cache damage is not entangled with
-weight damage, then in combination.
+**Tier 2 — end task.** GSM8K on the handful of configurations Tier 1 selects,
+in **two regimes, both required**:
+
+* *FP16 weights, quantized cache* — the isolating experiment. Everything that
+  moved is the cache, so the cause is not in doubt.
+* *quantized rotated weights, quantized cache* — the deployment experiment,
+  and the one the claim is actually about. A four-bit cache beside sixteen-bit
+  weights saves nothing worth reporting: the weights are the memory. And the
+  two errors may add, or one may absorb the other, which is the same
+  two-error question this plan opens with, asked one level up.
+
+The second regime is not optional for a further reason that is easy to miss.
+**R3 rotates the value subspace specifically to make V quantizable** -- V is
+the tensor the cache stores. So how quantizable the cache is depends on
+whether the model was rotated, and rotation arrives as part of the weight
+pipeline. A cache measured on an unrotated FP16 model is a cache measured in a
+configuration nobody would deploy.
+
+Practically this means the long weight-quantization run is not a side quest:
+`quantize.py --save` writes the rotated, quantized model once, and every
+deployment-regime cache experiment then runs on top of it without paying for
+the solve again.
 
 ---
 
@@ -223,7 +275,13 @@ weight damage, then in combination.
    and everything after it.
 4. **Refresh policies and drift decomposition.** The core result.
 5. **Masked vs decoded precision.** Diffusion-specific, cheap once (3) exists.
-6. **Low-rank correction.** Last, and not as a headline. It is most defensible
+6. **Where the scales come from.** Dynamic (what exists) against one static
+   set against static per mask-ratio bucket, compared at equal total bits with
+   the scales counted -- they are a sixth of the budget at group 128. The
+   bucketed variant is the one idea here that an autoregressive model cannot
+   copy, because it needs a signal that says which regime the distribution is
+   in, and the mask ratio is exactly that signal, available for free.
+7. **Low-rank correction.** Last, and not as a headline. It is most defensible
    where data-driven compensation is *unavailable* — the starved experts,
    which have no calibration data and therefore get no CGQ help, while an SVD
    of the residual needs no data at all. It must be reported against the

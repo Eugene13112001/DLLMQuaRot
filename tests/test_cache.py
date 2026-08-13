@@ -281,3 +281,55 @@ def test_a_bad_width_is_still_refused():
         KVCacheConfig(key_bits=1)
     with pytest.raises(ValueError):
         KVCacheConfig(value_bits=17)
+
+
+# ------------------------------------------------------------ drift by depth
+
+
+def _drifted(cache, layer, k_old, v_old, k_new, v_new):
+    """Write one state, then measure against a different one."""
+    cache.write(layer, k_old, v_old)
+    cache.advance()
+    return cache.measure_drift(layer, k_new, v_new)
+
+
+def test_drift_is_recorded_against_the_layer_it_came_from():
+    """The averages answer 'how wrong'; only the per-layer split answers
+    'where', and a refresh interval is tuned against the second one."""
+    cache = BlockKVCache(KVCacheConfig(enabled=True, group_size=4), n_layers=3)
+    torch.manual_seed(0)
+
+    for layer in (0, 2):
+        k = torch.randn(1, 2, 4, 4)
+        _drifted(cache, layer, k, k.clone(), k + 0.1 * (layer + 1), k.clone())
+
+    by_layer = cache.stats.drift_by_layer()
+    assert set(by_layer) == {0, 2}
+    assert by_layer[0]["n"] == 1 and by_layer[2]["n"] == 1
+    # Layer 2 was given the larger perturbation, so it must show more staleness.
+    assert by_layer[2]["staleness"] > by_layer[0]["staleness"]
+
+
+def test_the_two_error_sources_stay_separated_per_layer():
+    cache = BlockKVCache(KVCacheConfig(enabled=True, decoded_bits=4,
+                                       masked_bits=4, group_size=4), n_layers=2)
+    torch.manual_seed(0)
+    k = torch.randn(1, 2, 4, 4)
+
+    # Same tensor back: no staleness at all, only what rounding did.
+    out = _drifted(cache, 0, k, k.clone(), k.clone(), k.clone())
+    assert out["staleness"] < out["quantization"]
+
+    by_layer = cache.stats.drift_by_layer()
+    assert by_layer[0]["quantization"] > 0
+
+
+def test_the_summary_reports_depth_when_there_is_depth():
+    cache = BlockKVCache(KVCacheConfig(enabled=True, group_size=4), n_layers=2)
+    torch.manual_seed(0)
+    for layer in (0, 1):
+        k = torch.randn(1, 2, 4, 4)
+        _drifted(cache, layer, k, k.clone(), k + 0.2, k.clone())
+
+    text = cache.stats.summary()
+    assert "by depth" in text
