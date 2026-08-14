@@ -73,12 +73,34 @@ from dllmquant.models.llada2_local import (  # noqa: E402
 )
 
 
-def masked_canvas(adapter, prompt: torch.Tensor, total: int, prefix_len: int,
+def text_ids(adapter, total: int, seed: int = 0) -> torch.Tensor:
+    """`total` tokens of actual text.
+
+    What a decoded position holds is not a detail. An earlier version filled
+    them with uniformly random ids, which is not a partly decoded trajectory --
+    it is gibberish, and a model reading gibberish is uncertain about
+    everything downstream of it. That flattens the very quantity the sweep is
+    trying to resolve: with no coherent prefix there is little for the cache to
+    carry, so destroying it costs little and every bit width scores alike.
+    Real text puts the decision margins and the outlier structure where they
+    are in deployment.
+    """
+    pieces, ids = load_prompts(64, seed=seed), []
+    for i in range(len(pieces)):
+        ids.extend(adapter.tokenizer(pieces[i % len(pieces)])["input_ids"])
+        if len(ids) >= total:
+            break
+    while len(ids) < total:                      # short corpus, wrap around
+        ids.extend(ids[: total - len(ids)])
+    return torch.tensor(ids[:total], dtype=torch.long)
+
+
+def masked_canvas(adapter, tokens: torch.Tensor, prompt_len: int, prefix_len: int,
                   prefix_ratio: float, window_ratio: float = 1.0,
                   seed: int = 0) -> torch.Tensor:
-    """A canvas mid-trajectory, with the prefix and the window set separately.
+    """A canvas mid-trajectory: real text with holes punched in it.
 
-    These are two different things and an earlier version of this script swept
+    The prefix and the window are set separately, and an earlier version swept
     them together, which put every realistic configuration outside the table.
     The prefix is the closed blocks -- what gets cached -- and it empties of
     masks as the trajectory advances. The window is the block being decoded
@@ -88,25 +110,20 @@ def masked_canvas(adapter, prompt: torch.Tensor, total: int, prefix_len: int,
     So `prefix_ratio` is the variable of interest -- how far along the
     trajectory the cache was taken -- and `window_ratio` stays at 1.0, because
     that is what the step doing the reading looks like.
-
-    Standing in for a real trajectory state: what matters for the cache is the
-    proportion of positions still carrying the mask embedding, not how they
-    got there.
     """
+    total = int(tokens.shape[-1])
     g = torch.Generator(device="cpu").manual_seed(seed)
-    x = torch.full((1, total), adapter.mask_id, dtype=torch.long)
-    x[0, : prompt.shape[-1]] = prompt
-    vocab = int(adapter.model.config.vocab_size)
+    x = tokens.reshape(1, total).clone()
 
     for lo, hi, ratio in (
-        (prompt.shape[-1], prefix_len, prefix_ratio),
+        (prompt_len, prefix_len, prefix_ratio),
         (prefix_len, total, window_ratio),
     ):
         span = torch.arange(lo, hi)
-        n_decoded = int(round(len(span) * (1.0 - ratio)))
-        if n_decoded:
-            chosen = span[torch.randperm(len(span), generator=g)[:n_decoded]]
-            x[0, chosen] = torch.randint(0, vocab - 1, (n_decoded,), generator=g)
+        n_masked = int(round(len(span) * ratio))
+        if n_masked:
+            chosen = span[torch.randperm(len(span), generator=g)[:n_masked]]
+            x[0, chosen] = adapter.mask_id
     return x
 
 
