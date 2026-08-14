@@ -343,13 +343,27 @@ def main() -> int:
         )
         row("--", "scram", chance, "   <-- chance floor: no information")
         if chance.agree > 0.99:
-            # The floor met the ceiling. Destroying the cache outright changed
-            # no decision, so nothing below can be attributed to the bits --
-            # the window simply does not read this prefix. Expected at a mask
-            # ratio near 1, where every cached position carries the same
-            # embedding row and there is no information there to lose.
-            print("      ^ the floor is at 100%: destroying the cache changes "
-                  "nothing here, so no row below this line is interpretable")
+            # The floor met the ceiling: destroying the cache outright changed
+            # no decision, so nothing below can be attributed to the bits.
+            #
+            # Which of two things that means depends on the mask ratio, and the
+            # difference matters. High: every cached position carries the same
+            # embedding row, so there is no information in the prefix to lose
+            # and the row is simply degenerate. Low: the prefix is full of real
+            # decoded content, and a window that ignores it is not a fact about
+            # diffusion, it is a defect -- and one the 16-bit control cannot
+            # catch, because a window that never reads the prefix agrees with a
+            # full forward perfectly. So the floor is a second plumbing check.
+            if mask_ratio <= 0.5:
+                print("      ^ FLOOR AT 100% WITH A DECODED PREFIX: the window "
+                      "is not reading the cache at all. The 16-bit control "
+                      "cannot see this -- it passes either way. Suspect the "
+                      "mask or the prefix length before reading anything else.")
+            else:
+                print("      ^ the floor is at 100%: destroying the cache "
+                      "changes nothing here, so no row below is interpretable. "
+                      "Expected this high -- masked positions share an "
+                      "embedding row, so there is little in the prefix to lose.")
 
         groups = sorted({min(g, head_dim) for g in args.group_sizes})
         for group_size in groups:
