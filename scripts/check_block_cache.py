@@ -359,9 +359,8 @@ def main() -> int:
 
     total = args.blocks * args.block_length
     prefix_len = total - args.block_length  # cache everything but the last block
-    prompts = adapter.encode_prompts(
-        load_prompts(args.samples), max_len=args.block_length
-    )
+    # One text per sample, each a different stretch of the corpus.
+    texts = [text_ids(adapter, total, seed=i) for i in range(args.samples)]
 
     print(f"\nsequence {total} tokens = {args.blocks} blocks of "
           f"{args.block_length}; prefix cached = {prefix_len}, "
@@ -375,7 +374,7 @@ def main() -> int:
     canvas_cache: dict = {}
 
     def canvases(mask_ratio):
-        """One canvas per sample: different prompt, different decoded content.
+        """One canvas per sample: a different text, differently masked.
 
         Memoized because the K/V sweep asks for the same batch again, and the
         reference is a full forward over the whole sequence -- the most
@@ -384,9 +383,9 @@ def main() -> int:
         if mask_ratio not in canvas_cache:
             batch = []
             for i in range(args.samples):
-                prompt = prompts[i % len(prompts)]
-                x = masked_canvas(adapter, prompt, total, prefix_len, mask_ratio,
-                                  args.window_mask_ratio, seed=i).to(device)
+                x = masked_canvas(adapter, texts[i], args.block_length, prefix_len,
+                                  mask_ratio, args.window_mask_ratio,
+                                  seed=i).to(device)
                 reference = full_logits(model, x, args.block_length)[:, prefix_len:]
                 batch.append((x, reference, x[:, prefix_len:total] == adapter.mask_id))
             canvas_cache[mask_ratio] = batch
