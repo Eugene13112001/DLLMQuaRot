@@ -186,6 +186,34 @@ def pct(value: float) -> str:
     return "     n/a" if value != value else f"{100 * value:7.2f}%"
 
 
+def decision_margin(reference: torch.Tensor, committable: torch.Tensor,
+                    top_k: int) -> tuple:
+    """How close the about-to-be-committed decisions are to a tie.
+
+    This is the quantity that decides how many bits the cache can afford, and
+    it is not a constant of the model -- it collapses as the mask ratio rises.
+    Every masked position carries the same embedding row, so their logits
+    converge, and a decision taken between two candidates a hair apart flips
+    under a perturbation that would be invisible anywhere else.
+
+    Returned in absolute logit units next to the mean logit magnitude, because
+    the sweep reports error relatively: a row at `rel` moves logits by roughly
+    `rel * mean_abs`, and flips are expected once that approaches the margin.
+    """
+    ref = reference.float()
+    top2 = ref.topk(2, dim=-1).values
+    margins = top2[..., 0] - top2[..., 1]                # [B, W]
+    mean_abs = float(ref.abs().mean())
+
+    n_avail = int(committable.sum())
+    if n_avail == 0:
+        return float("nan"), mean_abs
+    conf = ref.softmax(-1).max(-1).values
+    k = min(max(top_k, 1), n_avail)
+    top = conf.masked_fill(~committable, -1.0).flatten().topk(k).indices
+    return float(margins.flatten()[top].mean()), mean_abs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True)
@@ -204,9 +232,18 @@ def main() -> int:
                          "this checkpoint head_dim is 128, so 128 is already "
                          "the whole head and anything larger is the same run.")
     ap.add_argument("--mask-ratios", type=float, nargs="+",
-                    default=[1.0, 0.5, 0.0],
-                    help="mask ratio of the cached *prefix*, i.e. how far "
-                         "along the trajectory the cache was taken")
+                    default=[0.0, 0.25, 0.5, 1.0],
+                    help="mask ratio of the cached *prefix*. 0.0 first because "
+                         "it is the only one that occurs in the scheme we are "
+                         "measuring: the prefix is the closed blocks, and a "
+                         "closed block is fully decoded. The rest answer the "
+                         "next question instead -- what it would cost to cache "
+                         "the current, partly masked block as well, which is "
+                         "where staleness stops being structurally zero. "
+                         "Expect the high ratios to be degenerate: with every "
+                         "cached position carrying the same embedding row "
+                         "there is little information there to lose, and the "
+                         "chance floor will say so.")
     ap.add_argument("--window-mask-ratio", type=float, default=1.0,
                     help="mask ratio of the block being decoded. 1.0 is what a "
                          "sampler step actually sees; lowering it leaves fewer "
@@ -281,9 +318,13 @@ def main() -> int:
         reference = full_logits(model, x, args.block_length)[:, prefix_len:]
         committable = x[:, prefix_len:total] == adapter.mask_id
         print(f"\n--- prefix mask ratio {mask_ratio:.2f} " + "-" * 37)
+        margin, mean_abs = decision_margin(reference, committable, args.commit_k)
         print(f"window is {100 * args.window_mask_ratio:.0f}% masked: "
               f"{int(committable.sum())} of {args.block_length} positions could "
               f"be committed")
+        print(f"decision margin at those positions: {margin:.3f} logits, mean "
+              f"|logit| {mean_abs:.2f} -- a row at rel. err e moves logits by "
+              f"about e*{mean_abs:.2f}, and flips once that reaches the margin")
         print(f"{'bits':>5} {'group':>7} {'rel. err':>10} "
               f"{'argmax':>8} {'argmax@k':>8} {'slots@k':>8}")
 
@@ -301,6 +342,14 @@ def main() -> int:
             x, reference, committable, scramble=True,
         )
         row("--", "scram", chance, "   <-- chance floor: no information")
+        if chance.agree > 0.99:
+            # The floor met the ceiling. Destroying the cache outright changed
+            # no decision, so nothing below can be attributed to the bits --
+            # the window simply does not read this prefix. Expected at a mask
+            # ratio near 1, where every cached position carries the same
+            # embedding row and there is no information there to lose.
+            print("      ^ the floor is at 100%: destroying the cache changes "
+                  "nothing here, so no row below this line is interpretable")
 
         groups = sorted({min(g, head_dim) for g in args.group_sizes})
         for group_size in groups:
