@@ -9,6 +9,7 @@ trajectory cannot be revised later.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
@@ -151,6 +152,7 @@ def evaluate_gsm8k(
     split: str = "test",
     verbose: bool = True,
     generate=None,
+    progress_every: int = 5,
 ) -> EvalResult:
     """``generate(prompt, cfg)`` overrides how tokens are produced.
 
@@ -165,6 +167,7 @@ def evaluate_gsm8k(
     n = min(n_samples, len(ds))
 
     correct = 0
+    started = time.time()
     samples: List[dict] = []
 
     for i in range(n):
@@ -184,8 +187,12 @@ def evaluate_gsm8k(
             {"question": item["question"], "completion": completion,
              "pred": pred, "gold": gold, "correct": hit}
         )
-        if verbose and (i + 1) % 20 == 0:
-            print(f"  [gsm8k] {i + 1}/{n}  running acc {100 * correct / (i + 1):.1f}%")
+        if verbose and (i + 1) % progress_every == 0:
+            done = time.time() - started
+            rate = done / (i + 1)
+            print(f"  [gsm8k] {i + 1}/{n}  running acc "
+                  f"{100 * correct / (i + 1):.1f}%  "
+                  f"{rate:.1f}s/question, {(n - i - 1) * rate / 60:.0f} min left")
 
     return EvalResult(correct=correct, total=n, samples=samples)
 
