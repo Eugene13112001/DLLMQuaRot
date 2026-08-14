@@ -10,23 +10,41 @@ here and enters only when the *current* block is cached too.
     bash scripts/llada2.sh scripts/check_block_cache.py \
         --model inclusionAI/LLaDA2.0-mini --model-type llada2_moe
 
-Two things are reported per configuration:
+Four things are reported per configuration:
 
 * the relative error in the logits, which is what quality follows from;
 * the share of positions whose argmax survives -- in a diffusion LM the
   argmax is the token that gets committed, and a commitment is irreversible,
-  so an ordering that flips matters more than a logit that moves.
+  so an ordering that flips matters more than a logit that moves;
+* the same share restricted to the positions that would actually be committed
+  this step, and
+* whether those positions are even the same ones.
 
-Both are measured at several mask ratios, because the K/V of a masked
+The last two exist because the plain argmax share counts every position in the
+window equally, and the sampler does not. It commits the most confident
+positions and leaves the rest masked for a later step, where they are decided
+again from scratch. An argmax that flips on a position nobody was going to
+commit costs nothing; the whole cost lives in the top of the confidence
+ordering. Reporting only the flat share therefore states an upper bound on the
+damage and invites reading it as the damage.
+
+Two distinct failures hide in that top: the committed position can take a
+different token, or a different position can become the most confident one and
+get committed instead. `argmax@k` catches the first, `slots@k` the second.
+
+Everything is measured at several mask ratios, because the K/V of a masked
 position and a decoded one are not alike: at a high mask ratio nearly every
 position carries the same `[MASK]` embedding row, their K/V are near-identical,
-and their rounding errors add coherently instead of cancelling.
+their rounding errors add coherently instead of cancelling -- and their logits
+sit near a tie, where an error that would be harmless anywhere else decides the
+ordering.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -79,12 +97,68 @@ def full_logits(model, x, block_length):
     return forward_window(model, x, positions, mask)
 
 
-def compare(reference: torch.Tensor, actual: torch.Tensor) -> tuple:
+@dataclass
+class Comparison:
+    """How far a cached forward moved the decision, at four levels of strictness."""
+
+    rel: float          # relative error in the logits
+    agree: float        # argmax kept, every window position weighted equally
+    agree_k: float      # argmax kept among the positions about to be committed
+    slots_k: float      # ... and are those the same positions at all
+    committable: int    # how many positions were candidates for commitment
+
+
+def compare(
+    reference: torch.Tensor,
+    actual: torch.Tensor,
+    *,
+    committable: torch.Tensor | None = None,
+    top_k: int = 4,
+) -> Comparison:
+    """Compare a cached forward against the exact one.
+
+    `committable` marks the window positions still carrying the mask -- the
+    only ones a sampler step can commit. A decoded position is already fixed,
+    so its logits are read by nothing and an argmax that flips there is not an
+    error, it is noise being counted as one.
+
+    Confidence is taken from the *reference*, because the question is whether
+    the cache changes what the exact path would have committed. Ranking by the
+    cached run's own confidence would let a quantizer that corrupts the
+    ordering pick its own exam questions.
+    """
     ref, act = reference.float(), actual.float()
     denom = ref.abs().mean().clamp(min=1e-8)
     rel = float((act - ref).abs().mean() / denom)
-    agree = float((act.argmax(-1) == ref.argmax(-1)).float().mean())
-    return rel, agree
+
+    kept = act.argmax(-1) == ref.argmax(-1)             # [B, W]
+    agree = float(kept.float().mean())
+
+    conf = ref.softmax(-1).max(-1).values                # [B, W]
+    if committable is None:
+        committable = torch.ones_like(conf, dtype=torch.bool)
+    n_avail = int(committable.sum())
+    if n_avail == 0:
+        # Nothing in this window is masked, so nothing here would be committed
+        # and the restricted numbers have no subject. Happens at mask ratio 0.
+        return Comparison(rel, agree, float("nan"), float("nan"), 0)
+
+    k = min(max(top_k, 1), n_avail)
+    flat_kept = kept.flatten()
+    ref_top = conf.masked_fill(~committable, -1.0).flatten().topk(k).indices
+
+    agree_k = float(flat_kept[ref_top].float().mean())
+
+    act_conf = act.softmax(-1).max(-1).values
+    act_top = act_conf.masked_fill(~committable, -1.0).flatten().topk(k).indices
+    overlap = len(set(ref_top.tolist()) & set(act_top.tolist()))
+    slots_k = overlap / k
+
+    return Comparison(rel, agree, agree_k, slots_k, n_avail)
+
+
+def pct(value: float) -> str:
+    return "     n/a" if value != value else f"{100 * value:7.2f}%"
 
 
 def main() -> int:
@@ -116,6 +190,14 @@ def main() -> int:
     ap.add_argument("--kv-pair-group", type=int, default=128,
                     help="group size for the asymmetry sweep, kept fixed so "
                          "the only thing varying is where the bits go")
+    ap.add_argument("--commit-k", type=int, default=4,
+                    help="how many positions the sampler commits before the "
+                         "cache is rebuilt, i.e. how deep into the confidence "
+                         "ordering an error can still reach. Under the "
+                         "standard schedule (steps == gen_length) one token is "
+                         "committed per step, so this is the first few commits "
+                         "of the block. Raise it for a coarser schedule that "
+                         "commits several at once.")
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(
@@ -148,8 +230,12 @@ def main() -> int:
     for mask_ratio in args.mask_ratios:
         x = masked_canvas(adapter, prompt, total, mask_ratio).to(device)
         reference = full_logits(model, x, args.block_length)[:, prefix_len:]
+        committable = x[:, prefix_len:total] == adapter.mask_id
         print(f"\n--- mask ratio {mask_ratio:.2f} " + "-" * 44)
-        print(f"{'bits':>5} {'group':>7} {'rel. logit error':>18} {'argmax kept':>13}")
+        print(f"{int(committable.sum())} of {args.block_length} window positions "
+              f"are masked and can be committed")
+        print(f"{'bits':>5} {'group':>7} {'rel. err':>10} "
+              f"{'argmax':>8} {'argmax@k':>8} {'slots@k':>8}")
 
         groups = sorted({min(g, head_dim) for g in args.group_sizes})
         for group_size in groups:
@@ -168,10 +254,11 @@ def main() -> int:
                 windowed = logits_for_window(
                     model, states, x, prefix_len, total, args.block_length
                 )
-                rel, agree = compare(reference, windowed)
+                c = compare(reference, windowed,
+                            committable=committable, top_k=args.commit_k)
                 label = f"{group_size}=head" if group_size == head_dim else str(group_size)
                 flag = ""
-                if bits >= 16 and (rel > floor or agree < 1.0):
+                if bits >= 16 and (c.rel > floor or c.agree < 1.0):
                     # 16 bits stores the tensor unchanged, so what is left is
                     # the plumbing -- but "unchanged" is only exact in exact
                     # arithmetic. The windowed forward multiplies a 32-row
@@ -182,7 +269,8 @@ def main() -> int:
                     # signal that matters, because a token that flips is a
                     # token committed differently and commitment is final.
                     flag = "   <-- NOT EXACT: the cache path itself is wrong"
-                print(f"{bits:>5} {label:>7} {rel:>18.3e} {100*agree:>12.2f}%{flag}")
+                print(f"{bits:>5} {label:>7} {c.rel:>10.3e} "
+                      f"{pct(c.agree)} {pct(c.agree_k)} {pct(c.slots_k)}{flag}")
 
     print("\nThe 16-bit row is the control: quantize_kv returns the tensor "
           "untouched there, so it measures the windowed forward against the "
@@ -193,7 +281,16 @@ def main() -> int:
           f"{floor:.0e} the number to read is argmax: a logit that moves "
           "changes nothing, a logit ordering that flips changes which token "
           "gets committed, and commitment is irreversible.\n"
-          "To see the control at 1e-04, rerun with --dtype float32.")
+          "To see the control at 1e-04, rerun with --dtype float32.\n\n"
+          f"argmax counts all {args.block_length} window positions alike and is "
+          "therefore an upper bound on the damage: most of those positions stay "
+          "masked this step and get decided again later, so a flip there costs "
+          f"nothing. argmax@k restricts it to the {args.commit_k} positions the "
+          "exact path was most confident about -- the ones about to be committed "
+          "-- and is the number that predicts accuracy. slots@k asks the other "
+          "half: whether quantization changed *which* positions those are. Both "
+          "matter, and they fail differently -- argmax@k at 100% with slots@k "
+          "below it means the tokens are right but the schedule moved.")
 
     if args.kv_pairs:
         run_kv_asymmetry(
@@ -231,8 +328,10 @@ def run_kv_asymmetry(
     for mask_ratio in args.mask_ratios:
         x = masked_canvas(adapter, prompt, total, mask_ratio).to(device)
         reference = full_logits(model, x, args.block_length)[:, prefix_len:]
+        committable = x[:, prefix_len:total] == adapter.mask_id
         print(f"\n--- mask ratio {mask_ratio:.2f} " + "-" * 44)
-        print(f"{'K bits':>7} {'V bits':>7} {'rel. logit error':>18} {'argmax kept':>13}")
+        print(f"{'K bits':>7} {'V bits':>7} {'rel. err':>10} "
+              f"{'argmax':>8} {'argmax@k':>8} {'slots@k':>8}")
 
         for k_bits, v_bits in pairs:
             cache = BlockKVCache(
@@ -249,8 +348,10 @@ def run_kv_asymmetry(
             windowed = logits_for_window(
                 model, states, x, prefix_len, total, args.block_length
             )
-            rel, agree = compare(reference, windowed)
-            print(f"{k_bits:>7} {v_bits:>7} {rel:>18.3e} {100*agree:>12.2f}%")
+            c = compare(reference, windowed,
+                        committable=committable, top_k=args.commit_k)
+            print(f"{k_bits:>7} {v_bits:>7} {c.rel:>10.3e} "
+                  f"{pct(c.agree)} {pct(c.agree_k)} {pct(c.slots_k)}")
 
 
 if __name__ == "__main__":

@@ -204,6 +204,28 @@ logit ordering that flips changes the token that gets committed, and in a
 diffusion LM commitment is irreversible. **Argmax agreement is the primary
 number**, error is secondary.
 
+**And not flat argmax agreement either.** Averaged over every position in the
+window it weights them all alike, and the sampler does not: it commits the most
+confident and leaves the rest masked to be decided again from scratch on a
+later step. A flip on a position nobody was going to commit costs nothing, so
+the flat share is an upper bound on the damage — and a loose one exactly where
+the interesting regime is. At a high mask ratio the positions carry the same
+`[MASK]` embedding row, their logits sit near a tie, and the flat share drops
+on its own without any decision changing.
+
+So `check_block_cache.py` reports two restricted numbers beside it, both taken
+over the `--commit-k` positions the *reference* path was most confident about
+(ranking by the quantized run's own confidence would let it choose its own exam
+questions):
+
+* `argmax@k` — do the positions about to be committed still take the same
+  token. This is the number that predicts accuracy.
+* `slots@k` — are they still the same positions. Quantization can leave every
+  token right and still reorder which one is unmasked first, which changes the
+  conditioning of everything after it.
+
+The two fail independently, and a claim about a four-bit cache needs both.
+
 **Not teacher-forced fidelity.** Measured to compress a 52-point task gap into
 2.3 points, for a structural reason: forcing reference states prevents the
 quantized model from walking its own trajectory, which is exactly where the
