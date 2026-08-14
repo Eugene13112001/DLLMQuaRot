@@ -676,14 +676,15 @@ def test_weights_follow_the_rows_the_router_actually_sent():
 
     for expert in range(n_experts):
         expected_tokens = _reference_gather(routes, expert)
-        got = _weights_for_expert(
+        got, reason = _weights_for_expert(
             f"blocks.1.mlp.experts.{expert}.gate_proj",
             weights, routes, len(expected_tokens),
         )
         if len(expected_tokens) == 0:
             continue
-        assert got is not None, f"expert {expert} got no weights"
+        assert got is not None, f"expert {expert} got no weights: {reason}"
         assert torch.equal(got, weights[expected_tokens])
+        assert reason == ""
 
 
 def test_a_mismatch_falls_back_instead_of_guessing():
@@ -692,18 +693,23 @@ def test_a_mismatch_falls_back_instead_of_guessing():
     routes = torch.randint(0, 4, (12, 2))
     weights = torch.arange(12, dtype=torch.float32)
 
-    # A row count that cannot be right for this expert.
-    assert _weights_for_expert(
+    # A row count that cannot be right for this expert. The reason is part of
+    # the contract: a run that falls back on every expert has to be able to say
+    # which of the four ways it failed, or the next fix is a guess.
+    got, reason = _weights_for_expert(
         "blocks.1.mlp.experts.0.gate_proj", weights, routes, n_rows=999
-    ) is None
-    # No routing captured at all.
+    )
+    assert got is None and "layer saw 999" in reason
+
+    assert _weights_for_expert("blocks.1.mlp.down_proj", weights, routes, 6) == (
+        None, "not an expert layer"
+    )
     assert _weights_for_expert(
-        "blocks.1.mlp.experts.0.gate_proj", weights, None, n_rows=3
-    ) is None
-    # Not an expert layer.
+        "blocks.1.mlp.experts.0.gate_proj", weights, None, 6
+    ) == (None, "router output never seen")
     assert _weights_for_expert(
         "blocks.1.attention.dense", weights, routes, n_rows=12
-    ) is None
+    ) == (None, "not an expert layer")
 
 
 def test_the_router_watcher_captures_the_discrete_choice():

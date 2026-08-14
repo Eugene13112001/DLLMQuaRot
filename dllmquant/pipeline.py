@@ -90,6 +90,10 @@ class QuantReport:
     ia_aq: Dict[str, Dict[str, float]] = field(default_factory=dict)
     n_calibration: int = 0
     unweighted_layers: List[str] = field(default_factory=list)
+    # Why each of those fell back, counted. Without the breakdown a run cannot
+    # say whether the router was never observed or its bookkeeping disagrees,
+    # and those are different bugs.
+    unweighted_reasons: Dict[str, int] = field(default_factory=dict)
     # Layers no calibration token reached, quantized by plain rounding. In an
     # MoE this is most of them, and it is the number that decides whether the
     # calibration budget means anything.
@@ -149,11 +153,20 @@ class QuantReport:
                 f"(not re-solved)"
             )
         if self.unweighted_layers:
+            # Not "expected for MoE experts", which is what this said while it
+            # was firing on every expert layer that saw a token. Certainty
+            # weighting is what separates CGQ from plain GPTQ, so a run where
+            # it reached almost nothing produced a GPTQ model and must say so.
+            share = 100 * len(self.unweighted_layers) / len(self.layers)
             out.append(
-                f"  !! {len(self.unweighted_layers)} layers fell back to uniform "
-                f"token weights (token count did not match the snapshot; "
-                f"expected for MoE experts): e.g. {self.unweighted_layers[:3]}"
+                f"  !! {len(self.unweighted_layers)} layers ({share:.0f}%) fell "
+                f"back to uniform token weights -- CGQ degenerates to GPTQ "
+                f"there: e.g. {self.unweighted_layers[:3]}"
             )
+            for reason, n in sorted(
+                self.unweighted_reasons.items(), key=lambda kv: -kv[1]
+            ):
+                out.append(f"       {n:>6} x {reason}")
         return "\n".join(out)
 
 
@@ -191,7 +204,7 @@ def _watch_routers(block: nn.Module, state: dict) -> List:
 
 def _weights_for_expert(
     name: str, weights: torch.Tensor, routes: Optional[torch.Tensor], n_rows: int
-) -> Optional[torch.Tensor]:
+) -> Tuple[Optional[torch.Tensor], str]:
     """Per-token certainty weights, gathered into one expert's row order.
 
     The model feeds an expert its tokens sorted by expert id::
@@ -206,12 +219,21 @@ def _weights_for_expert(
     by another token's certainty, and the Hessian would be quietly wrong rather
     than obviously so.
 
-    Returns None when the mapping cannot be established, so the caller falls
-    back to uniform weights instead of guessing.
+    Returns (None, reason) when the mapping cannot be established, so the
+    caller falls back to uniform weights instead of guessing. The reason is
+    reported rather than swallowed: the first run to hit this fell back on
+    every single expert layer that saw a token, and a report saying only "the
+    count did not match" cannot distinguish a router that was never observed
+    from a batch layout that disagrees -- which are different bugs with
+    different fixes.
     """
     expert = _expert_index(name)
-    if expert is None or routes is None or routes.dim() < 2:
-        return None
+    if expert is None:
+        return None, "not an expert layer"
+    if routes is None:
+        return None, "router output never seen"
+    if routes.dim() < 2:
+        return None, f"router output is {routes.dim()}-D, expected [tokens, k]"
 
     k = routes.shape[-1]
     flat = routes.reshape(-1, k).reshape(-1)
@@ -222,10 +244,12 @@ def _weights_for_expert(
     if chosen.numel() != n_rows:
         # Shapes disagree: a different batch layout, or a router whose output
         # is not what this assumes. Uniform weights are wrong but honest.
-        return None
+        return None, (f"routes say {chosen.numel()} rows, layer saw {n_rows} "
+                      f"(routes {tuple(routes.shape)})")
     if chosen.numel() and int(chosen.max()) >= weights.numel():
-        return None
-    return weights[chosen]
+        return None, (f"token index {int(chosen.max())} is past the "
+                      f"{weights.numel()} calibration weights")
+    return weights[chosen], ""
 
 
 class DLLMQuantPipeline:
@@ -587,16 +611,22 @@ class DLLMQuantPipeline:
                 n_tokens = x.numel() // x.shape[-1]
                 w = state["weights"]
 
+                reason = "no calibration weights"
                 if w is not None and w.numel() != n_tokens:
                     # An expert sees only the tokens the router sent it, so the
                     # per-token weights no longer line up one to one. They can
                     # still be matched: the router's own top-k indices say
                     # which token each of the expert's rows came from.
-                    w = _weights_for_expert(name, w, state["routes"], n_tokens)
+                    w, reason = _weights_for_expert(
+                        name, w, state["routes"], n_tokens
+                    )
 
                 if w is None or w.numel() != n_tokens:
                     if name not in self.report.unweighted_layers:
                         self.report.unweighted_layers.append(name)
+                        self.report.unweighted_reasons[reason] = (
+                            self.report.unweighted_reasons.get(reason, 0) + 1
+                        )
                     solvers[name].add_batch(x, None)
                 else:
                     solvers[name].add_batch(x, w)
