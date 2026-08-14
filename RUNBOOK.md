@@ -9,17 +9,31 @@
 
 ## 1. Окружение
 
-Две модели требуют несовместимых версий transformers, поэтому 4.57.1 стоит
-**отдельным каталогом** и подключается через `PYTHONPATH`.
+Две модели требуют несовместимых версий transformers, поэтому **обе** стоят
+отдельными каталогами и подключаются через `PYTHONPATH`. В самом venv лежит
+4.51.3 — она не подходит **ни одной** из двух: для 1.5 слишком новая, для 2.0
+слишком старая. Раньше здесь было написано, что 1.5 запускается из venv; это
+перестало быть правдой после того, как venv обновили.
 
 ```bash
-export TF=$HOME/tf457
+export TF20=$HOME/tf457     # transformers 4.57.1
+export TF15=$HOME/tf446     # transformers 4.46.3
 ```
 
-| модель | как запускать |
-|---|---|
-| LLaDA2.0 | `bash scripts/llada2.sh <скрипт> ...` либо `PYTHONPATH=$TF python ...` |
-| LLaDA-1.5 | `python ...` **без** `PYTHONPATH` — ей нужен старый transformers из venv |
+| модель | нужная версия | как запускать |
+|---|---|---|
+| LLaDA2.0 | ≥4.56 | `bash scripts/llada2.sh <скрипт> ...` либо `PYTHONPATH=$TF20 python ...` |
+| LLaDA-1.5 | 4.38–4.46 | `PYTHONPATH=$TF15 python ...` |
+
+Ставится теневой каталог так — torch не подтянется, он transformers не нужен:
+
+```bash
+pip install --target=$HOME/tf446 'transformers==4.46.3'
+```
+
+Проверка версии стоит **до** импорта модельного кода, поэтому при ошибке в
+сообщении сразу написано, что ставить. Она не косметическая: без неё падение
+происходит внутри модельного файла чекпойнта на отсутствующем символе.
 
 Обёртка `llada2.sh` подставляет путь, выбирает карту по свободной памяти и
 падает с внятным сообщением, если каталога нет. Если `CUDA_VISIBLE_DEVICES`
@@ -75,7 +89,7 @@ export PYTHONUNBUFFERED=1
 PYTHONPATH=$HOME/tf457 python scripts/check_block_cache.py --model inclusionAI/LLaDA2.0-mini --model-type llada2_moe --device cpu
 PYTHONPATH=$HOME/tf457 python scripts/measure_drift.py --model inclusionAI/LLaDA2.0-mini --model-type llada2_moe --device cpu
 PYTHONPATH=$HOME/tf457 python scripts/check_router.py --model inclusionAI/LLaDA2.0-mini --model-type llada2_moe --device cpu
-python scripts/measure_drift.py --model GSAI-ML/LLaDA-1.5 --model-type llada --device cpu
+PYTHONPATH=$HOME/tf446 python scripts/measure_drift.py --model GSAI-ML/LLaDA-1.5 --model-type llada --device cpu
 ' > out/tier0.log 2>&1 & sleep 2 && tail -f out/tier0.log
 ```
 
@@ -83,12 +97,14 @@ python scripts/measure_drift.py --model GSAI-ML/LLaDA-1.5 --model-type llada --d
 
 **Что читать:**
 
-`check_block_cache.py` — верхняя строка каждой таблицы, `16 бит`. Там
-квантизация не делает ничего, и строка показывает расхождение оконного прогона
-с полным. В bf16 она **не ноль**: порог шума 6e-2, и ошибка логитов около
-1.5e-2 — это норма, а не поломка. Держать обязан `argmax` = 100%; скрипт
-припишет `<-- NOT EXACT`, если нет. Точный контроль — `--dtype float32`, там
-порог 1e-4. Пока эта строка не сошлась, остальные числа недействительны.
+`check_block_cache.py` — строка `16 бит`. Там квантизация тождественна, так
+что это **не измерение хранения**, а уровень арифметического шума оконного
+прогона, и эталона для него не существует: сравнивать не с чем. В bf16 она не
+ноль и не обязана быть нулём. Помечается она только если сдвинулось решение,
+которое реально фиксируется (`argmax@k` < 100%) — по последствию, а не по
+величине. Порог на саму ошибку тут был бы числом, принесённым из другого
+места; один раз так и вышло, проверка сработала впустую. Резкий контроль —
+`--dtype float32`.
 
 **Первая строка каждой таблицы — `scram`, пол случайности.** Это 16-битный
 кэш, у которого записи перемешаны вдоль оси токенов: распределение в точности
@@ -147,8 +163,16 @@ argmax начинает переворачиваться.
 (блочно-каузальная маска), у LLaDA-1.5 — **ненулевой** везде (двунаправленное
 внимание, ничего не финально). Это структурное утверждение в числах.
 
-`check_router.py` — `routing kept` при 4 битах, против того, что 4-битные веса
-экспертов не стоят ничего (p = 0.44).
+`check_router.py` — **измерено, вопрос закрыт.** 19 роутеров это 9.96M
+параметров, 0.061% модели. При 4 битах сохраняется 78% маршрутов, при 8 битах
+95%, при 2 битах 28%. То есть четырёхбитный роутер меняет каждый пятый выбор
+эксперта — при том, что четырёхбитные веса самих экспертов не дают измеримой
+разницы (p = 0.44). Исключение роутера из квантизации заслужено, а не
+перестраховка.
+
+Маршруты устойчивее на раскрытом полотне (95.1% против 90.7% при 8 битах) —
+тот же механизм, что и у зазора решения: при полной маске оценки экспертов
+стоят у ничьей.
 
 ### Часы, нужна карта
 
@@ -157,8 +181,8 @@ argmax начинает переворачиваться.
 
 ```bash
 cd ~/quantization/DLLMQuaRot && CUDA_VISIBLE_DEVICES=N nohup bash -c '
-export TF=$HOME/tf457 PYTHONUNBUFFERED=1
-PYTHONPATH=$TF python scripts/evaluate.py --model inclusionAI/LLaDA2.0-mini \
+export TF20=$HOME/tf457 PYTHONUNBUFFERED=1
+PYTHONPATH=$TF20 python scripts/evaluate.py --model inclusionAI/LLaDA2.0-mini \
   --model-type llada2_moe --n-eval 200 --gen-length 512 --eval-steps 512 \
   --out out/fp16_g512.json' > out/fp16_g512.log 2>&1 &
 ```
@@ -182,7 +206,7 @@ PYTHONPATH=$TF python scripts/evaluate.py --model inclusionAI/LLaDA2.0-mini \
 Контрольные точки после каждого блока, при падении продолжает с недоделанного.
 
 ```bash
-PYTHONPATH=$TF python scripts/quantize.py --model inclusionAI/LLaDA2.0-mini \
+PYTHONPATH=$TF20 python scripts/quantize.py --model inclusionAI/LLaDA2.0-mini \
   --model-type llada2_moe --w-bits 4 --a-bits 4 --a-group-size 128 --rotate \
   --seq-len 256 --gen-length 512 --block-length 32 --steps 128 \
   --checkpoint-dir out/ckpt_w4a4 --save out/llada2mini_w4a4
