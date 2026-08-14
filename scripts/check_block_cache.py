@@ -32,12 +32,21 @@ Two distinct failures hide in that top: the committed position can take a
 different token, or a different position can become the most confident one and
 get committed instead. `argmax@k` catches the first, `slots@k` the second.
 
-Everything is measured at several mask ratios, because the K/V of a masked
-position and a decoded one are not alike: at a high mask ratio nearly every
+Every table also opens with a **chance floor**: the same measurement taken with
+a 16-bit cache whose entries have been shuffled along the token axis. Its
+distribution is exactly that of a perfect cache and it carries none of the
+information, so it is what these numbers look like when the cache has told the
+model nothing. Neither the error nor the argmax share has a meaningful zero
+without it -- two runs of the same model agree on a great deal by prior alone,
+and a row sitting at the floor is dead however small its logit error looks.
+
+The sweep is over the mask ratio of the **prefix**, which is the part that gets
+cached, while the window stays masked because that is what a sampler step
+reads. The two are separate for a reason: the K/V of a masked position and a
+decoded one are not alike, so at a high prefix mask ratio nearly every cached
 position carries the same `[MASK]` embedding row, their K/V are near-identical,
-their rounding errors add coherently instead of cancelling -- and their logits
-sit near a tie, where an error that would be harmless anywhere else decides the
-ordering.
+and their rounding errors add coherently instead of cancelling -- the usual
+"quantization noise averages out" argument fails exactly there.
 """
 
 from __future__ import annotations
@@ -65,9 +74,21 @@ from dllmquant.models.llada2_local import (  # noqa: E402
 )
 
 
-def masked_canvas(adapter, prompt: torch.Tensor, total: int, mask_ratio: float,
+def masked_canvas(adapter, prompt: torch.Tensor, total: int, prefix_len: int,
+                  prefix_ratio: float, window_ratio: float = 1.0,
                   seed: int = 0) -> torch.Tensor:
-    """Prompt, then a tail that is `mask_ratio` masked and otherwise decoded.
+    """A canvas mid-trajectory, with the prefix and the window set separately.
+
+    These are two different things and an earlier version of this script swept
+    them together, which put every realistic configuration outside the table.
+    The prefix is the closed blocks -- what gets cached -- and it empties of
+    masks as the trajectory advances. The window is the block being decoded
+    right now, and a sampler step looks at it while it is still mostly masked;
+    a fully decoded window has nothing to commit and nothing to measure.
+
+    So `prefix_ratio` is the variable of interest -- how far along the
+    trajectory the cache was taken -- and `window_ratio` stays at 1.0, because
+    that is what the step doing the reading looks like.
 
     Standing in for a real trajectory state: what matters for the cache is the
     proportion of positions still carrying the mask embedding, not how they
@@ -76,13 +97,17 @@ def masked_canvas(adapter, prompt: torch.Tensor, total: int, mask_ratio: float,
     g = torch.Generator(device="cpu").manual_seed(seed)
     x = torch.full((1, total), adapter.mask_id, dtype=torch.long)
     x[0, : prompt.shape[-1]] = prompt
+    vocab = int(adapter.model.config.vocab_size)
 
-    tail = torch.arange(prompt.shape[-1], total)
-    n_decoded = int(round(len(tail) * (1.0 - mask_ratio)))
-    if n_decoded:
-        chosen = tail[torch.randperm(len(tail), generator=g)[:n_decoded]]
-        vocab = int(adapter.model.config.vocab_size)
-        x[0, chosen] = torch.randint(0, vocab - 1, (n_decoded,), generator=g)
+    for lo, hi, ratio in (
+        (prompt.shape[-1], prefix_len, prefix_ratio),
+        (prefix_len, total, window_ratio),
+    ):
+        span = torch.arange(lo, hi)
+        n_decoded = int(round(len(span) * (1.0 - ratio)))
+        if n_decoded:
+            chosen = span[torch.randperm(len(span), generator=g)[:n_decoded]]
+            x[0, chosen] = torch.randint(0, vocab - 1, (n_decoded,), generator=g)
     return x
 
 
@@ -179,7 +204,14 @@ def main() -> int:
                          "this checkpoint head_dim is 128, so 128 is already "
                          "the whole head and anything larger is the same run.")
     ap.add_argument("--mask-ratios", type=float, nargs="+",
-                    default=[1.0, 0.5, 0.0])
+                    default=[1.0, 0.5, 0.0],
+                    help="mask ratio of the cached *prefix*, i.e. how far "
+                         "along the trajectory the cache was taken")
+    ap.add_argument("--window-mask-ratio", type=float, default=1.0,
+                    help="mask ratio of the block being decoded. 1.0 is what a "
+                         "sampler step actually sees; lowering it leaves fewer "
+                         "positions that could be committed, and at 0 there is "
+                         "nothing to commit and the restricted metrics go n/a.")
     ap.add_argument("--kv-pairs", nargs="*",
                     default=["4,4", "8,4", "4,8", "3,4", "4,3", "2,4", "4,2"],
                     help="K,V bit pairs for the asymmetry sweep. Pairs are "
@@ -217,25 +249,58 @@ def main() -> int:
     prefix_len = total - args.block_length  # cache everything but the last block
     prompt = adapter.encode_prompts(load_prompts(1), max_len=args.block_length)[0]
 
-    floor = dtype_invariance_tol(args.dtype)
+    noise_floor = dtype_invariance_tol(args.dtype)
     print(f"\nsequence {total} tokens = {args.blocks} blocks of "
           f"{args.block_length}; prefix cached = {prefix_len}, "
           f"window recomputed = {args.block_length}")
     print(f"{args.dtype}: the 16-bit control row is exact only in exact "
-          f"arithmetic; noise floor here is {floor:.0e}, and argmax is what "
+          f"arithmetic; noise floor here is {noise_floor:.0e}, and argmax is what "
           f"must hold at 100%")
 
     states = install_block_cache(model, BlockKVCache(KVCacheConfig(), n_layers))
 
+    def run(cache: BlockKVCache, x, reference, committable, scramble: bool = False):
+        for state in states:
+            state.cache = cache
+        refresh_prefix(model, states, x, prefix_len, args.block_length)
+        if scramble:
+            cache.scramble(torch.Generator().manual_seed(0))
+        windowed = logits_for_window(
+            model, states, x, prefix_len, total, args.block_length
+        )
+        return compare(reference, windowed,
+                       committable=committable, top_k=args.commit_k)
+
+    def row(bits_label, group_label, c, flag=""):
+        print(f"{bits_label:>5} {group_label:>7} {c.rel:>10.3e} "
+              f"{pct(c.agree)} {pct(c.agree_k)} {pct(c.slots_k)}{flag}")
+
     for mask_ratio in args.mask_ratios:
-        x = masked_canvas(adapter, prompt, total, mask_ratio).to(device)
+        x = masked_canvas(adapter, prompt, total, prefix_len, mask_ratio,
+                          args.window_mask_ratio).to(device)
         reference = full_logits(model, x, args.block_length)[:, prefix_len:]
         committable = x[:, prefix_len:total] == adapter.mask_id
-        print(f"\n--- mask ratio {mask_ratio:.2f} " + "-" * 44)
-        print(f"{int(committable.sum())} of {args.block_length} window positions "
-              f"are masked and can be committed")
+        print(f"\n--- prefix mask ratio {mask_ratio:.2f} " + "-" * 37)
+        print(f"window is {100 * args.window_mask_ratio:.0f}% masked: "
+              f"{int(committable.sum())} of {args.block_length} positions could "
+              f"be committed")
         print(f"{'bits':>5} {'group':>7} {'rel. err':>10} "
               f"{'argmax':>8} {'argmax@k':>8} {'slots@k':>8}")
+
+        # The chance floor first, so every row below is read against it. A
+        # 16-bit cache whose entries have been shuffled has exactly the
+        # distribution of a perfect one and none of its information, so this is
+        # what "the cache told the model nothing" scores. Rows at this level
+        # are dead no matter how small their logit error looks.
+        chance = run(
+            BlockKVCache(
+                KVCacheConfig(enabled=True, decoded_bits=16, masked_bits=16,
+                              group_size=head_dim),
+                n_layers,
+            ),
+            x, reference, committable, scramble=True,
+        )
+        row("--", "scram", chance, "   <-- chance floor: no information")
 
         groups = sorted({min(g, head_dim) for g in args.group_sizes})
         for group_size in groups:
@@ -247,18 +312,10 @@ def main() -> int:
                     ),
                     n_layers,
                 )
-                for state in states:
-                    state.cache = cache
-
-                refresh_prefix(model, states, x, prefix_len, args.block_length)
-                windowed = logits_for_window(
-                    model, states, x, prefix_len, total, args.block_length
-                )
-                c = compare(reference, windowed,
-                            committable=committable, top_k=args.commit_k)
+                c = run(cache, x, reference, committable)
                 label = f"{group_size}=head" if group_size == head_dim else str(group_size)
                 flag = ""
-                if bits >= 16 and (c.rel > floor or c.agree < 1.0):
+                if bits >= 16 and (c.rel > noise_floor or c.agree < 1.0):
                     # 16 bits stores the tensor unchanged, so what is left is
                     # the plumbing -- but "unchanged" is only exact in exact
                     # arithmetic. The windowed forward multiplies a 32-row
@@ -269,8 +326,9 @@ def main() -> int:
                     # signal that matters, because a token that flips is a
                     # token committed differently and commitment is final.
                     flag = "   <-- NOT EXACT: the cache path itself is wrong"
-                print(f"{bits:>5} {label:>7} {c.rel:>10.3e} "
-                      f"{pct(c.agree)} {pct(c.agree_k)} {pct(c.slots_k)}{flag}")
+                elif bits < 16 and c.rel >= chance.rel and c.agree <= chance.agree:
+                    flag = "   <-- at the floor: carries nothing"
+                row(str(bits), label, c, flag)
 
     print("\nThe 16-bit row is the control: quantize_kv returns the tensor "
           "untouched there, so it measures the windowed forward against the "
@@ -278,7 +336,7 @@ def main() -> int:
           "windowed forward multiplies a 32-row query against the keys where "
           "the full one multiplies every row, and a different accumulation "
           f"order is a different answer in {args.dtype}. Below the floor of "
-          f"{floor:.0e} the number to read is argmax: a logit that moves "
+          f"{noise_floor:.0e} the number to read is argmax: a logit that moves "
           "changes nothing, a logit ordering that flips changes which token "
           "gets committed, and commitment is irreversible.\n"
           "To see the control at 1e-04, rerun with --dtype float32.\n\n"
@@ -290,17 +348,24 @@ def main() -> int:
           "-- and is the number that predicts accuracy. slots@k asks the other "
           "half: whether quantization changed *which* positions those are. Both "
           "matter, and they fail differently -- argmax@k at 100% with slots@k "
-          "below it means the tokens are right but the schedule moved.")
+          "below it means the tokens are right but the schedule moved.\n\n"
+          "Read every row against the scrambled one at the top of its table. "
+          "That row is a cache with a perfect distribution and no information, "
+          "so it is where these numbers bottom out -- and they do not bottom "
+          "out at zero, because two runs of one model agree by prior alone. A "
+          "bit width at the floor is carrying nothing, and the ordering among "
+          "rows at the floor is noise, not a ranking.")
 
     if args.kv_pairs:
         run_kv_asymmetry(
-            adapter, model, states, args, n_layers, head_dim, device, prefix_len, total
+            adapter, model, args, n_layers, head_dim, device, prefix_len, total,
+            run, row
         )
     return 0
 
 
 def run_kv_asymmetry(
-    adapter, model, states, args, n_layers, head_dim, device, prefix_len, total
+    adapter, model, args, n_layers, head_dim, device, prefix_len, total, run, row
 ) -> None:
     """Does K deserve more bits than V, or the other way round?
 
@@ -326,12 +391,23 @@ def run_kv_asymmetry(
     print("mirror pairs cost the same memory; the winner says where bits belong")
 
     for mask_ratio in args.mask_ratios:
-        x = masked_canvas(adapter, prompt, total, mask_ratio).to(device)
+        x = masked_canvas(adapter, prompt, total, prefix_len, mask_ratio,
+                          args.window_mask_ratio).to(device)
         reference = full_logits(model, x, args.block_length)[:, prefix_len:]
         committable = x[:, prefix_len:total] == adapter.mask_id
-        print(f"\n--- mask ratio {mask_ratio:.2f} " + "-" * 44)
-        print(f"{'K bits':>7} {'V bits':>7} {'rel. err':>10} "
+        print(f"\n--- prefix mask ratio {mask_ratio:.2f} " + "-" * 37)
+        print(f"{'K':>5} {'V':>7} {'rel. err':>10} "
               f"{'argmax':>8} {'argmax@k':>8} {'slots@k':>8}")
+
+        chance = run(
+            BlockKVCache(
+                KVCacheConfig(enabled=True, decoded_bits=16, masked_bits=16,
+                              group_size=head_dim),
+                n_layers,
+            ),
+            x, reference, committable, scramble=True,
+        )
+        row("--", "scram", chance, "   <-- chance floor: no information")
 
         for k_bits, v_bits in pairs:
             cache = BlockKVCache(
@@ -341,17 +417,10 @@ def run_kv_asymmetry(
                 ),
                 n_layers,
             )
-            for state in states:
-                state.cache = cache
-
-            refresh_prefix(model, states, x, prefix_len, args.block_length)
-            windowed = logits_for_window(
-                model, states, x, prefix_len, total, args.block_length
-            )
-            c = compare(reference, windowed,
-                        committable=committable, top_k=args.commit_k)
-            print(f"{k_bits:>7} {v_bits:>7} {c.rel:>10.3e} "
-                  f"{pct(c.agree)} {pct(c.agree_k)} {pct(c.slots_k)}")
+            c = run(cache, x, reference, committable)
+            flag = ("   <-- at the floor"
+                    if c.rel >= chance.rel and c.agree <= chance.agree else "")
+            row(str(k_bits), str(v_bits), c, flag)
 
 
 if __name__ == "__main__":

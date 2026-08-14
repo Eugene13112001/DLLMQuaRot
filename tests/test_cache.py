@@ -333,3 +333,32 @@ def test_the_summary_reports_depth_when_there_is_depth():
 
     text = cache.stats.summary()
     assert "by depth" in text
+
+
+def test_scramble_destroys_information_but_not_the_distribution():
+    """The chance floor has to be a floor, not a slightly worse cache."""
+    cache = BlockKVCache(KVCacheConfig(enabled=True, decoded_bits=16,
+                                       masked_bits=16), n_layers=2)
+    torch.manual_seed(0)
+    k, v = torch.randn(1, 2, 8, 4), torch.randn(1, 2, 8, 4)
+    cache.write(0, k, v)
+    cache.write(1, k.clone(), v.clone())
+    before = {layer: cache._k[layer].clone() for layer in (0, 1)}
+
+    cache.scramble(torch.Generator().manual_seed(0))
+
+    for layer in (0, 1):
+        after = cache._k[layer]
+        assert not torch.equal(before[layer], after), "nothing moved"
+        # Same rows, reordered: the marginal distribution is untouched, so the
+        # floor is not confounded by a scale the model never sees.
+        assert torch.equal(
+            before[layer].sort(dim=-2).values, after.sort(dim=-2).values
+        )
+
+    # Independent draws per layer and per side. A shared permutation would be a
+    # shuffled but coherent sequence -- a bag of words, which is information.
+    assert not torch.equal(cache._k[0], cache._k[1])
+    assert not torch.equal(
+        cache._k[0].sort(dim=-2).indices, cache._v[0].sort(dim=-2).indices
+    )

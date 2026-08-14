@@ -354,6 +354,35 @@ class BlockKVCache:
         )
         return torch.where(m, masked, decoded)
 
+    def scramble(self, generator: Optional[torch.Generator] = None) -> None:
+        """Permute stored entries along the token axis: the chance floor.
+
+        A control, not a feature. Bit-width sweeps report an error and an
+        argmax agreement, and neither has a meaningful zero: it is not obvious
+        from the numbers alone whether "argmax kept 53%" means half the
+        decisions survived or the cache is dead and 53% is what agreement looks
+        like when the two runs share nothing but the model's priors. Measuring
+        with a cache whose information is destroyed but whose distribution is
+        untouched gives that floor, and any bit width sitting at it is carrying
+        nothing, whatever its error says.
+
+        Permutation rather than noise or zeros on purpose: it preserves the
+        exact marginal distribution of every channel, so the floor is not
+        confounded by a scale the model never sees in practice.
+
+        A fresh permutation per layer and per side, deliberately. One shared
+        permutation would hand the model a shuffled but internally consistent
+        sequence -- keys still matched to their own values, every layer
+        agreeing on where each position went -- and that is a bag of words, not
+        nothing. Drawing independently breaks the K/V pairing and the agreement
+        across depth, which is what makes this a floor rather than a weaker
+        cache.
+        """
+        for store in (self._k, self._v):
+            for layer, t in list(store.items()):
+                idx = torch.randperm(t.shape[-2], generator=generator)
+                store[layer] = t.index_select(-2, idx.to(t.device))
+
     def read(self, layer: int) -> Tuple[torch.Tensor, torch.Tensor]:
         if layer not in self._k:
             raise KeyError(f"layer {layer} has nothing cached")
