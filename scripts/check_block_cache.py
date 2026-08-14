@@ -37,6 +37,7 @@ from dllmquant.cache import BlockKVCache, KVCacheConfig  # noqa: E402
 from dllmquant.calib.prompts import load_prompts  # noqa: E402
 from dllmquant.config import DLLMQuantConfig  # noqa: E402
 from dllmquant.models import build_adapter  # noqa: E402
+from dllmquant.rotate import dtype_invariance_tol  # noqa: E402
 from dllmquant.models.llada2_local import (  # noqa: E402
     block_causal_mask,
     forward_window,
@@ -134,9 +135,13 @@ def main() -> int:
     prefix_len = total - args.block_length  # cache everything but the last block
     prompt = adapter.encode_prompts(load_prompts(1), max_len=args.block_length)[0]
 
+    floor = dtype_invariance_tol(args.dtype)
     print(f"\nsequence {total} tokens = {args.blocks} blocks of "
           f"{args.block_length}; prefix cached = {prefix_len}, "
           f"window recomputed = {args.block_length}")
+    print(f"{args.dtype}: the 16-bit control row is exact only in exact "
+          f"arithmetic; noise floor here is {floor:.0e}, and argmax is what "
+          f"must hold at 100%")
 
     states = install_block_cache(model, BlockKVCache(KVCacheConfig(), n_layers))
 
@@ -166,16 +171,29 @@ def main() -> int:
                 rel, agree = compare(reference, windowed)
                 label = f"{group_size}=head" if group_size == head_dim else str(group_size)
                 flag = ""
-                if bits >= 16 and rel > 1e-4:
-                    # 16 bits stores the tensor unchanged, so anything above
-                    # float noise here is the plumbing, not the quantizer.
+                if bits >= 16 and (rel > floor or agree < 1.0):
+                    # 16 bits stores the tensor unchanged, so what is left is
+                    # the plumbing -- but "unchanged" is only exact in exact
+                    # arithmetic. The windowed forward multiplies a 32-row
+                    # query against the keys where the full one multiplies
+                    # 256, and in bfloat16 a different accumulation order is a
+                    # different answer. The floor is the same one the rotation
+                    # check uses, for the same reason; below it, argmax is the
+                    # signal that matters, because a token that flips is a
+                    # token committed differently and commitment is final.
                     flag = "   <-- NOT EXACT: the cache path itself is wrong"
                 print(f"{bits:>5} {label:>7} {rel:>18.3e} {100*agree:>12.2f}%{flag}")
 
     print("\nThe 16-bit row is the control: quantize_kv returns the tensor "
           "untouched there, so it measures the windowed forward against the "
-          "full one and nothing else. It has to be ~0 before any other row "
-          "means anything.")
+          "full one and nothing else -- but only in exact arithmetic. The "
+          "windowed forward multiplies a 32-row query against the keys where "
+          "the full one multiplies every row, and a different accumulation "
+          f"order is a different answer in {args.dtype}. Below the floor of "
+          f"{floor:.0e} the number to read is argmax: a logit that moves "
+          "changes nothing, a logit ordering that flips changes which token "
+          "gets committed, and commitment is irreversible.\n"
+          "To see the control at 1e-04, rerun with --dtype float32.")
 
     if args.kv_pairs:
         run_kv_asymmetry(
