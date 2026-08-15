@@ -348,13 +348,30 @@ def load_pretrained(
         kwargs["device_map"] = cfg.device_map
         return auto_class.from_pretrained(cfg.model_path, **kwargs)
 
-    model = auto_class.from_pretrained(cfg.model_path, **kwargs)
-    if cfg.device and cfg.device != "cpu":
-        if not _torch.cuda.is_available():
-            raise RuntimeError(
-                f"device='{cfg.device}' but CUDA is unavailable; "
-                "pass --device cpu (very slow) or fix the environment"
+    wants_gpu = bool(cfg.device) and cfg.device != "cpu"
+    if wants_gpu and not _torch.cuda.is_available():
+        raise RuntimeError(
+            f"device='{cfg.device}' but CUDA is unavailable; "
+            "pass --device cpu (very slow) or fix the environment"
+        )
+
+    if wants_gpu:
+        # Stream the shards straight onto the card. The obvious alternative --
+        # load, then .to(device) -- puts the entire checkpoint in host RAM
+        # first, 32 GB for this one, and host RAM is the binding constraint on
+        # a shared node far more often than VRAM is. With a single-device map
+        # the peak is about one shard.
+        try:
+            return auto_class.from_pretrained(
+                cfg.model_path, device_map={"": cfg.device}, **kwargs
             )
+        except Exception as exc:  # accelerate missing, or remote code refusing
+            print(f"[load] could not place directly on {cfg.device} "
+                  f"({type(exc).__name__}: {exc}); falling back to host RAM "
+                  "then .to(device), which needs the whole model in RAM")
+
+    model = auto_class.from_pretrained(cfg.model_path, **kwargs)
+    if wants_gpu:
         model = model.to(cfg.device)
     return model
 
