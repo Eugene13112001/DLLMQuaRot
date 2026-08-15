@@ -283,6 +283,12 @@ class DLLMQuantConfig:
     # which layers got their certainty weights, and why the rest did not --
     # should not cost 20 hours to ask. One block exercises every path.
     max_blocks: int = 0
+    # Apply the rotation and stop, leaving the weights unquantized. For the
+    # cache study: R3 turns the value heads so V fits into few bits, and every
+    # cache number so far was taken on an unrotated model -- measuring against
+    # a rotated *and quantized* one would confound the two. Rotation reads no
+    # data, so there is nothing to calibrate and nothing to solve.
+    rotate_only: bool = False
     device: str = "cuda"
     dtype: str = "bfloat16"
     # None -> load normally and move to `device`. Only set this ("auto", or an

@@ -793,3 +793,40 @@ def test_max_blocks_stops_early_and_says_so(capsys):
     adapter.load()
     full = DLLMQuantPipeline(_config(), adapter).run(_prompts(adapter), verbose=False)
     assert {l.name.split(".")[1] for l in full.layers} == {"0", "1"}
+
+
+def test_rotate_only_rotates_and_leaves_the_weights_alone(capsys):
+    """The cache sweeps need a rotated model whose weights are untouched.
+
+    Rotation reads no data, so there is nothing to calibrate and nothing to
+    solve; without this flag the same artifact costs a full solve over every
+    layer for weights that are then discarded.
+    """
+    torch.manual_seed(0)
+    cfg = _config(rotate_only=True)
+    cfg.rotation.enabled = True
+    adapter = TinyAdapter(cfg)
+    adapter.load()
+    before = {n: p.detach().clone() for n, p in adapter.model.named_parameters()}
+
+    report = DLLMQuantPipeline(cfg, adapter).run(_prompts(adapter), verbose=True)
+
+    assert report.layers == [], "nothing may be solved"
+    assert report.rotation is not None, "the rotation must still have happened"
+    assert "weights untouched" in capsys.readouterr().out
+
+    # Rotated, therefore changed -- but by the rotation, not by a quantizer.
+    # Compared only over names that survive: R2 wraps ff_out in an online
+    # Hadamard, so some parameters move a level deeper and a name-for-name
+    # comparison would trip on that rather than on the weights.
+    after = dict(adapter.model.named_parameters())
+    shared = set(before) & set(after)
+    assert shared, "no parameter names in common; the model was rebuilt"
+    assert any(not torch.equal(after[n], before[n]) for n in shared), \
+        "the rotation did nothing"
+    assert not any(isinstance(m, QuantLinear) and m.weight_quantizer is not None
+                   for m in adapter.model.modules()), "a weight was quantized"
+
+    # The model must still run.
+    out = adapter.model(_prompts(adapter, 1)[0].unsqueeze(0))
+    assert torch.isfinite(out.logits).all()

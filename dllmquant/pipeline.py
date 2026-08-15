@@ -285,6 +285,21 @@ class DLLMQuantPipeline:
             if verbose:
                 print(self.report.rotation.summary())
 
+        if self.cfg.rotate_only:
+            # A rotated model with its weights untouched. The point is the
+            # cache: R3 turns the value heads so V fits into few bits, and
+            # every cache measurement so far was taken unrotated. Testing that
+            # against a *quantized* rotated model would confound the two, so
+            # what is needed is rotation alone -- and rotation looks at no
+            # data, so there is nothing to calibrate and nothing to solve.
+            # Without this the same thing costs a 20-hour solve for weights
+            # that then get thrown away.
+            self.report.seconds = time.time() - t0
+            if verbose:
+                print(f"[rotate-only] rotation applied, weights untouched, "
+                      f"{self.report.seconds:.1f}s -- no calibration, no solve")
+            return self.report
+
         ckpt = None
         if self.cfg.checkpoint_dir:
             ckpt = BlockCheckpoints(

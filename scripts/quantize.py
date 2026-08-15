@@ -79,6 +79,7 @@ def build_config(args) -> DLLMQuantConfig:
         cfg.checkpoint_dir = args.checkpoint_dir
         cfg.max_group_layers = args.max_group_layers
         cfg.max_blocks = args.max_blocks
+        cfg.rotate_only = args.rotate_only
         return cfg
 
     if args.recipe in ("quarot-baseline", "quarot-diffusion"):
@@ -103,6 +104,7 @@ def build_config(args) -> DLLMQuantConfig:
         cfg.checkpoint_dir = args.checkpoint_dir
         cfg.max_group_layers = args.max_group_layers
         cfg.max_blocks = args.max_blocks
+        cfg.rotate_only = args.rotate_only
         return cfg
 
     return DLLMQuantConfig(
@@ -114,6 +116,7 @@ def build_config(args) -> DLLMQuantConfig:
         checkpoint_dir=args.checkpoint_dir,
         max_group_layers=args.max_group_layers,
         max_blocks=args.max_blocks,
+        rotate_only=args.rotate_only,
         seed=args.seed,
         weight=QuantConfig(
             n_bits=args.w_bits,
@@ -167,6 +170,12 @@ def main() -> int:
                     help="only when the model does not fit on one GPU "
                          "(e.g. 'auto' for LLaDA2.0-flash)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--rotate-only", action="store_true",
+                    help="apply QuaRot and stop, weights left unquantized. "
+                         "Produces the rotated fp16 model the cache sweeps "
+                         "need: rotation reads no data, so this is minutes, "
+                         "where --rotate --w-bits 16 would still run the "
+                         "solver over every layer for weights it discards.")
     ap.add_argument("--max-blocks", type=int, default=0,
                     help="stop after N blocks. Debugging only -- the saved "
                          "model would be half quantized and must not be "
