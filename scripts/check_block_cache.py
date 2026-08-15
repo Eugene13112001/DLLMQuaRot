@@ -653,8 +653,16 @@ def run_kv_asymmetry(
         pairs.append((k_bits, v_bits))
 
     group = min(args.kv_pair_group, head_dim)
+    # The axis is not optional here. Grouping K along channels leaves its
+    # outliers straddling everyone else's scale, which costs far more than any
+    # bit reallocation -- so a K/V sweep on the wrong axis measures the axis
+    # and calls it asymmetry. The first --key-axes value is used, and printed,
+    # because an earlier version silently defaulted and produced a table
+    # indistinguishable from the channel-axis one.
+    key_axis, value_axis = args.key_axes[0], args.value_axis
 
-    print(f"\n=== K/V asymmetry, group {group} " + "=" * 34)
+    print(f"\n=== K/V asymmetry, group {group}, K along {key_axis}s, "
+          f"V along {value_axis}s " + "=" * 8)
     print("mirror pairs cost the same memory; the winner says where bits belong")
     print("a gap smaller than the +- on argmax@k is not a result")
 
@@ -671,7 +679,8 @@ def run_kv_asymmetry(
             def make_cache(k=k_bits, v=v_bits):
                 return BlockKVCache(
                     KVCacheConfig(enabled=True, group_size=group,
-                                  key_bits=k, value_bits=v),
+                                  key_bits=k, value_bits=v,
+                                  key_axis=key_axis, value_axis=value_axis),
                     n_layers,
                 )
             c = sweep(make_cache, batch)
