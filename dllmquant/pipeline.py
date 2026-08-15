@@ -316,6 +316,17 @@ class DLLMQuantPipeline:
 
         # 3. Block by block -------------------------------------------------
         blocks = self.adapter.blocks
+        limit = getattr(self.cfg, "max_blocks", 0)
+        if limit:
+            # Not for producing a model -- the result is a half-quantized one
+            # and useless. This exists because the run that matters takes 20
+            # hours, and a question about its bookkeeping should not. One block
+            # exercises every code path the other nineteen do.
+            blocks = list(blocks)[:limit]
+            if verbose:
+                print(f"[debug] stopping after {limit} of "
+                      f"{len(self.adapter.blocks)} blocks -- the saved model "
+                      f"would be half quantized and must not be evaluated")
         for bi, block in enumerate(blocks):
             t_block = time.time()
             layers = wrap_linears(

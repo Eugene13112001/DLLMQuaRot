@@ -772,3 +772,24 @@ def test_weights_are_indexed_by_token_not_by_batch():
         assert got_shaped is not None, reason
         assert torch.equal(got_shaped, got_flat)
         assert torch.equal(got_shaped, flat[expected])
+
+
+def test_max_blocks_stops_early_and_says_so(capsys):
+    """A question about a 20-hour run should not cost 20 hours to ask."""
+    torch.manual_seed(0)
+    cfg = _config(max_blocks=1)
+    adapter = TinyAdapter(cfg)
+    adapter.load()
+
+    report = DLLMQuantPipeline(cfg, adapter).run(_prompts(adapter), verbose=True)
+
+    solved = {l.name.split(".")[1] for l in report.layers}
+    assert solved == {"0"}, f"expected block 0 only, got {sorted(solved)}"
+    assert "half quantized" in capsys.readouterr().out
+
+    # And the default must still do every block, or this flag is a foot-gun.
+    torch.manual_seed(0)
+    adapter = TinyAdapter(_config())
+    adapter.load()
+    full = DLLMQuantPipeline(_config(), adapter).run(_prompts(adapter), verbose=False)
+    assert {l.name.split(".")[1] for l in full.layers} == {"0", "1"}

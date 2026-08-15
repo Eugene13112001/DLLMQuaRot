@@ -78,6 +78,7 @@ def build_config(args) -> DLLMQuantConfig:
         cfg.rotation.online_mlp = not args.no_online_mlp
         cfg.checkpoint_dir = args.checkpoint_dir
         cfg.max_group_layers = args.max_group_layers
+        cfg.max_blocks = args.max_blocks
         return cfg
 
     if args.recipe in ("quarot-baseline", "quarot-diffusion"):
@@ -101,6 +102,7 @@ def build_config(args) -> DLLMQuantConfig:
         cfg.device_map = args.device_map or None
         cfg.checkpoint_dir = args.checkpoint_dir
         cfg.max_group_layers = args.max_group_layers
+        cfg.max_blocks = args.max_blocks
         return cfg
 
     return DLLMQuantConfig(
@@ -111,6 +113,7 @@ def build_config(args) -> DLLMQuantConfig:
         device_map=args.device_map or None,
         checkpoint_dir=args.checkpoint_dir,
         max_group_layers=args.max_group_layers,
+        max_blocks=args.max_blocks,
         seed=args.seed,
         weight=QuantConfig(
             n_bits=args.w_bits,
@@ -164,6 +167,12 @@ def main() -> int:
                     help="only when the model does not fit on one GPU "
                          "(e.g. 'auto' for LLaDA2.0-flash)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--max-blocks", type=int, default=0,
+                    help="stop after N blocks. Debugging only -- the saved "
+                         "model would be half quantized and must not be "
+                         "evaluated. Use it to ask a question about the run's "
+                         "bookkeeping in minutes instead of the 20 hours the "
+                         "full solve costs; one block exercises every path.")
     ap.add_argument("--max-group-layers", type=int, default=64,
                     help="layers of one group calibrated at a time; each holds "
                          "an in_features^2 Hessian, so a 512-expert group asks "

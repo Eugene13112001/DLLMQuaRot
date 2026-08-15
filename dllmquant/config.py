@@ -277,6 +277,12 @@ class DLLMQuantConfig:
     # the calibration set per chunk. Raise it when memory is plentiful; the
     # result does not depend on it.
     max_group_layers: int = 64
+    # Stop after this many blocks. Debugging only: the result is a
+    # half-quantized model that must not be evaluated. It exists because the
+    # run that matters takes 20 hours, and a question about its bookkeeping --
+    # which layers got their certainty weights, and why the rest did not --
+    # should not cost 20 hours to ask. One block exercises every path.
+    max_blocks: int = 0
     device: str = "cuda"
     dtype: str = "bfloat16"
     # None -> load normally and move to `device`. Only set this ("auto", or an
