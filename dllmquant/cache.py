@@ -68,6 +68,13 @@ class KVCacheConfig:
     # per-token-across-all-channels alternative measured 52 GSM8K points worse
     # on this model's activations, so grouping is not optional here.
     group_size: int = 128
+    # Which direction a group runs in, separately for the two sides. See
+    # quantize_kv: "channel" is KIVI's per-token, "token" is KIVI's
+    # per-channel. KIVI's finding is K wants "token" and V wants "channel";
+    # both default to "channel" here only because every number measured before
+    # this existed was taken that way and has to stay reproducible.
+    key_axis: str = "channel"
+    value_axis: str = "channel"
     symmetric: bool = False
     clip_ratio: float = 0.95
 
@@ -97,6 +104,12 @@ class KVCacheConfig:
                 raise ValueError(f"{name} must be in [2, 16], got {b}")
         if self.group_size <= 0:
             raise ValueError("group_size must be positive")
+        for name in ("key_axis", "value_axis"):
+            if getattr(self, name) not in GROUP_AXES:
+                raise ValueError(
+                    f"{name} must be one of {GROUP_AXES}, "
+                    f"got {getattr(self, name)!r}"
+                )
         if not 0 < self.clip_ratio <= 1.0:
             raise ValueError("clip_ratio must be in (0, 1]")
         if self.refresh_every < 1 or self.min_interval < 1:
@@ -105,32 +118,28 @@ class KVCacheConfig:
             raise ValueError("max_interval must be >= min_interval")
 
 
-def quantize_kv(
-    x: torch.Tensor,
-    bits: int,
-    group_size: int,
-    symmetric: bool = False,
-    clip_ratio: float = 0.95,
+GROUP_AXES = ("channel", "token")
+
+
+def _quantize_last_axis(
+    x: torch.Tensor, bits: int, group_size: int, symmetric: bool, clip_ratio: float
 ) -> torch.Tensor:
-    """Fake-quantize a cache tensor group-wise along its last axis.
+    """Group-wise affine fake-quantization in runs of ``group_size``, last axis.
 
-    ``x`` is [..., head_dim].  Each contiguous run of ``group_size`` channels
-    of each token of each head gets its own scale, which is the whole point:
-    one scale shared across a token's full width is what collapses accuracy.
-
-    A group size at or above head_dim degenerates to one scale per token per
-    head, which is still far finer than one per token.
+    A length that is not a multiple of the group is padded by repeating the
+    final element. Repeating a value already inside the last group cannot
+    change that group's min or max, so the padding is invisible to the scales
+    -- which matters because the token axis has no reason to divide evenly by
+    anything, and refusing those lengths would rule out the axis entirely.
     """
-    if bits >= 16:
-        return x
-
     dim = x.shape[-1]
     g = min(group_size, dim)
-    if dim % g != 0:
-        raise ValueError(f"head_dim {dim} not divisible by group size {g}")
+    pad = (-dim) % g
+    if pad:
+        x = torch.cat([x, x[..., -1:].expand(*x.shape[:-1], pad)], dim=-1)
 
-    orig_dtype, orig_shape = x.dtype, x.shape
-    xf = x.float().reshape(*orig_shape[:-1], dim // g, g)
+    orig_dtype, shape = x.dtype, x.shape
+    xf = x.float().reshape(*shape[:-1], shape[-1] // g, g)
 
     x_max = xf.amax(dim=-1, keepdim=True) * clip_ratio
     x_min = xf.amin(dim=-1, keepdim=True) * clip_ratio
@@ -149,7 +158,52 @@ def quantize_kv(
 
     scale = scale.clamp(min=1e-8)
     q = torch.clamp(torch.round(xf / scale) + zero, qmin, qmax)
-    return ((q - zero) * scale).reshape(orig_shape).to(orig_dtype)
+    out = ((q - zero) * scale).reshape(shape).to(orig_dtype)
+    return out[..., :dim] if pad else out
+
+
+def quantize_kv(
+    x: torch.Tensor,
+    bits: int,
+    group_size: int,
+    symmetric: bool = False,
+    clip_ratio: float = 0.95,
+    axis: str = "channel",
+) -> torch.Tensor:
+    """Fake-quantize a cache tensor group-wise. ``x`` is [B, heads, T, head_dim].
+
+    ``axis`` is *which direction a group runs in*, and it is not a detail:
+
+    * ``"channel"`` — a group is ``group_size`` neighbouring channels of one
+      token of one head. One scale per token per run of channels.
+    * ``"token"`` — a group is ``group_size`` neighbouring tokens of one
+      channel of one head. One scale per channel per run of tokens.
+
+    The literature names these by what a scale is shared *across*, which is the
+    opposite way round, so the mapping is worth spelling out: ``"channel"``
+    here is KIVI's *per-token* quantization, and ``"token"`` here is KIVI's
+    *per-channel*. KIVI found the two sides of attention want different ones --
+    K per-channel, V per-token -- because K's outliers live in fixed channels,
+    where grouping along tokens keeps them out of everyone else's scale, while
+    V's do not.
+
+    Everything measured in this project so far used ``"channel"`` for both,
+    which is the wrong half of that if it carries over to a diffusion LM. It is
+    the default only so that existing numbers stay reproducible.
+    """
+    if bits >= 16:
+        return x
+    if axis not in GROUP_AXES:
+        raise ValueError(f"axis must be one of {GROUP_AXES}, got {axis!r}")
+
+    if axis == "token":
+        if x.dim() < 2:
+            raise ValueError("token-axis grouping needs at least [T, head_dim]")
+        moved = x.transpose(-1, -2).contiguous()
+        out = _quantize_last_axis(moved, bits, group_size, symmetric, clip_ratio)
+        return out.transpose(-1, -2).contiguous()
+
+    return _quantize_last_axis(x, bits, group_size, symmetric, clip_ratio)
 
 
 @dataclass
@@ -326,16 +380,21 @@ class BlockKVCache:
             return override
         return self.cfg.decoded_bits if status == "decoded" else self.cfg.masked_bits
 
+    def _axis_for(self, kind: str) -> str:
+        return self.cfg.key_axis if kind == "key" else self.cfg.value_axis
+
     def _quantize_with_mask(
         self, x: torch.Tensor, mask: Optional[torch.Tensor], kind: str = "key"
     ) -> torch.Tensor:
         cfg = self.cfg
         decoded_bits = self._bits_for(kind, "decoded")
         masked_bits = self._bits_for(kind, "masked")
+        axis = self._axis_for(kind)
 
         if mask is None or decoded_bits == masked_bits:
             return quantize_kv(
-                x, decoded_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio
+                x, decoded_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio,
+                axis=axis,
             )
 
         # x is [B, heads, T, head_dim]; mask is [B, T].
@@ -347,10 +406,10 @@ class BlockKVCache:
         m = m.unsqueeze(-1).expand_as(x)
 
         masked = quantize_kv(
-            x, masked_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio
+            x, masked_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio, axis=axis
         )
         decoded = quantize_kv(
-            x, decoded_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio
+            x, decoded_bits, cfg.group_size, cfg.symmetric, cfg.clip_ratio, axis=axis
         )
         return torch.where(m, masked, decoded)
 
@@ -419,7 +478,7 @@ class BlockKVCache:
         k_cached, v_cached = self._k[layer], self._v[layer]
         k_fresh_q = quantize_kv(
             k_fresh, self._bits_for("key", "decoded"), self.cfg.group_size,
-            self.cfg.symmetric, self.cfg.clip_ratio,
+            self.cfg.symmetric, self.cfg.clip_ratio, axis=self._axis_for("key"),
         )
 
         def rel(a: torch.Tensor, b: torch.Tensor) -> float:

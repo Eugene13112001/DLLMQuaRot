@@ -58,10 +58,22 @@ def test_dtype_is_preserved():
         assert quantize_kv(x, bits=4, group_size=32).dtype == dtype
 
 
-def test_indivisible_head_dim_is_refused():
+def test_an_indivisible_length_is_handled_rather_than_refused():
+    """This used to raise, and the refusal has stopped earning its place.
+
+    It was guarding against a silently wrong answer. Padding by repeating the
+    final element cannot produce one -- a repeat of a value already inside the
+    last group leaves that group's min and max exactly where they were -- and
+    the token axis has no reason to divide evenly by anything, so refusing
+    would rule that axis out entirely.
+    """
     x = torch.randn(1, 1, 2, 100)
-    with pytest.raises(ValueError):
-        quantize_kv(x, bits=4, group_size=32)
+    q = quantize_kv(x, bits=4, group_size=32)
+    assert q.shape == x.shape and torch.isfinite(q).all()
+
+    # The full groups must be untouched by whatever happens in the ragged one.
+    head = quantize_kv(x[..., :96], bits=4, group_size=32)
+    assert torch.equal(q[..., :96], head)
 
 
 def test_group_larger_than_head_dim_degrades_gracefully():
@@ -362,3 +374,75 @@ def test_scramble_destroys_information_but_not_the_distribution():
     assert not torch.equal(
         cache._k[0].sort(dim=-2).indices, cache._v[0].sort(dim=-2).indices
     )
+
+
+def test_the_grouping_axis_decides_who_pays_for_an_outlier():
+    """KIVI's finding, as a property: a group must not straddle an outlier.
+
+    Measured on the elements that are *not* the outlier, because the outlier
+    itself is quantized fine either way -- the damage is to whoever shares its
+    scale. Which axis wins depends on where the outliers live, so neither is
+    correct in general and the choice has to be measured per side.
+    """
+    torch.manual_seed(0)
+    base = torch.randn(1, 2, 64, 32)
+
+    def error_on(x, axis, sel):
+        q = quantize_kv(x, 4, 8, axis=axis)
+        d, r = (q.float() - x.float())[sel], x.float()[sel]
+        return float(d.pow(2).mean().sqrt() / r.pow(2).mean().sqrt())
+
+    # An outlier resident in one channel -- what an attention sink looks like.
+    k = base.clone()
+    k[..., 5] *= 60.0
+    sel = torch.ones_like(k, dtype=torch.bool)
+    sel[..., 5] = False
+    assert error_on(k, "channel", sel) > 3 * error_on(k, "token", sel)
+
+    # The mirror, so the test cannot pass by preferring one axis blindly.
+    v = base.clone()
+    v[:, :, 7, :] *= 60.0
+    sel = torch.ones_like(v, dtype=torch.bool)
+    sel[:, :, 7, :] = False
+    assert error_on(v, "token", sel) > 3 * error_on(v, "channel", sel)
+
+
+def test_the_token_axis_survives_a_length_no_group_divides():
+    """The prefix is 224 tokens and no one owes that a divisor of 128."""
+    torch.manual_seed(0)
+    x = torch.randn(1, 2, 224, 64)
+    for group in (32, 64, 128, 256):
+        out = quantize_kv(x, 4, group, axis="token")
+        assert out.shape == x.shape
+        assert torch.isfinite(out).all()
+
+    # Padding repeats the last element, which cannot change any earlier group's
+    # min or max -- so a prefix of a longer tensor must quantize identically.
+    long = torch.randn(1, 2, 256, 64)
+    a = quantize_kv(long, 4, 32, axis="token")
+    b = quantize_kv(long[:, :, :224], 4, 32, axis="token")
+    assert torch.equal(a[:, :, :224], b)
+
+
+def test_the_default_axis_is_the_one_every_earlier_number_used():
+    torch.manual_seed(0)
+    x = torch.randn(1, 2, 16, 32)
+    assert torch.equal(quantize_kv(x, 4, 8), quantize_kv(x, 4, 8, axis="channel"))
+    with pytest.raises(ValueError):
+        quantize_kv(x, 4, 8, axis="sideways")
+    with pytest.raises(ValueError):
+        KVCacheConfig(key_axis="sideways")
+
+
+def test_each_side_of_the_cache_gets_its_own_axis():
+    cache = BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=4, masked_bits=4, group_size=8,
+                      key_axis="token", value_axis="channel"),
+        n_layers=1,
+    )
+    torch.manual_seed(0)
+    k, v = torch.randn(1, 2, 32, 16), torch.randn(1, 2, 32, 16)
+    kq, vq = cache.write(0, k, v)
+
+    assert torch.equal(kq, quantize_kv(k, 4, 8, axis="token"))
+    assert torch.equal(vq, quantize_kv(v, 4, 8, axis="channel"))

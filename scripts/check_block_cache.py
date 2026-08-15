@@ -334,6 +334,14 @@ def main() -> int:
                          "committed per step, so this is the first few commits "
                          "of the block. Raise it for a coarser schedule that "
                          "commits several at once.")
+    ap.add_argument("--axis-bits", type=int, default=3,
+                    help="bit width for the grouping-axis sweep. Pick one where "
+                         "the cache is damaged but not dead, or there is "
+                         "nothing for the axis to rescue: at group 32 that is "
+                         "3, since 4 costs nothing there.")
+    ap.add_argument("--axis-group", type=int, default=32,
+                    help="group size for the grouping-axis sweep")
+    ap.add_argument("--skip-axis-sweep", action="store_true")
     ap.add_argument("--samples", type=int, default=4,
                     help="independent canvases (different prompt and different "
                          "decoded content) pooled into every row. One is not "
@@ -525,11 +533,75 @@ def main() -> int:
           "bit width at the floor is carrying nothing, and the ordering among "
           "rows at the floor is noise, not a ranking.")
 
+    if not args.skip_axis_sweep:
+        run_axis_sweep(args, n_layers, head_dim, canvases, sweep, flat_cache, row)
+
     if args.kv_pairs:
         run_kv_asymmetry(
             args, n_layers, head_dim, canvases, sweep, flat_cache, row
         )
     return 0
+
+
+def run_axis_sweep(args, n_layers, head_dim, canvases, sweep, flat_cache, row) -> None:
+    """Which direction should a group run in, for K and for V separately?
+
+    A group must not straddle an outlier, because the outlier sets the scale
+    and everyone sharing it pays. So the right axis is the one that runs
+    *along* wherever the outliers live, and that is a property of the tensor,
+    not a convention: KIVI found K's outliers sit in fixed channels and V's do
+    not, and therefore quantized K along tokens and V along channels.
+
+    Everything measured in this project used the channel axis for both, which
+    is half wrong if KIVI's finding carries over from autoregressive models. It
+    may not: a diffusion LM's attention sinks move during generation, so the
+    channels K's outliers occupy need not stay put either.
+
+    All four cells cost exactly the same memory -- the axis changes what a
+    scale is shared across, not how many there are -- so this is a free choice
+    and the only question is which way is better.
+    """
+    print(f"\n=== grouping axis, {args.axis_bits} bits, group {args.axis_group} "
+          + "=" * 24)
+    print("channel = a group runs along head_dim (KIVI calls this per-token)")
+    print("token   = a group runs along tokens   (KIVI calls this per-channel)")
+    print("KIVI's answer for autoregressive models: K token, V channel")
+    print("all four cost identical memory")
+
+    for mask_ratio in args.mask_ratios:
+        batch = canvases(mask_ratio)
+        print(f"\n--- prefix mask ratio {mask_ratio:.2f} " + "-" * 37)
+        print(f"{'K axis':>8} {'V axis':>8} {'rel. err':>10} "
+              f"{'argmax':>8} {'argmax@k':>8} {'':>5} {'slots@k':>8}")
+
+        chance = sweep(flat_cache(16, head_dim), batch, scramble=True)
+        row("--", "scram", chance, "   <-- chance floor: no information")
+
+        best = None
+        for k_axis in ("channel", "token"):
+            for v_axis in ("channel", "token"):
+                def make_cache(ka=k_axis, va=v_axis):
+                    return BlockKVCache(
+                        KVCacheConfig(
+                            enabled=True, decoded_bits=args.axis_bits,
+                            masked_bits=args.axis_bits,
+                            group_size=args.axis_group,
+                            key_axis=ka, value_axis=va,
+                        ),
+                        n_layers,
+                    )
+                c = sweep(make_cache, batch)
+                note = ""
+                if (k_axis, v_axis) == ("channel", "channel"):
+                    note = "   <-- what every earlier number used"
+                elif (k_axis, v_axis) == ("token", "channel"):
+                    note = "   <-- KIVI's answer"
+                row(k_axis, v_axis, c, note)
+                if best is None or c.agree_k > best[0]:
+                    best = (c.agree_k, k_axis, v_axis)
+
+        if best:
+            print(f"      best here: K {best[1]}, V {best[2]}")
 
 
 def run_kv_asymmetry(
