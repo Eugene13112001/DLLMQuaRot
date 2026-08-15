@@ -350,6 +350,48 @@ built on.
    directory) and **along a trajectory** rather than one snapshot, which is
    what puts numbers on the age and mask-ratio axes.
 
+### Phase A' — the three axes block diffusion adds, and this plan missed
+
+Every cache number so far is one operating point: the last block of eight, a
+block length of 32, one sampler step, a prefix that is itself exact. The plan
+was built around block-causal attention and then failed to sweep the things
+block-causal attention introduces.
+
+5a. **Block length.** Fixed at 32 throughout and never questioned. It pulls the
+    cache in two directions at once: a longer block closes more positions per
+    refresh, and lets staleness accumulate longer inside the block before that
+    refresh comes. The bit optimum almost certainly depends on it. `--block-length`
+    already exists; nothing has ever varied it.
+
+5b. **Where the window sits.** Always the last block, always a 224-token
+    prefix. In a real generation the prefix grows from 32 to 480, and the cost
+    of quantizing it should grow with it -- more cached positions, more
+    rounding accumulating inside one attention sum. One point was measured and
+    silently treated as representative.
+
+5c. **Compounding across blocks.** Attention across blocks is causal, so a
+    quantized prefix reaches every later block, and each later block writes
+    K/V that were computed from it. The table measures **one** window against a
+    clean prefix. A real trajectory is sixteen blocks in sequence.
+
+The third is the serious one: four bits can be free for one step and not free
+for sixteen. Nothing in the analytic table can see that, and the only thing
+that would is the end-task evaluation in phase D -- which leaves a gap between
+the mechanism and the number, exactly where a reviewer will look.
+
+It is also the same work as "current-block reuse" in phase C: both need the
+cache wired into the sampler and measured along a trajectory rather than on a
+snapshot. `cached_generate` exists and `measure_drift` already writes per
+layer; what is missing is the loop that joins them.
+
+Note which findings this does *not* touch. Prefix exactness is structural --
+a closed block cannot change under block-causal attention, at any block length
+or position -- so `stale(prefix)` = 0 holds everywhere by construction. The
+grouping axis is a property of where K's outliers live, not of how long the
+prefix is. What genuinely needs the sweep is "four bits are free", because
+that one is about accumulated rounding and accumulation is exactly what
+changes with length and with block count.
+
 ### Phase B — the router (new code, the strongest unclaimed result)
 
 `check_router` perturbs *weights* and watches routing. The cache question is
