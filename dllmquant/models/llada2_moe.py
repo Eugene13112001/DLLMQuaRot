@@ -160,12 +160,21 @@ class LLaDA2MoEAdapter(LLaDAAdapter):
     """LLaDA2.0-mini (16B-A1B) and LLaDA2.0-flash (100B-A6B)."""
 
     # `modeling_llada2_moe.py` imports `dynamic_rope_update` (the RoPE refactor)
-    # and `TransformersKwargs`; neither exists before 4.56.  No upper bound --
-    # unlike LLaDA-1.5's, this remote code is recent enough that no later
-    # release has been shown to break it.  Note the two windows do not overlap
-    # with LLaDA-1.5's (4.38-4.46), so one venv cannot serve both models.
+    # and `TransformersKwargs`; neither exists before 4.56.
+    #
+    # The upper bound used to be None, on the reasoning that no later release
+    # had been *shown* to break this remote code.  5.5.4 broke it: the vendored
+    # file asks `ROPE_INIT_FUNCTIONS` for the key 'default' and no longer finds
+    # it, twenty frames below anything this project wrote.  That is the exact
+    # failure this check exists to convert into a sentence, so an absent bound
+    # was the wrong default -- the vendored file is pinned to one revision and
+    # cannot follow a major version on its own.  Raise this deliberately, after
+    # a run passes, rather than leaving it open.
+    #
+    # Note the two windows do not overlap with LLaDA-1.5's (4.38-4.46), so one
+    # environment cannot serve both models.
     TRANSFORMERS_MIN = (4, 56)
-    TRANSFORMERS_MAX = None
+    TRANSFORMERS_MAX = (5, 0)
 
     def __init__(self, cfg: DLLMQuantConfig):
         super().__init__(cfg)

@@ -125,18 +125,34 @@ def test_the_two_llada_windows_do_not_overlap(monkeypatch):
     from dllmquant.models.llada import LLaDAAdapter
     from dllmquant.models.llada2_moe import LLaDA2MoEAdapter
 
-    for v in ("4.38.2", "4.46.3", "4.56.2", "4.57.1", "5.0.0"):
+    def accepted_by(v):
         monkeypatch.setattr(transformers, "__version__", v)
-        ok = []
+        out = []
         for adapter in (LLaDAAdapter, LLaDA2MoEAdapter):
             try:
                 check_transformers_version(
                     adapter.TRANSFORMERS_MIN, adapter.TRANSFORMERS_MAX
                 )
-                ok.append(adapter.__name__)
+                out.append(adapter.__name__)
             except RuntimeError:
                 pass
-        assert len(ok) == 1, f"{v} accepted by {ok}"
+        return out
+
+    # No version may serve both. A version serving *neither* is fine and
+    # expected -- an earlier form of this test asserted "exactly one", which
+    # conflated the two and made a correct upper bound look like a regression.
+    for v in ("4.38.2", "4.46.3", "4.51.3", "4.56.2", "4.57.1", "5.0.0", "5.5.4"):
+        assert len(accepted_by(v)) <= 1, f"{v} accepted by both"
+
+    assert accepted_by("4.46.3") == ["LLaDAAdapter"]
+    assert accepted_by("4.57.1") == ["LLaDA2MoEAdapter"]
+
+    # 5.5.4 is the version that got installed here as a side effect of `pip
+    # install accelerate`, and it broke LLaDA2.0 twenty frames deep with
+    # KeyError 'default' out of ROPE_INIT_FUNCTIONS. The bound exists to turn
+    # that into a sentence; if it is ever raised, this must be revisited.
+    assert accepted_by("5.5.4") == []
+    assert accepted_by("4.51.3") == [], "fits neither window, and must say so"
 
 
 def test_version_guard_passes_releases_inside_the_window(monkeypatch):
