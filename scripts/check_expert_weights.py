@@ -35,12 +35,43 @@ from dllmquant.models.llada2_local import block_causal_mask  # noqa: E402
 from dllmquant.pipeline import _expert_index, _weights_for_expert  # noqa: E402
 
 
+def _rotary(model):
+    """The model's own rotary module, wherever it hangs.
+
+    Found rather than hardcoded: `model.model.rotary_emb` holds for this
+    checkpoint's causal-LM wrapper and would break silently on a bare base
+    model, and this checkpoint uses partial RoPE over 64 of 128 head
+    dimensions, so rebuilding one here would be a second implementation of the
+    thing most likely to be got wrong.
+    """
+    for path in (("model", "rotary_emb"), ("rotary_emb",)):
+        obj = model
+        for attr in path:
+            obj = getattr(obj, attr, None)
+            if obj is None:
+                break
+        if obj is not None:
+            return obj
+    for name, module in model.named_modules():
+        if name.split(".")[-1] == "rotary_emb":
+            return module
+    raise AttributeError("no rotary_emb found; a decoder layer cannot be "
+                         "called on its own without one")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True)
     ap.add_argument("--model-type", default="llada2_moe")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--device-map", default=None,
+                    help="spread the model over several visible cards, e.g. "
+                         "'auto'. Use when no single card holds it: with "
+                         "CUDA_VISIBLE_DEVICES=3,1 the layers are split and "
+                         "the cost is one activation crossing per boundary, "
+                         "about 1 MB -- far cheaper than sharing one busy "
+                         "card, where neighbours cost a factor of thirty.")
     ap.add_argument("--seq-len", type=int, default=64)
     ap.add_argument("--block-length", type=int, default=32)
     ap.add_argument("--block", type=int, default=1,
@@ -51,7 +82,8 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(model_path=args.model, model_type=args.model_type,
-                          dtype=args.dtype, device=args.device)
+                          dtype=args.dtype, device=args.device,
+                          device_map=args.device_map)
     adapter = build_adapter(cfg)
     adapter.load()
     print(adapter.describe())
@@ -74,10 +106,19 @@ def main() -> int:
 
     # A decoder layer takes the 4-D mask directly; going through the adapter's
     # forward_kwargs would build the same thing from token ids we do not have.
+    #
+    # Rotary is computed once at model level and handed down as a ready (cos,
+    # sin) pair, so a layer called on its own gets `position_embeddings=None`
+    # and unpacks it into a TypeError. Borrow the model's own rotary module
+    # rather than rebuilding one: this checkpoint uses partial RoPE over 64 of
+    # 128 head dimensions, and a second implementation of that is a second
+    # thing to get wrong.
+    position_ids = torch.arange(seq, device=device).unsqueeze(0)
     kw = {
         "attention_mask": block_causal_mask(
             seq, args.block_length, batch_size=1, device=device, dtype=dtype),
-        "position_ids": torch.arange(seq, device=device).unsqueeze(0),
+        "position_ids": position_ids,
+        "position_embeddings": _rotary(model)(x, position_ids),
     }
 
     print(f"\nblock {args.block}, {seq} tokens, calibration weights: "

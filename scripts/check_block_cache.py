@@ -287,6 +287,13 @@ def main() -> int:
     ap.add_argument("--model-type", default="llada2_moe", choices=["llada2_moe"])
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--device-map", default=None,
+                    help="spread the model over several visible cards, e.g. "
+                         "'auto'. Use when no single card holds it: with "
+                         "CUDA_VISIBLE_DEVICES=3,1 the layers are split and "
+                         "the cost is one activation crossing per boundary, "
+                         "about 1 MB -- far cheaper than sharing one busy "
+                         "card, where neighbours cost a factor of thirty.")
     ap.add_argument("--block-length", type=int, default=32)
     ap.add_argument("--blocks", type=int, default=8,
                     help="total sequence length, in blocks")
@@ -354,7 +361,7 @@ def main() -> int:
 
     cfg = DLLMQuantConfig(
         model_path=args.model, model_type=args.model_type,
-        dtype=args.dtype, device=args.device,
+        dtype=args.dtype, device=args.device, device_map=args.device_map,
     )
     adapter = build_adapter(cfg)
     adapter.load()

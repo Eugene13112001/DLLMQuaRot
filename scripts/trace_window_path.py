@@ -105,19 +105,73 @@ def route_overlap(a: torch.Tensor, b: torch.Tensor) -> float:
     return kept / max(a.shape[0], 1)
 
 
+def force_routes(blocks, routes: dict, lo: int, hi: int):
+    """Make every router pick what the exact run picked. Returns an undo.
+
+    The trace can only show that error and route disagreement rise together;
+    which one drives the other it cannot say. Pinning the routes settles it.
+    If the divergence then stays at the bfloat16 floor instead of growing
+    sixty-fold, the router is the amplifier and not a bystander.
+
+    Patched at `group_limited_topk` rather than at the gate's forward, so the
+    gathering of scores at the chosen indices, the normalisation and the
+    routed_scaling_factor all still run in the checkpoint's own code. Only the
+    choice is overridden -- reimplementing the rest here would be a second
+    implementation of the exact thing under test.
+    """
+    undo = []
+    for i, block in enumerate(blocks):
+        if i not in routes:
+            continue
+        pinned = routes[i]
+        if pinned.shape[0] > hi - lo:
+            pinned = pinned[lo:hi]
+        for name, module in block.named_modules():
+            if (name.split(".")[-1] in ROUTER_NAMES
+                    and hasattr(module, "group_limited_topk")):
+                original = module.group_limited_topk
+
+                def patched(scores, _pinned=pinned, _orig=original):
+                    idx = _pinned.to(scores.device)
+                    if idx.shape[0] != scores.shape[0]:
+                        return _orig(scores)          # shape moved; do not guess
+                    # The first return value is discarded by the caller.
+                    return torch.gather(scores, 1, idx), idx
+
+                module.group_limited_topk = patched
+                undo.append((module, original))
+
+    def restore():
+        for module, original in undo:
+            module.group_limited_topk = original
+
+    return restore
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True)
     ap.add_argument("--model-type", default="llada2_moe")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--device-map", default=None,
+                    help="spread the model over several visible cards, e.g. "
+                         "'auto'. Use when no single card holds it: with "
+                         "CUDA_VISIBLE_DEVICES=3,1 the layers are split and "
+                         "the cost is one activation crossing per boundary, "
+                         "about 1 MB -- far cheaper than sharing one busy "
+                         "card, where neighbours cost a factor of thirty.")
     ap.add_argument("--block-length", type=int, default=32)
     ap.add_argument("--blocks", type=int, default=8)
     ap.add_argument("--prefix-mask-ratio", type=float, default=0.0)
+    ap.add_argument("--no-pin", action="store_true",
+                    help="skip the pinned-routes run (one extra windowed "
+                         "forward); leaves only the correlation")
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(model_path=args.model, model_type=args.model_type,
-                          dtype=args.dtype, device=args.device)
+                          dtype=args.dtype, device=args.device,
+                          device_map=args.device_map)
     adapter = build_adapter(cfg)
     adapter.load()
     print(adapter.describe())
@@ -152,12 +206,26 @@ def main() -> int:
                                  args.block_length)
     windowed_trace.close()
 
+    # --- and again with the expert choice pinned to the exact run's ------
+    pinned_trace = pinned_logits = None
+    if not args.no_pin:
+        restore = force_routes(adapter.blocks, full.routes, prefix_len, total)
+        try:
+            refresh_prefix(model, states, x, prefix_len, args.block_length)
+            pinned_trace = Trace(adapter.blocks)
+            pinned_logits = logits_for_window(model, states, x, prefix_len,
+                                              total, args.block_length)
+            pinned_trace.close()
+        finally:
+            restore()
+
     print(f"\n{total} tokens, prefix {prefix_len} cached at 16 bits (a no-op), "
           f"window {args.block_length} recomputed")
     print("both runs compute the same thing; every difference below is the "
           "order of the arithmetic, or something the arithmetic set off\n")
 
-    print(f"{'layer':>5} {'hidden rel. err':>16} {'routes kept':>12}")
+    pin_col = "" if pinned_trace is None else f" {'pinned err':>12}"
+    print(f"{'layer':>5} {'hidden rel. err':>16} {'routes kept':>12}{pin_col}")
     prev = 0.0
     jumped = None
     for i in range(n_layers):
@@ -166,7 +234,15 @@ def main() -> int:
         if a is None or b is None:
             continue
         a_win = a[:, prefix_len:total] if a.shape[1] == total else a
-        rel = float((b - a_win).abs().mean() / a_win.abs().mean().clamp(min=1e-8))
+
+        def err(t):
+            return float((t - a_win).abs().mean()
+                         / a_win.abs().mean().clamp(min=1e-8))
+
+        rel = err(b)
+        pin_txt = ""
+        if pinned_trace is not None and i in pinned_trace.hidden:
+            pin_txt = f" {err(pinned_trace.hidden[i]):>12.3e}"
 
         ra, rb = full.routes.get(i), windowed_trace.routes.get(i)
         kept = float("nan")
@@ -180,11 +256,28 @@ def main() -> int:
             jumped, flag = i, "   <-- jumps here"
         prev = max(rel, 1e-12)
         kept_txt = "     n/a" if kept != kept else f"{100 * kept:7.2f}%"
-        print(f"{i:>5} {rel:>16.3e} {kept_txt:>12}{flag}")
+        print(f"{i:>5} {rel:>16.3e} {kept_txt:>12}{pin_txt}{flag}")
 
     ref_win = reference[:, prefix_len:]
-    agree = float((windowed.argmax(-1) == ref_win.argmax(-1)).float().mean())
+
+    def argmax_kept(logits):
+        return float((logits.argmax(-1) == ref_win.argmax(-1)).float().mean())
+
+    agree = argmax_kept(windowed)
     print(f"\nlogits: argmax kept {100 * agree:.2f}%")
+    if pinned_logits is not None:
+        pinned_agree = argmax_kept(pinned_logits)
+        print(f"        argmax kept {100 * pinned_agree:.2f}% with the expert "
+              f"choice pinned to the exact run")
+        print("\nThe pinned column is the experiment the trace alone cannot "
+              "do. Error and route disagreement rise together, and correlation "
+              "does not say which drives which; forcing every router to repeat "
+              "the exact run's choice removes one of them. If the pinned error "
+              "stays near the first layer's -- the bfloat16 floor -- then the "
+              "router is what turns rounding into a sixty-fold divergence, and "
+              "cache reuse in a MoE is not free at any width. If it still "
+              "grows, the routes were a symptom and the arithmetic compounds "
+              "on its own.")
 
     routed = [full.routes.get(i) is not None for i in range(n_layers)]
     if any(routed):
