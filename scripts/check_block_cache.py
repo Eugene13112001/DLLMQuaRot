@@ -341,6 +341,19 @@ def main() -> int:
                          "committed per step, so this is the first few commits "
                          "of the block. Raise it for a coarser schedule that "
                          "commits several at once.")
+    ap.add_argument("--key-axes", nargs="+", default=["channel"],
+                    choices=["channel", "token"],
+                    help="grouping axis for K in the bits table. Pass both to "
+                         "sweep them side by side, which is the only way to "
+                         "tell the axis apart from the group size: a fine "
+                         "group along the wrong axis partly rescues what the "
+                         "right axis fixes outright, so the two leave the same "
+                         "trace. Default is the axis every earlier number in "
+                         "this project used.")
+    ap.add_argument("--value-axis", default="channel",
+                    choices=["channel", "token"],
+                    help="grouping axis for V. Measured to make almost no "
+                         "difference, unlike K's.")
     ap.add_argument("--axis-bits", type=int, default=3,
                     help="bit width for the grouping-axis sweep. Pick one where "
                          "the cache is damaged but not dead, or there is "
@@ -424,17 +437,19 @@ def main() -> int:
                                       top_k=args.commit_k)
         return pooled
 
-    def flat_cache(bits, group):
+    def flat_cache(bits, group, key_axis=None, value_axis=None):
         return lambda: BlockKVCache(
             KVCacheConfig(enabled=True, decoded_bits=bits, masked_bits=bits,
-                          group_size=group),
+                          group_size=group,
+                          key_axis=key_axis or args.key_axes[0],
+                          value_axis=value_axis or args.value_axis),
             n_layers,
         )
 
     def row(bits_label, group_label, c, flag=""):
         se = c.agree_k_se
         se_txt = "     " if se != se else f"±{100 * se:3.0f}%"
-        print(f"{bits_label:>5} {group_label:>7} {c.rel:>10.3e} "
+        print(f"{bits_label:>5} {group_label:>10} {c.rel:>10.3e} "
               f"{pct(c.agree)} {pct(c.agree_k)} {se_txt} {pct(c.slots_k)}{flag}")
 
     for mask_ratio in args.mask_ratios:
@@ -452,7 +467,8 @@ def main() -> int:
         print(f"decision margin at those positions: {margin:.3f} logits, mean "
               f"|logit| {mean_abs:.2f} -- a row at rel. err e moves logits by "
               f"about e*{mean_abs:.2f}, and flips once that reaches the margin")
-        print(f"{'bits':>5} {'group':>7} {'rel. err':>10} "
+        head = "group" if len(args.key_axes) == 1 else "group/Kaxis"
+        print(f"{'bits':>5} {head:>10} {'rel. err':>10} "
               f"{'argmax':>8} {'argmax@k':>8} {'':>5} {'slots@k':>8}")
 
         # The chance floor first, so every row below is read against it. A
@@ -486,32 +502,37 @@ def main() -> int:
                       "embedding row, so there is little in the prefix to lose.")
 
         groups = sorted({min(g, head_dim) for g in args.group_sizes})
-        for group_size in groups:
-            for bits in args.bits:
-                c = sweep(flat_cache(bits, group_size), batch)
-                label = f"{group_size}=head" if group_size == head_dim else str(group_size)
-                flag = ""
-                if bits >= 16:
-                    # At 16 bits quantize_kv hands the tensor back untouched,
-                    # so this row is not a measurement of storage -- it *is*
-                    # the arithmetic noise of the windowed path, and there is
-                    # no independent standard to judge it against. An earlier
-                    # version compared it to the rotation check's tolerance,
-                    # which is a threshold for a different quantity in a
-                    # different place; it fired at 6.6e-02 against a
-                    # transplanted 6e-02 while every committed decision was
-                    # intact. Raising that constant each time it fires makes
-                    # the check unfalsifiable, so the criterion is now at the
-                    # level that matters: a decision about to be committed
-                    # must not move. Read the number as the table's noise
-                    # scale. For a sharp check, --dtype float32.
-                    if c.agree_k < 1.0:
-                        flag = "   <-- a committed decision moved: the path is wrong"
-                    else:
-                        flag = "   <-- control: windowing noise, storage is a no-op"
-                elif c.rel >= chance.rel and c.agree <= chance.agree:
-                    flag = "   <-- at the floor: carries nothing"
-                row(str(bits), label, c, flag)
+        for key_axis in args.key_axes:
+            for group_size in groups:
+                for bits in args.bits:
+                    c = sweep(flat_cache(bits, group_size, key_axis), batch)
+
+                    size = f"{group_size}=h" if group_size == head_dim else str(group_size)
+                    label = size if len(args.key_axes) == 1 else f"{size}/{key_axis[:3]}"
+
+                    flag = ""
+                    if bits >= 16:
+                        # At 16 bits quantize_kv hands the tensor back
+                        # untouched, so this row is not a measurement of
+                        # storage -- it *is* the arithmetic noise of the
+                        # windowed path, and there is no independent standard
+                        # to judge it against. An earlier version compared it
+                        # to the rotation check's tolerance, which is a
+                        # threshold for a different quantity in a different
+                        # place; it fired at 6.6e-02 against a transplanted
+                        # 6e-02 while every committed decision was intact.
+                        # Raising that constant each time it fires makes the
+                        # check unfalsifiable, so the criterion is now at the
+                        # level that matters: a decision about to be committed
+                        # must not move. Read the number as the table's noise
+                        # scale. For a sharp check, --dtype float32.
+                        if c.agree_k < 1.0:
+                            flag = "   <-- a committed decision moved: the path is wrong"
+                        else:
+                            flag = "   <-- control: windowing noise, storage is a no-op"
+                    elif c.rel >= chance.rel and c.agree <= chance.agree:
+                        flag = "   <-- at the floor: carries nothing"
+                    row(str(bits), label, c, flag)
 
     print("\nThe 16-bit row is the control: quantize_kv returns the tensor "
           "untouched there, so it is not a measurement of storage at all -- it "
@@ -578,7 +599,7 @@ def run_axis_sweep(args, n_layers, head_dim, canvases, sweep, flat_cache, row) -
     for mask_ratio in args.mask_ratios:
         batch = canvases(mask_ratio)
         print(f"\n--- prefix mask ratio {mask_ratio:.2f} " + "-" * 37)
-        print(f"{'K axis':>8} {'V axis':>8} {'rel. err':>10} "
+        print(f"{'K axis':>5} {'V axis':>10} {'rel. err':>10} "
               f"{'argmax':>8} {'argmax@k':>8} {'':>5} {'slots@k':>8}")
 
         chance = sweep(flat_cache(16, head_dim), batch, scramble=True)
@@ -640,7 +661,7 @@ def run_kv_asymmetry(
     for mask_ratio in args.mask_ratios:
         batch = canvases(mask_ratio)
         print(f"\n--- prefix mask ratio {mask_ratio:.2f} " + "-" * 37)
-        print(f"{'K':>5} {'V':>7} {'rel. err':>10} "
+        print(f"{'K':>5} {'V':>10} {'rel. err':>10} "
               f"{'argmax':>8} {'argmax@k':>8} {'':>5} {'slots@k':>8}")
 
         chance = sweep(flat_cache(16, head_dim), batch, scramble=True)
