@@ -271,10 +271,15 @@ def main() -> int:
         "act_clip_ratio": cfg.activation.clip_ratio,
     }, indent=2))
 
-    # Fail in two seconds on a full GPU, not twenty minutes in.
-    preflight_memory(
-        estimate_required_gb(cfg), strict=not args.force, device_map=cfg.device_map
-    )
+    # Fail in two seconds on a full GPU, not twenty minutes in -- but only when
+    # a GPU is what the job will use. A CPU run needs no VRAM at all, and this
+    # check was refusing to start one on a node whose cards were busy, while
+    # 1.8 TB of host RAM sat idle beside them.
+    if cfg.device_map or (cfg.device and cfg.device != "cpu"):
+        preflight_memory(
+            estimate_required_gb(cfg), strict=not args.force,
+            device_map=cfg.device_map,
+        )
 
     adapter = build_adapter(cfg)
     adapter.load()
