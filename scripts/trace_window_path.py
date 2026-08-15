@@ -54,6 +54,7 @@ class Trace:
     def __init__(self, blocks):
         self.hidden: dict = {}
         self.routes: dict = {}
+        self.weights: dict = {}
         self._handles = []
 
         for i, block in enumerate(blocks):
@@ -80,6 +81,19 @@ class Trace:
             for t in parts:
                 if isinstance(t, torch.Tensor) and t.numel() and not t.is_floating_point():
                     self.routes[i] = t.detach()
+                    break
+            # The router's own weights, alongside its choice. Which experts
+            # changed is only half the question -- top-k returns them ordered
+            # by score, and the eighth of 256 carries a fraction of what the
+            # first does, so a fifth of routes moving may be a fifth of the
+            # computation or almost none of it.
+            chosen = self.routes.get(i)
+            if chosen is None:
+                return
+            for t in parts:
+                if (isinstance(t, torch.Tensor) and t.is_floating_point()
+                        and t.shape == chosen.shape):
+                    self.weights[i] = t.detach().float()
                     return
         return hook
 
@@ -103,6 +117,38 @@ def route_overlap(a: torch.Tensor, b: torch.Tensor) -> float:
     for row_a, row_b in zip(a.tolist(), b.tolist()):
         kept += len(set(row_a) & set(row_b)) / max(len(row_a), 1)
     return kept / max(a.shape[0], 1)
+
+
+def route_damage(ref_idx, ref_w, act_idx) -> tuple:
+    """Which ranks got dropped, and how much of the router's mass went with them.
+
+    `check_router` reported a fifth of expert choices moving under four-bit
+    weights, and that number cannot be read until it is known *which* choices.
+    Top-k returns its picks ordered by score and the weights are normalised
+    over them, so the first-ranked expert carries several times what the eighth
+    does. A fifth of routes moving is a fifth of the computation if it lands on
+    rank one and almost nothing if it lands on rank eight.
+
+    Returns a per-rank count of dropped experts and the share of reference
+    router mass that was rerouted -- the second being the number that says
+    whether any of it mattered.
+    """
+    k = ref_idx.shape[-1]
+    ranks = [0] * k
+    lost = kept_mass = 0.0
+
+    for row_ref, row_w, row_act in zip(ref_idx.tolist(), ref_w.tolist(),
+                                       act_idx.tolist()):
+        survivors = set(row_act)
+        for rank, (expert, weight) in enumerate(zip(row_ref, row_w)):
+            if expert in survivors:
+                kept_mass += weight
+            else:
+                ranks[rank] += 1
+                lost += weight
+
+    total = lost + kept_mass
+    return ranks, (lost / total if total else float("nan"))
 
 
 def force_routes(blocks, routes: dict, lo: int, hi: int):
@@ -225,9 +271,11 @@ def main() -> int:
           "order of the arithmetic, or something the arithmetic set off\n")
 
     pin_col = "" if pinned_trace is None else f" {'pinned err':>12}"
-    print(f"{'layer':>5} {'hidden rel. err':>16} {'routes kept':>12}{pin_col}")
+    print(f"{'layer':>5} {'hidden rel. err':>16} {'routes kept':>12} "
+          f"{'mass lost':>11}{pin_col}")
     prev = 0.0
     jumped = None
+    rank_total: list = []
     for i in range(n_layers):
         a = full.hidden.get(i)
         b = windowed_trace.hidden.get(i)
@@ -245,23 +293,49 @@ def main() -> int:
             pin_txt = f" {err(pinned_trace.hidden[i]):>12.3e}"
 
         ra, rb = full.routes.get(i), windowed_trace.routes.get(i)
-        kept = float("nan")
+        kept, mass_txt = float("nan"), "     n/a"
         if ra is not None and rb is not None:
             n_tok = ra.shape[0]
             ra_win = ra[prefix_len:total] if n_tok == total else ra
             kept = route_overlap(ra_win, rb)
+
+            wa = full.weights.get(i)
+            if wa is not None and wa.shape == ra.shape:
+                wa_win = wa[prefix_len:total] if n_tok == total else wa
+                ranks, mass = route_damage(ra_win, wa_win, rb)
+                rank_total = [r + t for r, t in zip(ranks, rank_total)] \
+                    if rank_total else list(ranks)
+                mass_txt = f"{100 * mass:7.2f}%"
 
         flag = ""
         if jumped is None and prev > 0 and rel > 4 * prev:
             jumped, flag = i, "   <-- jumps here"
         prev = max(rel, 1e-12)
         kept_txt = "     n/a" if kept != kept else f"{100 * kept:7.2f}%"
-        print(f"{i:>5} {rel:>16.3e} {kept_txt:>12}{pin_txt}{flag}")
+        print(f"{i:>5} {rel:>16.3e} {kept_txt:>12} {mass_txt:>11}{pin_txt}{flag}")
 
     ref_win = reference[:, prefix_len:]
 
     def argmax_kept(logits):
         return float((logits.argmax(-1) == ref_win.argmax(-1)).float().mean())
+
+    if rank_total and sum(rank_total):
+        # Which ranks the dropped experts held. Top-k returns them ordered by
+        # score, so rank 1 is the expert the router was most sure of. A tail
+        # concentrated at rank k is a fifth of routes moving and almost none of
+        # the computation; weight at rank 1 is the opposite.
+        total = sum(rank_total)
+        print(f"\nwhere the dropped experts sat in the reference ordering "
+              f"({total} drops):")
+        bar_unit = max(total // 40, 1)
+        for rank, n in enumerate(rank_total, start=1):
+            print(f"  rank {rank}: {n:>7} ({100 * n / total:5.1f}%) "
+                  + "#" * (n // bar_unit))
+        head = sum(rank_total[:2]) / total
+        print(f"  the two highest-scored experts account for {100 * head:.1f}% "
+              f"of drops; if that is near {200 / len(rank_total):.0f}% the "
+              f"rank does not matter, above it the damage is concentrated "
+              f"where the router was most certain")
 
     agree = argmax_kept(windowed)
     print(f"\nlogits: argmax kept {100 * agree:.2f}%")
