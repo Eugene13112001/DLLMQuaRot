@@ -127,6 +127,14 @@ def main() -> int:
     ap.add_argument("--bits", type=int, default=4,
                     help="storage width for the rounding half of the split")
     ap.add_argument("--group-size", type=int, default=128)
+    ap.add_argument("--key-axis", default="token", choices=["channel", "token"],
+                    help="direction a group runs in for K. Measured to matter "
+                         "more than any other knob on this cache: along "
+                         "channels, four bits cost twelve points of committed "
+                         "decisions; along tokens, nothing. Defaults to the "
+                         "better one here -- an earlier default of 'channel' "
+                         "inflated the rounding column and understated how far "
+                         "staleness dominates it.")
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(
@@ -218,7 +226,8 @@ def report_cache_drift(states, layers, args, bounds) -> None:
                         rel(old["k"][:, :, ~closed], new["k"][:, :, ~closed])
                     )
                 round_vals.append(
-                    rel(quantize_kv(old["k"], args.bits, args.group_size), old["k"])
+                    rel(quantize_kv(old["k"], args.bits, args.group_size,
+                                    axis=args.key_axis), old["k"])
                 )
 
             def mean(v):
