@@ -227,6 +227,13 @@ def _weights_for_expert(
     from a batch layout that disagrees -- which are different bugs with
     different fixes.
     """
+    # Per-token weights arrive shaped like the snapshot, [B, S], and `chosen`
+    # holds flat token indices. Indexing a 2-D tensor with them would silently
+    # walk the batch dimension instead -- and the bound check below compares
+    # against numel(), so it would wave that through. On CUDA the result is a
+    # device-side assert several calls later; on CPU, a wrong Hessian.
+    weights = weights.reshape(-1)
+
     expert = _expert_index(name)
     if expert is None:
         return None, "not an expert layer"

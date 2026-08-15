@@ -741,3 +741,34 @@ def test_the_router_watcher_captures_the_discrete_choice():
 
     assert state["routes"] is not None
     assert state["routes"].tolist() == [[0, 1], [2, 3]]
+
+
+def test_weights_are_indexed_by_token_not_by_batch():
+    """Certainty weights arrive shaped like the snapshot, [B, S].
+
+    `chosen` holds flat token indices, so indexing a 2-D tensor with them
+    walks the batch dimension instead -- and the bound check compares against
+    numel(), which waves that straight through. It surfaced as a CUDA
+    device-side assert several calls downstream; on CPU it would have been a
+    quietly wrong Hessian. It stayed hidden this long only because the row
+    counts disagreed first and the fallback fired before the indexing.
+    """
+    from dllmquant.pipeline import _weights_for_expert
+
+    torch.manual_seed(0)
+    n_tokens, k, n_experts = 12, 2, 4
+    routes = torch.randint(0, n_experts, (n_tokens, k))
+    flat = torch.arange(n_tokens, dtype=torch.float32)
+    shaped = flat.reshape(1, n_tokens)          # what the snapshot hands over
+
+    for expert in range(n_experts):
+        expected = _reference_gather(routes, expert)
+        if len(expected) == 0:
+            continue
+        got_flat, _ = _weights_for_expert(
+            f"b.mlp.experts.{expert}.gate_proj", flat, routes, len(expected))
+        got_shaped, reason = _weights_for_expert(
+            f"b.mlp.experts.{expert}.gate_proj", shaped, routes, len(expected))
+        assert got_shaped is not None, reason
+        assert torch.equal(got_shaped, got_flat)
+        assert torch.equal(got_shaped, flat[expected])
