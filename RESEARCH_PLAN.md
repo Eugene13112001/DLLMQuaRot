@@ -5,32 +5,63 @@ intent and the reasoning behind the order of work.
 
 ---
 
-## 1. The gap
+## 1. The gap, as it actually stands
 
-Block-wise diffusion decoders reuse computation across denoising steps and
-accept that the reused values are stale: Fast-dLLM and its successors cache
-K/V, later work caches intermediate latents, and all of it is governed by some
-refresh policy that trades staleness for compute. The literature on that
-trade is by now substantial.
+An earlier version of this section claimed no published diffusion-LM cache is
+quantized. That was checked and it is false. Four framings that this project
+leaned on are taken:
 
-**None of it is quantized.** Every published cache for a diffusion LM is kept
-in the model's native precision.
+| framing | taken by |
+|---|---|
+| "nobody quantizes a dLLM cache" | **DART** (arXiv 2601.20706, Jan 2026) — W4A8KV4, MXINT4 cache, LLaDA-8B and LLaDA-MoE-7B-A1B |
+| "K and V are not alike" | **KIVI** (2024) — K per-channel, V per-token, in autoregressive models |
+| "a block-causal prefix is exactly reusable" | **LaCache** (arXiv 2607.16339) — lossless state memoization for dLLMs |
+| "4-bit weights cost a dLLM almost nothing" | **Layer Collapse** (arXiv 2605.06366) — 3-bit GPTQ on LLaDA costs 1.8% GSM8K against 64.7% on Llama-3.1-8B |
 
-That leaves a specific, unclaimed question. A quantized reused cache carries
-*two* errors at once:
+So the territory is occupied and the claim has to move: not *first to compress
+a dLLM cache*, but **what decides the tolerable precision of that cache, and
+where the bits should go**. DART is a hardware paper — it showed a 4-bit cache
+runs, because it needed one to build an NPU around. It did not ask why it runs,
+where it stops running, or how to spend a bit budget. That question is open,
+and three parts of it are unclaimed by anything found so far.
+
+**The router.** In a MoE the expert choice is a top-k over 256 candidates —
+discrete, with nothing to average. Measured here: the 19 routers are 0.061% of
+the parameters, and at four bits they change 22% of expert selections, while
+four-bit weights on the experts themselves cost nothing detectable (McNemar
+p = 0.44). DART evaluates on a MoE and does not analyse the router at all.
+
+**Attention sinks that move.** Sinks are the known obstacle to KV-cache
+quantization: one position with an enormous key magnitude sets the scale for
+its whole group, and KVQuant builds dedicated outlier machinery around it. That
+machinery assumes the sink *stays put*. In a diffusion LM it does not — sinks
+shift during generation (arXiv 2510.15731). If so, a statically calibrated
+outlier set cannot transfer, and an entry written while its position was a sink
+keeps that scale after the sink has left. Nobody has connected the two lines.
+
+**Low-rank correction on the cache.** `K ≈ Q₃(K) + A·B`. Well worked out for
+weights (LQER, CALDERA, ZeroQuant-V2); for a diffusion LM's cache, done by
+nobody, DART included (checked: "low-rank decomposition, residual correction —
+not discussed"). Evidence that there is structure to catch: refusal behaviour
+in an MDLM lives in a roughly one-dimensional activation subspace (arXiv
+2512.24143).
+
+Underneath all three sits the two-error structure that made this project worth
+starting, and it survives intact:
 
 * **drift** — the entry was computed some steps ago and the state has moved;
 * **rounding** — the entry is stored in four bits.
 
-Both are controlled by overlapping knobs, and they are not obviously additive.
 Refreshing more often cuts drift and costs compute; spending more bits cuts
-rounding and costs memory. Whether one hides the other, whether the optimum is
-"refresh rarely and store precisely" or "refresh often and store coarsely", is
-unstudied for any diffusion LM.
+rounding and costs memory. Whether one hides the other is still unstudied. The
+autoregressive analogue does not answer it: there the cache is exact by
+construction, so only rounding is at stake.
 
-The autoregressive analogue does not answer it. There the cache is *exact* by
-construction — past tokens never change — so drift does not exist and only
-rounding is at stake. The interaction is specific to diffusion.
+LLaDA2.0 makes the two separable, which is the reason to work on it rather than
+LLaDA-8B. Its block-causal prefix is exact, so drift is structurally zero there
+and a change in output is attributable to the bits alone. DART's models are
+fully bidirectional, where the cache is approximate from the moment it is
+written and the two errors cannot be told apart.
 
 ---
 
@@ -287,30 +318,102 @@ the solve again.
 
 ## 6. Order of work
 
-1. **Tier 0 on the prefix.** Nothing to build; the exactness control also
-   discharges the outstanding risk that our windowed path differs from the
-   model's own (verified so far only against stand-ins).
-2. **K and V separately.** A small change to `quantize_kv`'s call sites. Cheap,
-   and an asymmetric answer would be worth reporting on its own.
-3. **Cache into the sampler.** The one substantial piece of engineering left.
-   Requires a branch in `_denoise` and flags in `evaluate.py`. Unlocks Tier 1
-   and everything after it.
-4. **Refresh policies and drift decomposition.** The core result.
-5. **Masked vs decoded precision.** Diffusion-specific, cheap once (3) exists.
-6. **Where the scales come from.** Dynamic (what exists) against one static
-   set against static per mask-ratio bucket, compared at equal total bits with
-   the scales counted -- they are a sixth of the budget at group 128. The
-   bucketed variant is the one idea here that an autoregressive model cannot
-   copy, because it needs a signal that says which regime the distribution is
-   in, and the mask ratio is exactly that signal, available for free.
-7. **Low-rank correction.** Last, and not as a headline. It is most defensible
-   where data-driven compensation is *unavailable* — the starved experts,
-   which have no calibration data and therefore get no CGQ help, while an SVD
-   of the residual needs no data at all. It must be reported against the
-   control that most papers in this area omit: **the same bits spent on a
-   finer group instead**. Rank 8 on a 2048×512 expert projection costs about
-   8% over 4-bit storage, i.e. roughly 4.3 bits; if group-64 at 4 bits does
-   better for the same budget, the correction is not earning its complexity.
+Four phases. The first is cheap and finishes what is half-measured; the second
+and third are the two unclaimed results and need code that does not exist; the
+fourth converts everything into task numbers. Weights stay FP16 throughout
+except in phase D — that is the field's convention (KIVI, KVQuant, GEAR,
+ZipCache, SKVQ all quantize the cache alone) and the only way to attribute a
+shift to the cache.
+
+### Phase A — close the open measurements (CPU, days)
+
+Nothing here needs new ideas, and two items can change what phases B and C are
+built on.
+
+1. **K grouping axis.** `quantize_kv` groups K and V both along `head_dim`.
+   KIVI established that K wants grouping along the token axis within a
+   channel, because its outliers sit in channels. Untested here. The suspicion
+   is that the measured "group 32 beats 128" is a weak shadow of it — a fine
+   group along the wrong axis partly rescuing what the right axis would fix
+   outright. **Before** low-rank, or low-rank is built on a base known to be
+   wrong.
+2. **`check_block_cache --samples 24`**, including the K/V pairs at group 32
+   around three bits, which is the operating point there. Present bars are ±8
+   against differences of 9–16 points.
+3. **`trace_window_path`.** The 16-bit control sits at 90.6%, not 100%: window
+   reuse alone moves three committed decisions in thirty-two, at a perturbation
+   nine times below the decision margin. Smooth growth with depth is bfloat16;
+   a jump at one layer is the router. If it is the router, this is a result in
+   its own right — cache reuse in a MoE dLLM is not free at *any* width.
+4. **`check_expert_weights`.** Why certainty weighting reached no expert layer.
+5. **`measure_drift` on LLaDA-1.5** (needs `transformers==4.46.3` in a shadow
+   directory) and **along a trajectory** rather than one snapshot, which is
+   what puts numbers on the age and mask-ratio axes.
+
+### Phase B — the router (new code, the strongest unclaimed result)
+
+`check_router` perturbs *weights* and watches routing. The cache question is
+the other direction: does a quantized **cache** change the expert choice, and
+does a changed choice change the output?
+
+6. Routing agreement as a function of **cache** bits, per layer, at several
+   mask ratios. The instrument is `route_overlap` in `trace_window_path` —
+   set comparison, not positional; the positional version inverted a result
+   here once already.
+7. **Is a flipped route absorbed?** Eight experts of 256 are summed with
+   router weights; swapping the eighth-ranked one may cost nothing while
+   swapping the first costs everything. Measure the output change against the
+   rank of the flipped route. This decides whether "22% of routes change" is
+   alarming or cosmetic, and nobody has asked.
+8. **Per-layer refresh from router fragility.** If the routers of some layers
+   are far more brittle, a uniform refresh interval is the wrong policy, and
+   the mask ratio is known for free at every step.
+
+### Phase C — sinks and low-rank (new code)
+
+9. **Track sinks across the trajectory.** Which positions absorb
+   disproportionate attention mass, per step and per layer; how large their
+   keys are against the rest; whether they alone set their group's scale.
+10. **Static versus dynamic outlier sets.** Calibrate a sink set once, KVQuant
+    style, and measure how fast it decays as generation proceeds, against a set
+    recomputed every step. A clean negative — the autoregressive machinery does
+    not transfer — is as publishable as a positive, and follows from sinks
+    moving.
+11. **Low-rank correction**, `K ≈ Q₃(K) + A·B`. Arithmetic: a 224 × 128 prefix
+    is 28672 numbers, a rank-8 correction is 2816, so 10% overhead and 3 bits +
+    rank 8 ≈ 3.3 bits effective against 4 flat. The hypothesis is specific, not
+    exploratory: keep V at three bits flat and give the whole rank budget to K,
+    because one bit of K is worth eleven of V. Mandatory control — the same
+    bits spent on a finer group instead.
+12. **Static scales bucketed by mask ratio.** Scales are dynamic now, as in
+    KIVI. The diffusion move is to calibrate per mask-ratio bucket and select
+    by the current one. External justification: attributes commit on distinct
+    schedules — topic within the first 2% of denoising, sentiment over 20%
+    (arXiv 2605.10971) — so an error early is unrecoverable and an error late
+    is not. Compare at equal **total** bits, scales included.
+
+### Phase D — task numbers (GPU, hours)
+
+13. **`--kv-cache --kv-bits 16` against the 91.50% FP16 baseline.** Answers
+    whether those three decisions in thirty-two matter downstream, and measures
+    the speed-up, which sets the price of everything below.
+14. **Four cells**: {FP16 weights, W4A4} × {FP16 cache, 4-bit cache}. The top
+    row is the isolating experiment, the bottom row answers the reviewer who
+    objects that nobody deploys a 4-bit cache beside FP16 weights.
+15. **The same cache tables on the rotated model.** Every cache number so far
+    was taken without rotation, and R3 exists precisely to make V fit into few
+    bits.
+
+### What each phase is worth
+
+Phase A alone leaves a solid but narrow paper: bit and group sweeps with
+decision-level metrics, on a model where drift and rounding separate. Phase B
+adds the result that is hardest to dismiss, because DART works on a MoE and
+never looks at the router. Phase C is the one that reads as a method rather
+than a study. Phase D is what makes any of it citable as accuracy.
+
+If time runs out, cut from the bottom: D can shrink to two cells, C to the
+low-rank experiment alone, and B not at all.
 
 ---
 
