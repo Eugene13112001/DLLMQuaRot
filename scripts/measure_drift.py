@@ -198,7 +198,12 @@ def report_cache_drift(states, layers, args, bounds) -> None:
     bidirectional attention there is no such guarantee and the same column
     should be non-zero everywhere.
     """
-    print(f"\n=== cache drift: {args.bits}-bit storage, group {args.group_size} "
+    # The axis belongs in the header, not only in the flags: it halves the
+    # rounding column, and a table that does not say which one produced it
+    # cannot be compared with another. This is the second time a heading was
+    # left behind while the numbers underneath changed.
+    print(f"\n=== cache drift: {args.bits}-bit storage, group "
+          f"{args.group_size}, K along {args.key_axis}s "
           + "=" * 14)
     print("staleness = the state moved; rounding = what four bits cost")
     print(f"{'layer':>5} {'d':>3} {'stale(prefix)':>14} {'stale(current)':>15} "
