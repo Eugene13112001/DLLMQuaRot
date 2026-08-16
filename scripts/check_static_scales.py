@@ -155,6 +155,41 @@ def warn_if_underpowered(measured: Dict[str, "Comparison"], samples: int,
 # ------------------------------------------------------------------ survey
 
 
+def variance_split(groups: List[List[torch.Tensor]]) -> Tuple[float, float, float]:
+    """How much of a channel's scale movement is the mask ratio, and how much
+    is just the canvas.
+
+    ``groups`` is one list of observations per mask-ratio bucket. Returns the
+    typical canvas-to-canvas factor, the typical bucket-to-bucket factor, and
+    the share of the variance the bucket explains.
+
+    A one-way random-effects split rather than a ratio of spreads, because
+    ``max/min`` is not comparable across different numbers of observations and
+    the two axes never have the same number. Drawing 28 canvases from one
+    distribution gives max/min 1.84 where 2 draws from the *same* distribution
+    give 1.20 -- which is almost exactly the gap the first version of this
+    survey reported and read as "the movement is not the mask ratio".
+
+    Scales are multiplicative, so the split is taken in logs and reported back
+    as factors.
+    """
+    per_group = [torch.stack(g).clamp(min=1e-12).log() for g in groups if len(g) > 1]
+    if len(per_group) < 2:
+        return float("nan"), float("nan"), float("nan")
+
+    within = torch.stack([g.var(dim=0, unbiased=True) for g in per_group]).mean(0)
+    means = torch.stack([g.mean(dim=0) for g in per_group])
+    n = min(g.shape[0] for g in per_group)
+    between = (means.var(dim=0, unbiased=True) - within / n).clamp(min=0.0)
+
+    share = between / (between + within).clamp(min=1e-12)
+    return (
+        float(within.sqrt().exp().median()),
+        float(between.sqrt().exp().median()),
+        float(share.median()),
+    )
+
+
 def spread(values: List[torch.Tensor]) -> Tuple[float, float]:
     """How far one channel's scale moves across a list of observations.
 
@@ -234,27 +269,21 @@ def run_survey(scales: Dict, ratios: List[float], sides: Tuple[str, ...]) -> Non
             print(f"    {r:>12.2f} {_med(med):>10.2f} [{_med(p90):.2f}]"
                   f"{_med(overlaps):>16.2f} (chance {chance:.2f})")
 
-        # The same statistic across buckets: the per-canvas noise is removed
-        # first (median within a bucket), so what is left is what the mask
-        # ratio itself moves. Buckets are worth their space only if this is the
-        # larger of the two.
-        across = []
+        # And the split that the column above cannot give: max/min grows with
+        # the number of observations, and the two axes never have the same
+        # number, so comparing them directly reads a difference in sample size
+        # as a difference in the world.
+        within, between, share = [], [], []
         for ell in layers:
-            obs = [per_ratio_median[r][ell] for r in ratios
-                   if ell in per_ratio_median.get(r, {})]
-            m, _ = spread(obs)
-            if m == m:
-                across.append(m)
-        if across:
-            within = []
-            for r in ratios:
-                for ell in layers:
-                    o = scales.get((r, side, ell))
-                    if o:
-                        m, _ = spread(o)
-                        within.append(m)
-            print(f"    {'across ratios':>12} {_med(across):>10.2f}")
-            _verdict(_med(within), _med(across))
+            groups = [scales[(r, side, ell)] for r in ratios
+                      if scales.get((r, side, ell))]
+            w, b, s = variance_split(groups)
+            if w == w:
+                within.append(w)
+                between.append(b)
+                share.append(s)
+        if within:
+            _verdict(_med(within), _med(between), _med(share), len(ratios))
 
 
 def _med(xs: List[float]) -> float:
@@ -265,24 +294,44 @@ def _med(xs: List[float]) -> float:
     return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2
 
 
-def _verdict(within: float, across: float) -> None:
-    """State what the two spreads imply, and refuse to state more than that."""
-    if within != within or across != across:
+def _verdict(within: float, between: float, share: float, n_ratios: int) -> None:
+    """State what the split implies, and refuse to state more than that.
+
+    The two factors are comparable to each other -- they come from a variance
+    decomposition, not from spreads over different numbers of draws -- and both
+    are comparable to the thing being bought. A static scale saves the 0.25 to
+    0.29 bits the dynamic one costs, so a scale that is off by a factor f wipes
+    that out once log2(f) exceeds it: about x1.22.
+    """
+    if within != within or between != between:
         return
-    print(f"      -> a channel's scale moves by x{within:.2f} between canvases "
-          f"at one mask ratio, and by x{across:.2f} across mask ratios.")
-    if within > 1.5:
-        print("      -> the scale does not transfer between canvases at all; "
-              "bucketing cannot fix that, and the sweep below should be "
-              "expected to fail.")
-    elif across > within * 1.3:
-        print("      -> most of the movement is the mask ratio, which is "
+    import math
+
+    print(f"      -> a channel's scale moves by x{within:.2f} from canvas to "
+          f"canvas, and by x{between:.2f} from one mask-ratio bucket to the "
+          f"next; the bucket explains {100 * share:.0f}% of the variance.")
+    if n_ratios < 3:
+        print(f"      (only {n_ratios} buckets: the between-bucket term is a "
+              "crude estimate, and the honest reading is an upper bound on "
+              "what bucketing could buy)")
+
+    cost = math.log2(within) if within > 1 else 0.0
+    print(f"      -> calibrating on other canvases misplaces the scale by "
+          f"about {cost:.2f} bits of resolution, against the 0.25-0.29 bits a "
+          f"dynamic scale costs to store.")
+    if cost > 0.35:
+        print("      -> so a static scale is arithmetically behind before the "
+              "sweep runs: it saves a quarter-bit and loses more than that to "
+              "a scale that no longer fits. Expect the sweep to say so, and "
+              "report it as the negative result it is.")
+    elif share > 0.5:
+        print("      -> most of what does move is the mask ratio, which is "
               "exactly what a bucket removes and what a sampler knows for "
               "free.")
     else:
-        print("      -> the mask ratio explains little of it: buckets are "
-              "unlikely to buy much over a single calibration, and the "
-              "single-bucket row should say so.")
+        print("      -> the movement is small enough to be worth the "
+              "quarter-bit, and the mask ratio is not what drives it: a "
+              "single calibration may be all that is needed.")
     print("      (a survey, not a result: it predicts the sweep, it does not "
           "replace it)")
 

@@ -108,6 +108,42 @@ def test_fixed_outlier_channels_are_visible_against_chance():
     assert chance < 0.05
 
 
+def test_the_split_does_not_read_sample_size_as_movement():
+    """max/min grows with the number of draws; a variance split does not.
+
+    This is the bug the first survey shipped with: 28 canvases against 2
+    mask-ratio buckets, compared directly, and the same distribution on both
+    axes reads x1.84 against x1.20 -- which was then reported as "the movement
+    is not the mask ratio".
+    """
+    torch.manual_seed(0)
+    many = [torch.exp(0.15 * torch.randn(64)) for _ in range(28)]
+    few = [torch.exp(0.15 * torch.randn(64)) for _ in range(3)]
+    assert css.spread(many)[0] > 1.4 * css.spread(few)[0]
+
+    # Identical distributions in every bucket: the split must attribute
+    # almost nothing to the bucket, whatever the group sizes.
+    groups = [[torch.exp(0.15 * torch.randn(64)) for _ in range(n)]
+              for n in (28, 28, 28)]
+    within, between, share = css.variance_split(groups)
+    assert within == pytest.approx(1.16, abs=0.06)
+    assert between < 1.05 and share < 0.15
+
+
+def test_the_split_finds_a_bucket_effect_when_there_is_one():
+    torch.manual_seed(1)
+    base = torch.rand(64) + 0.5
+    groups = []
+    for gain in (1.0, 5.0):
+        groups.append([base * gain * torch.exp(0.02 * torch.randn(64))
+                       for _ in range(6)])
+
+    within, between, share = css.variance_split(groups)
+    assert within < 1.05
+    assert between > 3.0
+    assert share > 0.9
+
+
 def test_the_survey_prints_a_verdict_it_can_support(capsys):
     """A scale that does not transfer must be reported as such, not smoothed."""
     torch.manual_seed(1)
@@ -115,15 +151,16 @@ def test_the_survey_prints_a_verdict_it_can_support(capsys):
     for layer in (0, 1):
         base = torch.rand(64) + 0.5          # this layer's channels, fixed
         for ratio in (0.0, 1.0):
-            for i in range(3):
+            for i in range(6):
                 # Barely moves between canvases, moves a lot with the ratio.
-                obs = base * (1.0 + 0.01 * i) * (1.0 if ratio == 0.0 else 5.0)
+                obs = (base * (1.0 + 0.005 * i)
+                       * (1.0 if ratio == 0.0 else 5.0))
                 scales.setdefault((ratio, "key", layer), []).append(obs)
 
     css.run_survey(scales, [0.0, 1.0], ("key",))
     out = capsys.readouterr().out
-    assert "across ratios" in out
-    assert "most of the movement is the mask ratio" in out
+    assert "from canvas to canvas" in out
+    assert "most of what does move is the mask ratio" in out
 
 
 # --------------------------------------------------------------- end to end
