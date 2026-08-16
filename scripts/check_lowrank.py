@@ -156,6 +156,39 @@ def survey_side(
     return rows
 
 
+def warn_if_underpowered(measured: Dict[str, "Comparison"], samples: int,
+                         commit_k: int, target_se: float = 0.03) -> None:
+    """Say so when the table cannot resolve its own rows.
+
+    `argmax@k` is a rate over ``samples * commit_k`` positions, so at four
+    canvases it is sixteen of them: a resolution of 6.25 points and a standard
+    error near seven. Two rows that differ by less than that differ by nothing,
+    and the giveaway is an impossible ordering -- four bits scoring below
+    three, which is what the first run of this sweep printed.
+
+    Printed rather than left to the reader because this project has twice
+    published a row that the sample size could not support.
+    """
+    rates = [c.agree_k for c in measured.values() if c.agree_k == c.agree_k]
+    if len(rates) < 2:
+        return
+    n = max(samples * commit_k, 1)
+    spread = max(rates) - min(rates)
+    p = sum(rates) / len(rates)
+    se = (p * (1 - p) / n) ** 0.5
+    if se <= 0 or spread > 2 * se:
+        # A standard error of zero means every row scored identically, which is
+        # a degenerate table rather than an underpowered one -- the floor check
+        # above it is what catches that.
+        return
+    needed = int(p * (1 - p) / target_se**2 / max(commit_k, 1)) + 1
+    print(f"      UNDERPOWERED: argmax@k here is a rate over {n} positions "
+          f"(standard error {100 * se:.1f} points) and the rows span "
+          f"{100 * spread:.1f}. Nothing in this table is a difference. "
+          f"About {needed} canvases would bring the error to "
+          f"{100 * target_se:.0f} points -- cost is linear in --samples.")
+
+
 def residual_geometry(
     tensors: List[torch.Tensor], bits: int, axis: str, group: int
 ) -> Dict[str, float]:
@@ -427,9 +460,17 @@ def main() -> int:
                                 / len(cache.stats.lowrank_captured))
         return pooled, (sum(captured) / len(captured) if captured else float("nan"))
 
-    def make(bits, rank=0, factor_bits=16, wide=(0, 0)):
+    # V is held at the base width in every row. Without this the flat control
+    # widens both sides while every targeted row touches K alone, and the
+    # comparison silently becomes "one bit on K and V" against "a correction on
+    # K" -- which is how the first run produced rows whose logit error barely
+    # moved: they could not reach the error V was contributing.
+    v_bits = args.bits
+
+    def make(k_bits, rank=0, factor_bits=16, wide=(0, 0)):
         return lambda: BlockKVCache(
-            KVCacheConfig(enabled=True, decoded_bits=bits, masked_bits=bits,
+            KVCacheConfig(enabled=True, decoded_bits=k_bits, masked_bits=k_bits,
+                          key_bits=k_bits, value_bits=v_bits,
                           group_size=args.group_size, key_axis=args.key_axis,
                           value_axis="channel", lowrank_rank=rank,
                           lowrank_kinds=("key",),
@@ -443,9 +484,9 @@ def main() -> int:
     v_over = overhead_bits("channel", min(args.group_size, head_dim),
                            prefix_len, head_dim)
 
-    # (label, base bits, rank, factor bits, (channels, extra bits))
-    rows = [("flat", args.bits, 0, 16, (0, 0)),
-            ("flat", args.bits + 1, 0, 16, (0, 0))]
+    # (label, K bits, rank, factor bits, (channels, extra bits))
+    rows = [(f"K {args.bits} flat", args.bits, 0, 16, (0, 0)),
+            (f"K {args.bits + 1} flat", args.bits + 1, 0, 16, (0, 0))]
     for factor_bits in args.factor_bits:
         for rank in args.ranks:
             rows.append((f"+rank {rank} @{factor_bits}b", args.bits, rank,
@@ -484,18 +525,21 @@ def main() -> int:
         show("scrambled", floor, float("nan"), float("nan"),
              note="   <-- chance floor")
 
+        measured = {}
         for label, bits, rank, factor_bits, wide in rows:
             c, captured = run_row(make(bits, rank, factor_bits, wide), batch,
                                   mask_ratio)
+            measured[label] = c
             k_bits = (bits + k_over
                       + lowrank_bits(rank, prefix_len, head_dim, factor_bits,
                                      factor_scales=args.factor_scales)
                       + wide[1] * min(wide[0], head_dim) / head_dim)
-            mean_bits, compr = pair_cost(k_bits, bits + v_over)
-            name = label if (rank or wide[0]) else f"{label} {bits} bits"
+            mean_bits, compr = pair_cost(k_bits, v_bits + v_over)
             note = ("   <-- at the floor"
                     if c.rel >= floor.rel and c.agree <= floor.agree else "")
-            show(name, c, mean_bits, compr, captured, note)
+            show(label, c, mean_bits, compr, captured, note)
+
+        warn_if_underpowered(measured, args.samples, args.commit_k)
 
         print("      Compare rows at equal eff.bits, not at equal base width. "
               "A correction that beats its own base while costing more than "
