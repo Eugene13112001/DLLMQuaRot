@@ -139,6 +139,60 @@ def survey_side(
     return rows
 
 
+def residual_geometry(
+    tensors: List[torch.Tensor], bits: int, axis: str, group: int
+) -> Dict[str, float]:
+    """Along *what* does the residual's dominant direction run?
+
+    A rank-1 component of a [T, head_dim] residual is an outer product, and it
+    can be concentrated on either side. If its channel factor is one channel,
+    the structure is an outlier *channel* and the cheaper fix is precision
+    spent there. If its token factor is one position, the structure is an
+    outlier *position* -- an attention sink -- and this stops being the
+    low-rank item of phase C and becomes the sink item.
+
+    The measure on each side is the participation ratio of the top singular
+    vector: `1 / sum(w^4)` for a unit vector `w`, which reads as "how many
+    components carry this direction". One means a single channel or a single
+    position; head_dim means the direction is spread over everything and the
+    correction is genuinely a rotation rather than a spike.
+
+    Also reported: the modal position that dominates, because a sink at 0 and a
+    sink that wanders are different findings -- and the second is the one this
+    project expects (arXiv 2510.15731).
+    """
+    tok_eff, chan_eff, top_share, top_idx, idx_share = [], [], [], [], []
+    for t in tensors:
+        q = quantize_kv(t, bits, group, axis=axis)
+        resid = (t.float() - q.float())
+        u, s, vh = torch.linalg.svd(resid, full_matrices=False)
+
+        energy = s.pow(2)
+        top_share.append(float((energy[..., 0] / energy.sum(-1).clamp(min=1e-12)).mean()))
+
+        left = u[..., :, 0].abs()                       # [B, heads, T]
+        right = vh[..., 0, :].abs()                     # [B, heads, head_dim]
+        for vec, sink in ((left, tok_eff), (right, chan_eff)):
+            w = vec.pow(2)
+            w = w / w.sum(-1, keepdim=True).clamp(min=1e-12)
+            sink.append(float((1.0 / w.pow(2).sum(-1)).mean()))
+
+        best = left.argmax(-1).flatten()
+        top_idx.extend(best.tolist())
+        share = left.pow(2) / left.pow(2).sum(-1, keepdim=True).clamp(min=1e-12)
+        idx_share.append(float(share.amax(-1).mean()))
+
+    modal = max(set(top_idx), key=top_idx.count)
+    return {
+        "top_share": sum(top_share) / len(top_share),
+        "tokens": sum(tok_eff) / len(tok_eff),
+        "channels": sum(chan_eff) / len(chan_eff),
+        "modal_position": modal,
+        "modal_agreement": top_idx.count(modal) / len(top_idx),
+        "position_share": sum(idx_share) / len(idx_share),
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True)
@@ -224,6 +278,29 @@ def main() -> int:
                     collected.setdefault(layer, []).append(k)
 
         print(f"\n--- prefix mask ratio {mask_ratio:.2f} " + "-" * 37)
+
+        # Where the dominant direction lives, before anything is priced. A
+        # correction that wins without this is a win with no mechanism, and a
+        # spike on one axis is a cheaper fix than a rank on both.
+        print(f"    {'layer':>5} {'top dir':>8} {'tokens':>7} {'channels':>9} "
+              f"{'pos':>5} {'agree':>6} {'share':>6}")
+        for layer in sorted(collected):
+            g = residual_geometry(collected[layer], args.bits, args.key_axis,
+                                  args.group_size)
+            note = ""
+            if g["tokens"] < 4:
+                note = "   <-- a few positions: this is a sink, not a rotation"
+            elif g["channels"] < 4:
+                note = "   <-- a few channels: precision there is cheaper"
+            print(f"    {layer:>5} {100 * g['top_share']:>7.1f}% "
+                  f"{g['tokens']:>7.1f} {g['channels']:>9.1f} "
+                  f"{g['modal_position']:>5} {100 * g['modal_agreement']:>5.0f}% "
+                  f"{100 * g['position_share']:>5.1f}%{note}")
+        print("    top dir = share of residual energy in the first singular "
+              "direction; tokens/channels = how many components carry it; "
+              "pos = the position that dominates it most often, agree = how "
+              "often, share = how much of that direction it holds")
+
         for factor_bits in args.factor_bits:
             print(f"\n  factors at {factor_bits} bits")
             print(f"    {'layer':>5} {'correction':>12} {'captured':>9} "

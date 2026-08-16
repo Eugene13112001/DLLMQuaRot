@@ -13,6 +13,11 @@ from __future__ import annotations
 import pytest
 import torch
 
+import importlib.util
+import sys
+
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+
 from dllmquant.cache import (
     BlockKVCache,
     KVCacheConfig,
@@ -20,6 +25,13 @@ from dllmquant.cache import (
     lowrank_residual,
     quantize_kv,
 )
+
+_spec = importlib.util.spec_from_file_location(
+    "check_lowrank",
+    __import__("pathlib").Path(__file__).resolve().parents[1] / "scripts" / "check_lowrank.py",
+)
+cl = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cl)
 
 
 
@@ -130,3 +142,29 @@ def test_nothing_is_thrown_away_at_sixteen_bits_so_nothing_is_corrected():
     kq, _ = cache.write(0, x, x)
     assert torch.equal(kq, x)
     assert not cache.stats.lowrank_captured
+
+
+def test_the_geometry_tells_a_sink_from_a_fat_channel():
+    """A rank-1 residual is an outer product, and which side is concentrated
+    decides which phase-C item this actually is.
+
+    A single channel means precision spent there is the cheaper fix. A single
+    position means an attention sink, and the correction is not a low-rank
+    method at all -- it is the sink item wearing its clothes.
+    """
+    torch.manual_seed(0)
+    plain = torch.randn(1, 4, 224, 128)
+    fat_channel = plain.clone()
+    fat_channel[..., 61] *= 20.0
+    sink = plain.clone()
+    sink[..., 3, :] *= 20.0
+
+    spread = cl.residual_geometry([plain], 3, "token", 128)
+    channel = cl.residual_geometry([fat_channel], 3, "token", 128)
+    position = cl.residual_geometry([sink], 3, "token", 128)
+
+    assert spread["tokens"] > 20 and spread["channels"] > 20
+    assert channel["channels"] < 2 < channel["tokens"]
+    assert position["tokens"] < 5 < position["channels"]
+    assert position["modal_position"] == 3
+    assert position["modal_agreement"] == 1.0
