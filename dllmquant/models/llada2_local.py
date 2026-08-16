@@ -360,6 +360,7 @@ def cached_generate(
     cache: BlockKVCache,
     *,
     reuse_window: bool = False,
+    on_step: Optional[Callable] = None,
     rotary_fn: Optional[Callable] = None,
     attention_fn: Optional[Callable] = None,
 ):
@@ -385,6 +386,15 @@ def cached_generate(
     those measure one window against a clean prefix; this measures a whole
     trajectory, which is also the only place accumulation across blocks can
     show up.
+
+    ``on_step(block_idx, step, lo, hi, logits, x)`` is called after each commit
+    and may edit ``x`` in place. It exists for one measurement that cannot be
+    made otherwise: once a cached run commits a different token, every later
+    block is written from a different text, and comparing the two trajectories
+    then measures the fork rather than the cache. A callback that overwrites
+    the commit with a reference trajectory holds the text fixed, so what
+    remains is what the cache did at that step -- which is the only way to tell
+    accumulated damage from divergence.
     """
     device = next(adapter.model.parameters()).device
     prompt_ids = prompt_ids.to(device)
@@ -454,6 +464,9 @@ def cached_generate(
                 take = min(k, int(still_masked.sum()))
                 chosen = torch.topk(score[0], k=take).indices
                 x[0, lo + chosen] = proposal[0, chosen]
+
+                if on_step is not None:
+                    on_step(block_idx, step, lo, hi, logits, x)
     finally:
         remove_block_cache(adapter.model)
 

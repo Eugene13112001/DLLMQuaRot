@@ -197,6 +197,53 @@ def main() -> int:
                   f"{100 * kept:>11.2f}%   "
                   + " ".join(f"{100 * b:5.1f}" for b in blocks))
 
+    # ---- the same thing with the text held fixed --------------------------
+    #
+    # The table above cannot separate two very different things. Once a cached
+    # run commits a different token, every later block is decoded from a
+    # different text, so its disagreement is a fork, not further damage. Here
+    # each commit is overwritten with the reference's token, so the two runs
+    # read the same canvas at every step and what is counted is only what the
+    # cache changed *at that step*. This is the accumulation measurement; the
+    # one above is the end-to-end cost.
+
+    def forced(bits: int, policy: str, every: int):
+        hits = [[0, 0] for _ in bounds]
+        for prompt, ref in zip(prompts, reference):
+            cache = BlockKVCache(kv_config(bits, policy, every), n_layers)
+            state = {"prev": None}
+
+            def force(block_idx, step, lo, hi, logits, x, ref=ref, state=state):
+                if state["prev"] is None:
+                    state["prev"] = torch.full_like(x, -1)
+                just = (x[0] != state["prev"][0]).nonzero().flatten()
+                for pos in just.tolist():
+                    if lo <= pos < hi:
+                        hits[block_idx][1] += 1
+                        hits[block_idx][0] += int(x[0, pos] == ref[0, pos])
+                        x[0, pos] = ref[0, pos]
+                state["prev"] = x.clone()
+
+            cached_generate(adapter, prompt, gen_cfg, cache,
+                            reuse_window=True, on_step=force)
+        return [h / max(n, 1) for h, n in hits]
+
+    print("\n" + "=" * 78)
+    print("the same rows with the text held to the reference: every commit is "
+          "overwritten, so both runs read one canvas and the columns count "
+          "only what the cache changed")
+    print(f"\n{'policy':>12} {'bits':>5}   per block (committed tokens agreeing)")
+    print("-" * 60)
+    for bits in args.bits:
+        for spec in args.policies:
+            name, _, interval = spec.partition(":")
+            blocks = forced(bits, name, int(interval) if interval else 4)
+            print(f"{spec:>12} {bits:>5}   "
+                  + " ".join(f"{100 * b:5.1f}" for b in blocks))
+    print("\nFalling left to right here is accumulation and nothing else: the "
+          "canvas is identical, so a later block that agrees less is reading a "
+          "cache that earlier blocks damaged.")
+
     floor = sum(agreement(o[:, bounds[0][0]:], r[:, bounds[0][0]:])
                 for o, r in zip(floor_outs, reference)) / len(floor_outs)
     print(f"\nchance floor (store shuffled along tokens): {100 * floor:.2f}% "

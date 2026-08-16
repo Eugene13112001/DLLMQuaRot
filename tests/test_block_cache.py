@@ -572,3 +572,25 @@ def test_the_two_stores_answer_to_different_clocks():
 def test_an_empty_block_store_asks_to_be_filled():
     cache = BlockKVCache(KVCacheConfig(enabled=True, policy="block"), n_layers=1)
     assert cache.should_refresh_window(0, step=0) is True
+
+
+def test_refreshing_every_step_makes_reuse_a_no_op():
+    """The identity that validates the whole reuse path.
+
+    With the block refreshed at every step there is nothing stale to read, so
+    turning reuse on must change nothing at all. If this fails, any damage the
+    trajectory sweep reports is the wiring rather than staleness -- and the
+    sweep has no other way to tell the two apart.
+    """
+    adapter, cache, cfg = _sampler_setup(bits=16)
+    prompt = torch.randint(0, VOCAB - 1, (1, BLOCK))
+    dense = _dense_generate(adapter, prompt, cfg)
+
+    cache.cfg.policy = "every_n"
+    cache.cfg.refresh_every = 1
+    out = cached_generate(adapter, prompt, cfg, cache, reuse_window=True,
+                          rotary_fn=_rotary, attention_fn=_attention)
+
+    assert torch.equal(out, dense)
+    assert cache.stats.window_reuses == 0, "nothing should have been reused"
+    assert cache.stats.window_refreshes > 0
