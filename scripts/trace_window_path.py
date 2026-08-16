@@ -210,6 +210,16 @@ def main() -> int:
     ap.add_argument("--block-length", type=int, default=32)
     ap.add_argument("--blocks", type=int, default=8)
     ap.add_argument("--prefix-mask-ratio", type=float, default=0.0)
+    ap.add_argument("--bits", type=int, nargs="+", default=[16],
+                    help="cache widths to sweep. The first is used for the "
+                         "detailed per-layer table; all of them appear in the "
+                         "summary. 16 stores the tensor untouched, so that row "
+                         "isolates what the windowed arithmetic alone does to "
+                         "the routing, and the rest add what the bits do.")
+    ap.add_argument("--group-size", type=int, default=128)
+    ap.add_argument("--key-axis", default="token", choices=["channel", "token"])
+    ap.add_argument("--value-axis", default="channel",
+                    choices=["channel", "token"])
     ap.add_argument("--no-pin", action="store_true",
                     help="skip the pinned-routes run (one extra windowed "
                          "forward); leaves only the correlation")
@@ -236,37 +246,42 @@ def main() -> int:
     reference = full_logits(model, x, args.block_length)
     full.close()
 
-    # --- the same thing, prefix read from a lossless cache ---------------
+    # --- the same thing, prefix read from a cache ------------------------
     states = install_block_cache(model, BlockKVCache(KVCacheConfig(), n_layers))
-    cache = BlockKVCache(
-        KVCacheConfig(enabled=True, decoded_bits=16, masked_bits=16,
-                      group_size=adapter.head_dim),
-        n_layers,
-    )
-    for state in states:
-        state.cache = cache
-    refresh_prefix(model, states, x, prefix_len, args.block_length)
 
-    windowed_trace = Trace(adapter.blocks)
-    windowed = logits_for_window(model, states, x, prefix_len, total,
-                                 args.block_length)
-    windowed_trace.close()
+    def windowed_run(bits: int, pin: bool = False):
+        """One windowed forward with the prefix stored at `bits`."""
+        cache = BlockKVCache(
+            KVCacheConfig(enabled=True, decoded_bits=bits, masked_bits=bits,
+                          group_size=args.group_size,
+                          key_axis=args.key_axis, value_axis=args.value_axis),
+            n_layers,
+        )
+        for state in states:
+            state.cache = cache
+        restore = (force_routes(adapter.blocks, full.routes, prefix_len, total)
+                   if pin else None)
+        try:
+            refresh_prefix(model, states, x, prefix_len, args.block_length)
+            trace = Trace(adapter.blocks)
+            logits = logits_for_window(model, states, x, prefix_len, total,
+                                       args.block_length)
+            trace.close()
+        finally:
+            if restore:
+                restore()
+        return trace, logits
+
+    windowed_trace, windowed = windowed_run(args.bits[0])
 
     # --- and again with the expert choice pinned to the exact run's ------
     pinned_trace = pinned_logits = None
     if not args.no_pin:
-        restore = force_routes(adapter.blocks, full.routes, prefix_len, total)
-        try:
-            refresh_prefix(model, states, x, prefix_len, args.block_length)
-            pinned_trace = Trace(adapter.blocks)
-            pinned_logits = logits_for_window(model, states, x, prefix_len,
-                                              total, args.block_length)
-            pinned_trace.close()
-        finally:
-            restore()
+        pinned_trace, pinned_logits = windowed_run(args.bits[0], pin=True)
 
-    print(f"\n{total} tokens, prefix {prefix_len} cached at 16 bits (a no-op), "
-          f"window {args.block_length} recomputed")
+    print(f"\n{total} tokens, prefix {prefix_len} cached at {args.bits[0]} bits"
+          + (" (a no-op)" if args.bits[0] >= 16 else "")
+          + f", window {args.block_length} recomputed")
     print("both runs compute the same thing; every difference below is the "
           "order of the arithmetic, or something the arithmetic set off\n")
 
@@ -376,6 +391,48 @@ def main() -> int:
                   "different one. That is the mechanism to report: in a MoE "
                   "the router turns arithmetic noise into a discrete change, "
                   "so cache reuse is not free even at 16 bits.")
+
+    if len(args.bits) > 1:
+        print(f"\n=== routing against cache precision, group "
+              f"{args.group_size}, K along {args.key_axis}s " + "=" * 12)
+        print("16 bits stores the tensor untouched, so that row is what the "
+              "windowed arithmetic alone costs the routing;")
+        print("the rest add what the bits cost on top of it.\n")
+        print(f"{'bits':>5} {'routes kept':>12} {'mass lost':>11} "
+              f"{'worst layer':>13} {'argmax kept':>12}")
+
+        for bits in args.bits:
+            trace, logits = windowed_run(bits)
+            kept_all, mass_all, worst = [], [], (1.0, -1)
+            for i in range(n_layers):
+                ra, rb = full.routes.get(i), trace.routes.get(i)
+                if ra is None or rb is None:
+                    continue
+                ra_win = ra[prefix_len:total] if ra.shape[0] == total else ra
+                k = route_overlap(ra_win, rb)
+                if k != k:
+                    continue
+                kept_all.append(k)
+                if k < worst[0]:
+                    worst = (k, i)
+                wa = full.weights.get(i)
+                if wa is not None and wa.shape == ra.shape:
+                    wa_win = wa[prefix_len:total] if ra.shape[0] == total else wa
+                    mass_all.append(route_damage(ra_win, wa_win, rb)[1])
+
+            mean = lambda v: sum(v) / len(v) if v else float("nan")
+            agree_b = argmax_kept(logits)
+            worst_txt = "n/a" if worst[1] < 0 else f"{worst[1]} ({100*worst[0]:.1f}%)"
+            print(f"{bits:>5} {100*mean(kept_all):>11.2f}% "
+                  f"{100*mean(mass_all):>10.2f}% {worst_txt:>13} "
+                  f"{100*agree_b:>11.2f}%")
+
+        print("\nRead the 16-bit row first: whatever routing it loses is the "
+              "price of windowing, not of storage, and every row below carries "
+              "it too. What the bits cost is the difference from that row -- "
+              "and if the columns barely move, the routing damage was never "
+              "about precision.")
+
     return 0
 
 
