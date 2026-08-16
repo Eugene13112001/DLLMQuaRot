@@ -189,7 +189,7 @@ def main() -> int:
     n_blocks = len(bounds)
 
     header = (f"{'policy':>12} {'bits':>5} {'hit rate':>9} {'age':>6} "
-              f"{'tokens kept':>12}   per block")
+              f"{'same path':>12}   per block")
     print("\n" + header)
     print("-" * len(header))
 
