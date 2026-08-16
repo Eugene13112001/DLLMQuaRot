@@ -1027,7 +1027,7 @@ class BlockKVCache:
         across depth, which is what makes this a floor rather than a weaker
         cache.
         """
-        for store in (self._k, self._v):
+        for store in (self._k, self._v, self._wk, self._wv):
             for layer, t in list(store.items()):
                 idx = torch.randperm(t.shape[-2], generator=generator)
                 store[layer] = t.index_select(-2, idx.to(t.device))
