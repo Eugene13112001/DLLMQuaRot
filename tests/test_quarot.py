@@ -670,3 +670,25 @@ def test_norm_fusion_follows_its_consumers():
 
     fuse_norm_into_linears(norm, [lin])
     assert torch.allclose(lin(norm(x)), before, atol=1e-5)
+
+
+def test_rotate_only_refuses_to_save_an_unrotated_model():
+    """The trap that voided a night's run.
+
+    `--rotate-only` and `--rotate` used to be independent flags, so asking for
+    the first alone applied no rotation, returned in 0.0s and wrote an
+    unrotated copy under the name the caller picked. The sweep that then read
+    it compared the model against itself and would have reported a clean null.
+    """
+    from types import SimpleNamespace
+
+    from dllmquant.config import DLLMQuantConfig
+    from dllmquant.pipeline import DLLMQuantPipeline
+
+    cfg = DLLMQuantConfig(model_path="x", model_type="llada2_moe")
+    cfg.rotate_only = True
+    cfg.rotation.enabled = False
+
+    pipeline = DLLMQuantPipeline(cfg, adapter=SimpleNamespace(describe=lambda: ""))
+    with pytest.raises(ValueError, match="unrotated"):
+        pipeline.run([])

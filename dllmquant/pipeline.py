@@ -285,6 +285,14 @@ class DLLMQuantPipeline:
             if verbose:
                 print(self.report.rotation.summary())
 
+        if self.cfg.rotate_only and not self.cfg.rotation.enabled:
+            raise ValueError(
+                "rotate_only with rotation disabled would save an unrotated "
+                "copy under whatever name the caller chose, and the sweep "
+                "that reads it would compare a model against itself. Enable "
+                "the rotation or do not ask for rotate_only."
+            )
+
         if self.cfg.rotate_only:
             # A rotated model with its weights untouched. The point is the
             # cache: R3 turns the value heads so V fits into few bits, and

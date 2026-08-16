@@ -152,7 +152,12 @@ def build_config(args) -> DLLMQuantConfig:
             weight_power=args.weight_power,
         ),
         rotation=RotationConfig(
-            enabled=args.rotate,
+            # --rotate-only implies it. The two used to be independent, so
+            # `--rotate-only` on its own applied nothing, returned in 0.0s and
+            # saved an *unrotated* copy under whatever name was asked for --
+            # and the run that then measured it compared a model against
+            # itself. A flag whose name says "rotate" must rotate.
+            enabled=args.rotate or args.rotate_only,
             value_heads=not args.no_value_rotation,
             online_mlp=args.online_mlp,
             seed=args.seed,
