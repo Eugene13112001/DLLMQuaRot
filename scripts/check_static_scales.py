@@ -673,8 +673,11 @@ def main() -> int:
                 se = c.agree_k_se
                 se_txt = "     " if se != se else f"±{100 * se:3.0f}%"
                 rail_txt = "      -" if railed != railed else f"{100 * railed:6.2f}%"
+                rse = c.rel_se
+                rel_txt = (f"{c.rel:>10.3e}" if rse != rse
+                           else f"{c.rel:>10.3e}±{100 * rse / max(c.rel, 1e-12):3.0f}%")
                 print(f"{label:>22} {mean_bits:>9.2f} {compr:>6.2f} "
-                      f"{c.rel:>10.3e} {pct(c.agree)} {pct(c.agree_k)} "
+                      f"{rel_txt} {pct(c.agree)} {pct(c.agree_k)} "
                       f"{se_txt} {rail_txt}{note}")
 
             report_differences(measured, args.group_size)

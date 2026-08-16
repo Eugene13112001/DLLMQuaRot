@@ -152,6 +152,11 @@ class Comparison:
     """
 
     rel_sum: float = 0.0
+    # Sum of squares, so the mean logit error can carry a standard error.
+    # It was being read as if it were exact -- two conclusions in this project
+    # rest on differences of a few percent between rows -- while the only
+    # quantity with an error bar was the one too coarse to resolve them.
+    rel_sq_sum: float = 0.0
     n_forward: int = 0
     kept: int = 0
     n_pos: int = 0
@@ -162,10 +167,11 @@ class Comparison:
 
     def __add__(self, other: "Comparison") -> "Comparison":
         return Comparison(*(a + b for a, b in zip(
-            (self.rel_sum, self.n_forward, self.kept, self.n_pos,
-             self.kept_k, self.n_k, self.slots_hit, self.n_slots),
-            (other.rel_sum, other.n_forward, other.kept, other.n_pos,
-             other.kept_k, other.n_k, other.slots_hit, other.n_slots),
+            (self.rel_sum, self.rel_sq_sum, self.n_forward, self.kept,
+             self.n_pos, self.kept_k, self.n_k, self.slots_hit, self.n_slots),
+            (other.rel_sum, other.rel_sq_sum, other.n_forward, other.kept,
+             other.n_pos, other.kept_k, other.n_k, other.slots_hit,
+             other.n_slots),
         )))
 
     @staticmethod
@@ -187,6 +193,23 @@ class Comparison:
     @property
     def slots_k(self) -> float:
         return self._rate(self.slots_hit, self.n_slots)
+
+    @property
+    def rel_se(self) -> float:
+        """Standard error of the mean logit error, over canvases.
+
+        The rows of these sweeps differ by a few percent in `rel`, and without
+        this there is nothing to say whether a few percent is anything. It is
+        the more sensitive of the two metrics -- an average over a whole logit
+        tensor rather than a rate over a few dozen committed positions -- but
+        sensitivity without a spread is just a number with more digits.
+        """
+        n = self.n_forward
+        if n < 2:
+            return float("nan")
+        mean = self.rel_sum / n
+        var = max(self.rel_sq_sum / n - mean * mean, 0.0) * n / (n - 1)
+        return (var / n) ** 0.5
 
     @property
     def agree_k_se(self) -> float:
@@ -225,7 +248,7 @@ def compare(
     rel = float((act - ref).abs().mean() / denom)
 
     kept = act.argmax(-1) == ref.argmax(-1)             # [B, W]
-    out = Comparison(rel_sum=rel, n_forward=1,
+    out = Comparison(rel_sum=rel, rel_sq_sum=rel * rel, n_forward=1,
                      kept=int(kept.sum()), n_pos=kept.numel())
 
     conf = ref.softmax(-1).max(-1).values                # [B, W]

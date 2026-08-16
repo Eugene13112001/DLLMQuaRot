@@ -483,7 +483,7 @@ def main() -> int:
     for mask_ratio in args.mask_ratios:
         batch = canvases(mask_ratio)
         print(f"\n--- prefix mask ratio {mask_ratio:.2f} " + "-" * 37)
-        print(f"{'K storage':>16} {'eff.bits':>9} {'compr':>6} {'rel. err':>10} "
+        print(f"{'K storage':>16} {'eff.bits':>9} {'compr':>6} {'rel. err':>14} "
               f"{'argmax':>8} {'argmax@k':>8} {'':>5} {'slots@k':>8} "
               f"{'captured':>9}")
 
@@ -493,7 +493,10 @@ def main() -> int:
             cap = "        -" if captured != captured else f"{100 * captured:8.1f}%"
             bt = "         " if bits != bits else f"{bits:>9.2f}"
             ct = "      " if compr != compr else f"{compr:>6.2f}"
-            print(f"{name:>16} {bt} {ct} {c.rel:>10.3e} {pct(c.agree)} "
+            rse = c.rel_se
+            rel_txt = (f"{c.rel:>10.3e}" if rse != rse
+                       else f"{c.rel:>10.3e}±{100 * rse / max(c.rel, 1e-12):3.0f}%")
+            print(f"{name:>16} {bt} {ct} {rel_txt} {pct(c.agree)} "
                   f"{pct(c.agree_k)} {se_txt} {pct(c.slots_k)} {cap}{note}")
 
         # The chance floor first. At a high prefix mask ratio `argmax@k` is

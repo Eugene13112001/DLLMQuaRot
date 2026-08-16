@@ -16,6 +16,7 @@ implementation to keep in step.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -394,3 +395,45 @@ def test_without_a_mask_the_split_cannot_apply():
     # decoded_bits is 16, so with no mask the tensor comes back untouched.
     assert torch.isfinite(k).all()
     assert len(k.unique()) > 2**2, "the 2-bit masked width was applied to all"
+
+
+def test_the_mean_logit_error_carries_a_standard_error():
+    """It is the metric two of this project's conclusions rest on.
+
+    `argmax@k` is a rate over a few dozen committed positions and cannot
+    resolve a few percent; `rel` is an average over whole logit tensors and
+    can -- but only once its spread across canvases is carried alongside it.
+    Without that, one row reading +0.5% and the next -3.4% is unreadable.
+    """
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location(
+        "check_block_cache",
+        Path(__file__).resolve().parents[1] / "scripts" / "check_block_cache.py",
+    )
+    cbc = importlib.util.module_from_spec(spec)
+    # Registered before exec: @dataclass looks its class's module up in
+    # sys.modules and fails on None if it is not there.
+    sys.modules[spec.name] = cbc
+    spec.loader.exec_module(cbc)
+
+    torch.manual_seed(0)
+    pooled = cbc.Comparison()
+    errors = []
+    for _ in range(16):
+        ref = torch.randn(1, 4, 32)
+        act = ref + 0.1 * torch.randn_like(ref)
+        c = cbc.compare(ref, act)
+        errors.append(c.rel)
+        pooled = pooled + c
+
+    n = len(errors)
+    mean = sum(errors) / n
+    var = sum((e - mean) ** 2 for e in errors) / (n - 1)
+
+    assert pooled.rel == pytest.approx(mean, rel=1e-6)
+    assert pooled.rel_se == pytest.approx((var / n) ** 0.5, rel=1e-6)
+
+    # One canvas has a mean and no spread, and must say so rather than zero.
+    single = cbc.compare(torch.randn(1, 4, 32), torch.randn(1, 4, 32))
+    assert single.rel_se != single.rel_se
