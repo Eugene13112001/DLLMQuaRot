@@ -97,6 +97,14 @@ class KVCacheConfig:
     lowrank_rank: int = 0
     lowrank_kinds: Tuple[str, ...] = ("key",)
     lowrank_factor_bits: int = 16
+    # Extra precision for the widest channels of each head -- the competitor a
+    # low-rank correction has to beat when the residual's dominant direction is
+    # a single channel, which is what it measured out to be. Which channels
+    # those are is a property of the layer, so the index list lives in the
+    # model and the cache carries nothing for it.
+    wide_channels: int = 0
+    wide_extra_bits: int = 0
+    wide_kinds: Tuple[str, ...] = ("key",)
 
     # --- refresh policy --------------------------------------------------
     # 'never'      keep entries until the block boundary (pure staleness)
@@ -134,7 +142,7 @@ class KVCacheConfig:
             raise ValueError("clip_ratio must be in (0, 1]")
         if self.scale_book is not None and not self.scale_book.frozen:
             raise ValueError("scale_book must be frozen before it can quantize")
-        for name in ("scale_book_kinds", "lowrank_kinds"):
+        for name in ("scale_book_kinds", "lowrank_kinds", "wide_kinds"):
             bad = set(getattr(self, name)) - {"key", "value"}
             if bad:
                 raise ValueError(f"{name} must be key/value, got {sorted(bad)}")
@@ -924,6 +932,23 @@ class BlockKVCache:
                     "group spans decoded and masked positions together"
                 )
             return self._quantize_static(x, kind, layer, mask_ratio, record)
+
+        widened = cfg.wide_channels > 0 and cfg.wide_extra_bits > 0 \
+            and kind in cfg.wide_kinds
+        if widened:
+            # A width split is per channel, so it has the same trouble with the
+            # status split that a static scale does: a group runs across
+            # masked and decoded positions together. Refused rather than
+            # silently resolved either way.
+            if decoded_bits != masked_bits:
+                raise ValueError(
+                    "widened channels cannot carry two bit widths: the split "
+                    "is per channel and a group spans both statuses"
+                )
+            return mixed_precision(
+                x, decoded_bits, cfg.wide_extra_bits, cfg.wide_channels,
+                cfg.group_size, axis=axis, clip_ratio=cfg.clip_ratio,
+            )
 
         if mask is None or decoded_bits == masked_bits:
             return quantize_kv(

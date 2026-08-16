@@ -55,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dllmquant.cache import (  # noqa: E402
     BlockKVCache,
     KVCacheConfig,
+    channel_range,
     lowrank_bits,
     lowrank_residual,
     mixed_precision,
@@ -178,7 +179,10 @@ def residual_geometry(
     project expects (arXiv 2510.15731).
     """
     tok_eff, chan_eff, top_share, top_idx, idx_share = [], [], [], [], []
+    widest = []
     for t in tensors:
+        lo, hi = channel_range(t)
+        widest.append((hi - lo)[:, 0, :].topk(4, dim=-1).indices)  # [heads, 4]
         q = quantize_kv(t, bits, group, axis=axis)
         resid = (t.float() - q.float())
         u, s, vh = torch.linalg.svd(resid, full_matrices=False)
@@ -199,7 +203,20 @@ def residual_geometry(
         idx_share.append(float(share.amax(-1).mean()))
 
     modal = max(set(top_idx), key=top_idx.count)
+
+    # Do the widest channels stay the same ones from canvas to canvas? Mixed
+    # precision needs a fixed index list, and if the list moved it would be an
+    # oracle here and unbuildable in deployment. Mean pairwise overlap of each
+    # head's top four, against 4/128 by chance.
+    agree = []
+    for i, a in enumerate(widest):
+        for b in widest[i + 1:]:
+            for h in range(a.shape[0]):
+                sa, sb = set(a[h].tolist()), set(b[h].tolist())
+                agree.append(len(sa & sb) / len(sa | sb))
+
     return {
+        "widest_agreement": sum(agree) / len(agree) if agree else float("nan"),
         "top_share": sum(top_share) / len(top_share),
         "tokens": sum(tok_eff) / len(tok_eff),
         "channels": sum(chan_eff) / len(chan_eff),
@@ -317,23 +334,27 @@ def main() -> int:
         # correction that wins without this is a win with no mechanism, and a
         # spike on one axis is a cheaper fix than a rank on both.
         print(f"    {'layer':>5} {'top dir':>8} {'tokens':>7} {'channels':>9} "
-              f"{'pos':>5} {'agree':>6} {'share':>6}")
+              f"{'pos':>5} {'agree':>6} {'widest':>7}")
         for layer in sorted(collected):
             g = residual_geometry(collected[layer], args.bits, args.key_axis,
                                   args.group_size)
             note = ""
             if g["tokens"] < 4:
                 note = "   <-- a few positions: this is a sink, not a rotation"
-            elif g["channels"] < 4:
-                note = "   <-- a few channels: precision there is cheaper"
+            elif g["channels"] < 1.5:
+                note = "   <-- one channel: widening it should beat the rank"
+            elif g["channels"] < 8:
+                note = "   <-- spread over several: the rank should win"
             print(f"    {layer:>5} {100 * g['top_share']:>7.1f}% "
                   f"{g['tokens']:>7.1f} {g['channels']:>9.1f} "
                   f"{g['modal_position']:>5} {100 * g['modal_agreement']:>5.0f}% "
-                  f"{100 * g['position_share']:>5.1f}%{note}")
+                  f"{100 * g['widest_agreement']:>6.0f}%{note}")
         print("    top dir = share of residual energy in the first singular "
               "direction; tokens/channels = how many components carry it; "
-              "pos = the position that dominates it most often, agree = how "
-              "often, share = how much of that direction it holds")
+              "pos/agree = the position that dominates it most often and how "
+              "often (chance is 1/heads); widest = do the widest four channels "
+              "stay the same ones across canvases, which is what mixed "
+              "precision needs and what makes its index list free")
 
         for factor_bits in args.factor_bits:
             print(f"\n  factors at {factor_bits} bits")
@@ -406,13 +427,15 @@ def main() -> int:
                                 / len(cache.stats.lowrank_captured))
         return pooled, (sum(captured) / len(captured) if captured else float("nan"))
 
-    def make(bits, rank=0, factor_bits=16):
+    def make(bits, rank=0, factor_bits=16, wide=(0, 0)):
         return lambda: BlockKVCache(
             KVCacheConfig(enabled=True, decoded_bits=bits, masked_bits=bits,
                           group_size=args.group_size, key_axis=args.key_axis,
                           value_axis="channel", lowrank_rank=rank,
                           lowrank_kinds=("key",),
-                          lowrank_factor_bits=factor_bits),
+                          lowrank_factor_bits=factor_bits,
+                          wide_channels=wide[0], wide_extra_bits=wide[1],
+                          wide_kinds=("key",)),
             n_layers,
         )
 
@@ -420,11 +443,15 @@ def main() -> int:
     v_over = overhead_bits("channel", min(args.group_size, head_dim),
                            prefix_len, head_dim)
 
-    rows = [("flat", args.bits, 0, 16), ("flat", args.bits + 1, 0, 16)]
+    # (label, base bits, rank, factor bits, (channels, extra bits))
+    rows = [("flat", args.bits, 0, 16, (0, 0)),
+            ("flat", args.bits + 1, 0, 16, (0, 0))]
     for factor_bits in args.factor_bits:
         for rank in args.ranks:
             rows.append((f"+rank {rank} @{factor_bits}b", args.bits, rank,
-                         factor_bits))
+                         factor_bits, (0, 0)))
+    for n_ch, extra in mixed:
+        rows.append((f"+{n_ch}ch +{extra}b", args.bits, 0, 16, (n_ch, extra)))
 
     print("\n" + "=" * 78)
     print("The correction is on K only: it is the side the softmax "
@@ -457,12 +484,15 @@ def main() -> int:
         show("scrambled", floor, float("nan"), float("nan"),
              note="   <-- chance floor")
 
-        for label, bits, rank, factor_bits in rows:
-            c, captured = run_row(make(bits, rank, factor_bits), batch, mask_ratio)
-            k_bits = bits + k_over + lowrank_bits(rank, prefix_len, head_dim,
-                                                  factor_bits)
+        for label, bits, rank, factor_bits, wide in rows:
+            c, captured = run_row(make(bits, rank, factor_bits, wide), batch,
+                                  mask_ratio)
+            k_bits = (bits + k_over
+                      + lowrank_bits(rank, prefix_len, head_dim, factor_bits,
+                                     factor_scales=args.factor_scales)
+                      + wide[1] * min(wide[0], head_dim) / head_dim)
             mean_bits, compr = pair_cost(k_bits, bits + v_over)
-            name = label if rank else f"{label} {bits} bits"
+            name = label if (rank or wide[0]) else f"{label} {bits} bits"
             note = ("   <-- at the floor"
                     if c.rel >= floor.rel and c.agree <= floor.agree else "")
             show(name, c, mean_bits, compr, captured, note)

@@ -225,3 +225,54 @@ def test_the_index_list_is_the_only_thing_mixed_precision_adds():
     plain = quantize_kv(x, 3, 32, axis="token")
     assert torch.equal(mixed_precision(x, 3, 0, 4, 32), plain)
     assert torch.equal(mixed_precision(x, 3, 4, 0, 32), plain)
+
+
+def test_the_cache_can_widen_the_fat_channels_at_write():
+    """The sweep has to be able to measure the control, not only the rank."""
+    torch.manual_seed(4)
+    x = torch.randn(1, 2, 64, 32)
+    x[..., 5] *= 10.0
+
+    def err(**kw):
+        cache = BlockKVCache(
+            KVCacheConfig(enabled=True, decoded_bits=3, masked_bits=3,
+                          group_size=32, key_axis="token", **kw),
+            n_layers=1,
+        )
+        kq, vq = cache.write(0, x, x)
+        return float((kq - x).pow(2).mean()), float((vq - x).pow(2).mean())
+
+    plain_k, plain_v = err()
+    wide_k, wide_v = err(wide_channels=1, wide_extra_bits=6)
+
+    assert wide_k < plain_k / 2, "the fat channel carried most of the error"
+    assert wide_v == plain_v, "V was not asked to widen anything"
+
+    # The same refusal a static scale makes, for the same reason: the split is
+    # per channel and a group spans masked and decoded positions together.
+    split = BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=4, masked_bits=2,
+                      wide_channels=1, wide_extra_bits=4),
+        n_layers=1,
+    )
+    with pytest.raises(ValueError):
+        split.write(0, x, x, mask=torch.zeros(1, 64, dtype=torch.bool))
+
+
+def test_the_widest_channels_are_reported_as_stable_or_not():
+    """Mixed precision needs a fixed index list; if it moved, the survey's
+    control would be an oracle and unbuildable in deployment."""
+    torch.manual_seed(5)
+    shared = torch.randn(1, 4, 64, 32)
+    shared[..., [3, 9, 17, 28]] *= 12.0
+    stable = cl.residual_geometry([shared, shared + 0.01 * torch.randn_like(shared)],
+                                  3, "token", 32)
+
+    a = torch.randn(1, 4, 64, 32)
+    a[..., [1, 2, 3, 4]] *= 12.0
+    b = torch.randn(1, 4, 64, 32)
+    b[..., [20, 21, 22, 23]] *= 12.0
+    moving = cl.residual_geometry([a, b], 3, "token", 32)
+
+    assert stable["widest_agreement"] > 0.9
+    assert moving["widest_agreement"] < 0.2
