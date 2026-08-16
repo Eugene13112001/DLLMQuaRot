@@ -249,7 +249,16 @@ def main() -> int:
     print(f"\nchance floor (store shuffled along tokens): {100 * floor:.2f}% "
           "-- a row at this level carries nothing, whatever its hit rate")
 
-    print("\nRead the per-block columns left to right. Flat means each block "
+    print("\n`same path` is a SENSITIVITY, not a quality. Any perturbation "
+          "gives every step a small chance of committing a different token, "
+          "and over a hundred-odd steps the trajectories part almost surely; "
+          "everything after that differs for free. The row that proves it is "
+          "4 bits with the block refreshed at every step -- no staleness at "
+          "all, and the path still leaves. That same four-bit cache costs "
+          "nothing on GSM8K (96.0% against 92.0%), so the destination is not "
+          "worse, the route is different. Read the teacher-forced table for "
+          "damage and this one for how easily the path moves.\n")
+    print("Read the per-block columns left to right. Flat means each block "
           "pays only for its own staleness. Falling means the error "
           "accumulates: a block decoded from a stale cache writes K/V that "
           "every later block reads, and that is the one thing the window "
