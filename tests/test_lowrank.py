@@ -23,6 +23,8 @@ from dllmquant.cache import (
     KVCacheConfig,
     lowrank_bits,
     lowrank_residual,
+    mixed_precision,
+    mixed_precision_bits,
     quantize_kv,
 )
 
@@ -48,9 +50,15 @@ def test_the_plans_ten_percent_is_ten_percent_of_numbers_not_of_bits():
     assert 3 + 0.286 + lowrank_bits(8, 224, 128, 16) == pytest.approx(4.86, abs=0.01)
 
     # Four-bit factors, their own scales included, are what reaches the
-    # advertised figure.
-    cheap = 3 + 0.286 + lowrank_bits(8, 224, 128, factor_bits=4)
-    assert cheap == pytest.approx(3.94, abs=0.01)
+    # advertised figure -- and how finely those scales are cut decides most of
+    # it. One per token is T of them; at rank 1 that is five times the factor
+    # they describe, and it is what the first survey was really pricing.
+    assert 3 + 0.286 + lowrank_bits(8, 224, 128, 4) == pytest.approx(3.70, abs=0.01)
+    assert 3 + 0.286 + lowrank_bits(8, 224, 128, 4, factor_scales="token") \
+        == pytest.approx(3.94, abs=0.01)
+    assert lowrank_bits(1, 224, 128, 4) == pytest.approx(0.051, abs=1e-3)
+    assert lowrank_bits(1, 224, 128, 4, factor_scales="token") \
+        == pytest.approx(0.300, abs=1e-3)
     assert lowrank_bits(0, 224, 128) == 0.0
 
 
@@ -78,14 +86,16 @@ def test_more_rank_recovers_more_and_never_less():
     assert left[1] < left[0] < float((x - q).pow(2).mean())
 
 
-def test_one_more_flat_bit_beats_the_rank_it_costs():
-    """The arithmetic that decides whether the experiment is worth a night.
+def test_one_more_flat_bit_removes_more_error_than_a_rank_four_correction():
+    """On error alone, before either is priced.
 
     Gaussian channels with the gains this model's outlier survey reports. The
     residual is genuinely low-rank -- per-channel scales make the wide channels
-    round coarsest, so the error concentrates where they are -- and the
-    correction still loses, because it is competing with the cheapest possible
-    use of the same bits.
+    round coarsest, so the error concentrates where they are -- and a whole
+    extra bit still removes more of it than rank 4 does. Which of the two is
+    the better *deal* depends on what each costs, and that is the survey's
+    business, not this test's: with cheap factor scales the rank is several
+    times cheaper than the bit.
     """
     torch.manual_seed(0)
     x = torch.randn(1, 4, 224, 128)
@@ -168,3 +178,50 @@ def test_the_geometry_tells_a_sink_from_a_fat_channel():
     assert position["tokens"] < 5 < position["channels"]
     assert position["modal_position"] == 3
     assert position["modal_agreement"] == 1.0
+
+
+def test_widening_the_fat_channels_does_the_same_job_cheaper():
+    """The control the geometry demanded, and the reason it is the right one.
+
+    The residual's dominant direction is a single channel, and a rank-1 term is
+    an outer product: it pays for a token factor as well, which encodes
+    nothing the channel did not already say. Giving that channel more bits
+    costs a fraction and leaves the same residual.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(1, 4, 224, 128)
+    gain = torch.ones(128)
+    gain[[7, 13, 61, 90]] = torch.tensor([4.0, 9.0, 6.0, 5.0])
+    x = x * gain
+
+    q = quantize_kv(x, 3, 128, axis="token")
+    base = float((x - q).pow(2).mean().sqrt())
+
+    def left(t):
+        return float((x - t).pow(2).mean().sqrt()) / base
+
+    rank1 = left(q + lowrank_residual(x, q, 1, 4)[0])
+    widened = left(mixed_precision(x, 3, 4, 1, 128, axis="token"))
+
+    assert widened == pytest.approx(rank1, abs=0.02), "the same job"
+    assert mixed_precision_bits(3, 4, 1, 128) - 3 < lowrank_bits(1, 224, 128, 4)
+
+    # And it scales the same way: k channels tracks rank k.
+    for k in (2, 4):
+        assert left(mixed_precision(x, 3, 4, k, 128, axis="token")) == pytest.approx(
+            left(q + lowrank_residual(x, q, k, 4)[0]), abs=0.02
+        )
+
+
+def test_the_index_list_is_the_only_thing_mixed_precision_adds():
+    """Which channels are widest is a property of the layer, so the cache
+    carries nothing extra: the same groups, wider values in a few of them."""
+    assert mixed_precision_bits(3, 4, 1, 128) == pytest.approx(3.031, abs=1e-3)
+    assert mixed_precision_bits(3, 4, 0, 128) == 3.0
+    assert mixed_precision_bits(3, 8, 128, 128) == 11.0
+
+    torch.manual_seed(1)
+    x = torch.randn(1, 2, 16, 32)
+    plain = quantize_kv(x, 3, 32, axis="token")
+    assert torch.equal(mixed_precision(x, 3, 0, 4, 32), plain)
+    assert torch.equal(mixed_precision(x, 3, 4, 0, 32), plain)

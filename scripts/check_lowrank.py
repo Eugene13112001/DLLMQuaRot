@@ -57,6 +57,7 @@ from dllmquant.cache import (  # noqa: E402
     KVCacheConfig,
     lowrank_bits,
     lowrank_residual,
+    mixed_precision,
     quantize_kv,
 )
 from dllmquant.config import DLLMQuantConfig  # noqa: E402
@@ -90,6 +91,8 @@ def survey_side(
     axis: str,
     group: int,
     factor_bits: int,
+    mixed: List[Tuple[int, int]] = (),
+    factor_scales: str = "column",
 ) -> List[Tuple]:
     """Residual energy recovered per rank, priced against one more flat bit.
 
@@ -109,15 +112,19 @@ def survey_side(
     n_tokens, head_dim = tensors[0].shape[-2], tensors[0].shape[-1]
 
     base, capt, left = [], {r: [] for r in ranks}, {r: [] for r in ranks}
+    mixed_left = {m: [] for m in mixed}
     finer = []
     for t in tensors:
         q = quantize_kv(t, bits, group, axis=axis)
         b = rms(t - q)
         base.append(b)
         for r in ranks:
-            corr, c = lowrank_residual(t, q, r, factor_bits)
+            corr, c = lowrank_residual(t, q, r, factor_bits, factor_scales)
             capt[r].append(c)
             left[r].append(rms(t - q - corr) / max(b, 1e-12))
+        for n_ch, extra in mixed:
+            wide = mixed_precision(t, bits, extra, n_ch, group, axis=axis)
+            mixed_left[(n_ch, extra)].append(rms(t - wide) / max(b, 1e-12))
         finer.append(rms(t - quantize_kv(t, bits + 1, group, axis=axis)) / max(b, 1e-12))
 
     def mean(xs):
@@ -127,13 +134,22 @@ def survey_side(
     flat_left = mean(finer)
     rate = math.log(flat_left) if 0.0 < flat_left < 1.0 else float("nan")
 
+    def priced(name, captured, left_x, cost):
+        worth = (math.log(left_x) / rate
+                 if rate == rate and left_x > 0 else float("nan"))
+        return (name, captured, left_x, bits + flat_over + cost, worth,
+                worth / cost if cost else float("nan"))
+
     for r in ranks:
-        cost = lowrank_bits(r, n_tokens, head_dim, factor_bits)
-        left_r = mean(left[r])
-        worth = math.log(left_r) / rate if rate == rate and left_r > 0 else float("nan")
-        rows.append((f"rank {r}", mean(capt[r]), left_r,
-                     bits + flat_over + cost, worth, worth / cost if cost else
-                     float("nan")))
+        rows.append(priced(
+            f"rank {r}", mean(capt[r]), mean(left[r]),
+            lowrank_bits(r, n_tokens, head_dim, factor_bits, factor_scales=factor_scales),
+        ))
+    for n_ch, extra in mixed:
+        rows.append(priced(
+            f"{n_ch}ch +{extra}b", float("nan"), mean(mixed_left[(n_ch, extra)]),
+            extra * min(n_ch, head_dim) / head_dim,
+        ))
     rows.append(("+1 bit flat", float("nan"), flat_left, bits + 1 + flat_over,
                  1.0, 1.0))
     return rows
@@ -210,6 +226,20 @@ def main() -> int:
     ap.add_argument("--factor-bits", type=int, nargs="+", default=[16, 4],
                     help="precision of A and B. 16 is what LQER stores; 4 is "
                          "what the plan's 3.3-bit figure silently assumed.")
+    ap.add_argument("--factor-scales", default="column",
+                    choices=["column", "token"],
+                    help="how finely A's own scales are cut. 'token' is one "
+                         "per token, which at rank 1 costs five times the "
+                         "factor it describes -- the first survey charged "
+                         "that and was pricing scales, not the correction. "
+                         "'column' is one per rank component.")
+    ap.add_argument("--mixed", nargs="*", default=["1x4", "2x4", "4x4", "2x8"],
+                    help="mixed-precision controls, as CHANNELSxEXTRABITS: "
+                         "give the widest N channels of each head that many "
+                         "more bits. This is the control the geometry asked "
+                         "for -- the residual's dominant direction is one "
+                         "channel, and a rank-1 term pays for an entire outer "
+                         "product to encode it. Empty to skip.")
     ap.add_argument("--group-size", type=int, default=128)
     ap.add_argument("--key-axis", default="token", choices=["channel", "token"])
     ap.add_argument("--mask-ratios", type=float, nargs="+", default=[0.0, 1.0])
@@ -257,6 +287,10 @@ def main() -> int:
         return sink
 
     layers = args.layers or sorted({0, n_layers // 2, n_layers - 1})
+    mixed = []
+    for spec in args.mixed or ():
+        n_ch, extra = (int(p) for p in spec.lower().split("x"))
+        mixed.append((n_ch, extra))
 
     # ---- survey ------------------------------------------------------------
 
@@ -311,7 +345,10 @@ def main() -> int:
             )
             for layer in sorted(collected):
                 rows = survey_side(collected[layer], args.bits, args.ranks,
-                                   args.key_axis, args.group_size, factor_bits)
+                                   args.key_axis, args.group_size, factor_bits,
+                                   mixed=mixed, factor_scales=args.factor_scales)
+                best = max((r[5] for r in rows if r[0] != "+1 bit flat"),
+                           default=float("nan"))
                 for name, captured, left, bits, worth, ratio in rows:
                     cap = "      -" if captured != captured else f"{100 * captured:6.1f}%"
                     if name == "+1 bit flat":
@@ -319,6 +356,8 @@ def main() -> int:
                     else:
                         cost = bits - base_bits
                         note = "   <-- beats the bit" if ratio > 1.15 else ""
+                        if ratio == best and ratio > 1.15:
+                            note += ", best here"
                     print(f"    {layer:>5} {name:>12} {cap:>9} "
                           f"{left:>7.3f} {bits:>7.2f} {worth:>6.2f} "
                           f"{cost:>6.2f} {ratio:>6.2f}{note}")

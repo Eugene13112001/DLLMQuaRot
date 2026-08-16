@@ -363,11 +363,61 @@ def bits_per_entry(
     return bits + per_group / max(group_size, 1)
 
 
+def mixed_precision(
+    x: torch.Tensor,
+    bits: int,
+    extra_bits: int,
+    n_channels: int,
+    group_size: int,
+    axis: str = "token",
+    clip_ratio: float = 0.95,
+) -> torch.Tensor:
+    """Give the widest ``n_channels`` channels of each head ``extra_bits`` more.
+
+    The control a low-rank correction has to beat, and it exists because the
+    residual's dominant direction turned out to be a single *channel* at every
+    layer and every mask ratio -- 1.0 to 1.7 channels carrying it, against 105
+    to 154 tokens. A rank-1 term is an outer product, so it pays for T + D
+    numbers and their scales to encode something that is one channel deep.
+    Spending the same budget directly on that channel needs no factors, no
+    scales for the factors, and no matrix product at read time.
+
+    Which channels are widest is a property of the layer, not of the canvas --
+    that is the same observation the token axis won on -- so the index list is
+    model metadata and costs the cache nothing, exactly like a static scale.
+    """
+    q = quantize_kv(x, bits, group_size, clip_ratio=clip_ratio, axis=axis)
+    if n_channels <= 0 or extra_bits <= 0:
+        return q
+    fine = quantize_kv(x, bits + extra_bits, group_size, clip_ratio=clip_ratio,
+                       axis=axis)
+
+    lo, hi = channel_range(x)                       # [heads, 1, head_dim]
+    width = (hi - lo)[:, 0, :]                      # [heads, head_dim]
+    k = min(n_channels, width.shape[-1])
+    picked = torch.zeros_like(width, dtype=torch.bool)
+    picked.scatter_(-1, width.topk(k, dim=-1).indices, True)
+    return torch.where(picked[None, :, None, :].expand_as(x), fine, q)
+
+
+def mixed_precision_bits(
+    bits: int, extra_bits: int, n_channels: int, head_dim: int
+) -> float:
+    """Bits per entry for the widened channels, over the whole tensor.
+
+    The channel indices are not charged for: they are fixed per layer and live
+    in the model, like a static scale. The scale count does not change either
+    -- the same groups, wider values in a few of them.
+    """
+    return bits + extra_bits * min(n_channels, head_dim) / head_dim
+
+
 def lowrank_residual(
     x: torch.Tensor,
     xq: torch.Tensor,
     rank: int,
     factor_bits: int = 16,
+    factor_scales: str = "column",
 ) -> Tuple[torch.Tensor, float]:
     """The best rank-``r`` approximation of what quantization threw away.
 
@@ -421,9 +471,20 @@ def lowrank_residual(
     a = u[..., :r] * s[..., :r].unsqueeze(-2)        # [B, heads, T, r]
     b = vh[..., :r, :]                               # [B, heads, r, head_dim]
     if factor_bits < 16:
-        # One scale per token for A and per rank component for B, which is what
-        # `lowrank_bits` charges for.
-        a = _quantize_last_axis(a, factor_bits, a.shape[-1], False, 1.0)
+        # How finely A's own scales are cut is not a detail at low rank. One
+        # scale per token is T of them, which at rank 1 costs five times more
+        # than the factor it describes -- the accounting was measuring the
+        # scales and calling it the correction. One scale per column is r of
+        # them, coarser and nearly free. B is r scales either way.
+        if factor_scales == "token":
+            a = _quantize_last_axis(a, factor_bits, a.shape[-1], False, 1.0)
+        elif factor_scales == "column":
+            a = _quantize_last_axis(
+                a.transpose(-1, -2).contiguous(), factor_bits,
+                a.shape[-2], False, 1.0,
+            ).transpose(-1, -2)
+        else:
+            raise ValueError("factor_scales must be 'token' or 'column'")
         b = _quantize_last_axis(b, factor_bits, b.shape[-1], False, 1.0)
     return (a @ b).to(x.dtype), captured
 
@@ -434,17 +495,24 @@ def lowrank_bits(
     head_dim: int,
     factor_bits: int = 16,
     scale_bits: int = 16,
+    factor_scales: str = "column",
 ) -> float:
     """Bits per stored entry that a rank-``rank`` correction adds.
 
     Counts the factors and, when they are quantized, their own scales -- a
-    correction that needs scales to be read back is not free of them either.
+    correction that needs scales to be read back is not free of them either,
+    and at rank 1 with a scale per token they are five times the factor.
     """
     if rank <= 0:
         return 0.0
     r = min(rank, head_dim, n_tokens)
     values = r * (n_tokens + head_dim) * factor_bits
-    scales = 0 if factor_bits >= 16 else 2 * scale_bits * (n_tokens + r)
+    if factor_bits >= 16:
+        scales = 0
+    elif factor_scales == "token":
+        scales = 2 * scale_bits * (n_tokens + r)
+    else:
+        scales = 2 * scale_bits * 2 * r
     return (values + scales) / (n_tokens * head_dim)
 
 
@@ -979,5 +1047,7 @@ __all__ = [
     "bits_per_entry",
     "lowrank_residual",
     "lowrank_bits",
+    "mixed_precision",
+    "mixed_precision_bits",
     "StaticScaleBook",
 ]
