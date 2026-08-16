@@ -87,6 +87,20 @@ def main() -> int:
                    help="read the prefix from a quantized cache instead of "
                         "recomputing it at every denoising step")
     g.add_argument("--kv-bits", type=int, default=4)
+    g.add_argument("--kv-key-axis", default="token",
+                   choices=["channel", "token"],
+                   help="direction a K group runs in. Measured to matter more "
+                        "than any other knob on this cache: along channels "
+                        "four bits cost twelve points of committed decisions, "
+                        "along tokens nothing at all, because K's outliers sit "
+                        "in fixed channels and a group must not straddle them. "
+                        "Defaults to the better one -- the analytic sweeps "
+                        "default to 'channel' only so their earlier numbers "
+                        "stay reproducible, and there is no such history here.")
+    g.add_argument("--kv-value-axis", default="channel",
+                   choices=["channel", "token"],
+                   help="the same for V, where it was measured to make almost "
+                        "no difference")
     g.add_argument("--kv-group-size", type=int, default=128,
                    help="channels sharing one scale along head_dim; 128 is "
                         "the whole head on LLaDA2.0-mini")
@@ -177,6 +191,8 @@ def main() -> int:
             key_bits=args.kv_key_bits or None,
             value_bits=args.kv_value_bits or None,
             group_size=args.kv_group_size,
+            key_axis=args.kv_key_axis,
+            value_axis=args.kv_value_axis,
         )
         n_layers = len(adapter.blocks)
         print(f"\nKV cache on: {args.kv_bits} bits, group {args.kv_group_size}"
@@ -222,6 +238,8 @@ def main() -> int:
                         "kv_cache": args.kv_cache,
                         "kv_bits": args.kv_bits if args.kv_cache else None,
                         "kv_group_size": args.kv_group_size if args.kv_cache else None,
+                        "kv_key_axis": args.kv_key_axis if args.kv_cache else None,
+                        "kv_value_axis": args.kv_value_axis if args.kv_cache else None,
                         "kv_key_bits": args.kv_key_bits or None,
                         "kv_value_bits": args.kv_value_bits or None,
                         "kv_masked_bits": args.kv_masked_bits or None,
