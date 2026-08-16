@@ -271,6 +271,10 @@ def main() -> int:
     ap.add_argument("--survey-only", action="store_true",
                     help="stop after the residual spectrum. It costs one "
                          "forward per canvas and can close the question.")
+    ap.add_argument("--skip-survey", action="store_true",
+                    help="go straight to the sweep. The survey collects raw K "
+                         "for every canvas at every mask ratio, so once its "
+                         "answer is known it is the more expensive half.")
     ap.add_argument("--layers", type=int, nargs="+", default=None,
                     help="layers to print in the survey; default is first, "
                          "middle and last")
@@ -316,17 +320,23 @@ def main() -> int:
 
     # ---- survey ------------------------------------------------------------
 
-    print(f"\n=== residual spectrum, {args.bits} bits, K along "
-          f"{args.key_axis}s, group {args.group_size} " + "=" * 12)
-    print("captured = share of the residual's energy the correction recovers")
-    print("left     = what remains, as a fraction of the uncorrected residual")
-    print("bits     = total width per entry, correction and scales included")
-    print("worth    = the same error reduction, expressed in flat bits at the "
-          "exchange rate the control row measures")
-    print("x        = worth / cost. Above 1 the rank beat the bit; below it, "
-          "the bits belonged in the base width.")
+    if args.skip_survey:
+        # Worth skipping once the geometry is known: the survey collects raw K
+        # for every canvas at every mask ratio and factorizes it, which at two
+        # dozen canvases is more forwards than the sweep itself.
+        print("\nsurvey skipped")
+    else:
+        print(f"\n=== residual spectrum, {args.bits} bits, K along "
+              f"{args.key_axis}s, group {args.group_size} " + "=" * 12)
+        print("captured = share of the residual's energy the correction recovers")
+        print("left     = what remains, as a fraction of the uncorrected residual")
+        print("bits     = total width per entry, correction and scales included")
+        print("worth    = the same error reduction, expressed in flat bits at the "
+              "exchange rate the control row measures")
+        print("x        = worth / cost. Above 1 the rank beat the bit; below it, "
+              "the bits belonged in the base width.")
 
-    for mask_ratio in args.mask_ratios:
+    for mask_ratio in (() if args.skip_survey else args.mask_ratios):
         collected: Dict[int, List[torch.Tensor]] = {}
         for i in range(args.samples):
             for layer, (k, _) in raw_kv(canvas_for(i, mask_ratio), mask_ratio).items():
