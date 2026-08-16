@@ -5,7 +5,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from dllmquant.cache import BlockKVCache, KVCacheConfig, quantize_kv
+from dllmquant.cache import (
+    BlockKVCache,
+    KVCacheConfig,
+    StaticScaleBook,
+    bits_per_entry,
+    quantize_kv,
+    quantize_kv_static,
+)
 
 
 # ------------------------------------------------------------------ format
@@ -446,3 +453,198 @@ def test_each_side_of_the_cache_gets_its_own_axis():
 
     assert torch.equal(kq, quantize_kv(k, 4, 8, axis="token"))
     assert torch.equal(vq, quantize_kv(v, 4, 8, axis="channel"))
+
+
+# --------------------------------------------------------- static scales
+
+
+def test_a_static_scale_calibrated_on_the_tensor_itself_is_the_dynamic_one():
+    """The two paths must differ only in where the range came from.
+
+    A static scale is a token-axis group taken to its limit -- one group
+    covering every token of a channel -- so calibrating on the very tensor
+    being stored has to reproduce the dynamic answer exactly. If it does not,
+    every later comparison between static and dynamic is partly a comparison
+    between two quantizers, and no amount of measurement separates the two.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(1, 4, 20, 64)
+    x[..., 13] *= 30.0
+
+    book = StaticScaleBook(bits=4, buckets=(0.0,))
+    book.observe(0, "key", x, mask_ratio=0.0)
+    book.freeze()
+    scale, zero = book.get(0, "key", 0.0)
+
+    out, railed = quantize_kv_static(x, 4, scale, zero)
+    assert torch.equal(out, quantize_kv(x, 4, group_size=20, axis="token"))
+    # And the rail rate of a perfect calibration is not zero: clip_ratio puts
+    # the rails inside the observed range on purpose. This is the reference the
+    # sweep reads a calibrated book against, not a pass mark.
+    assert railed > 0.0
+
+
+def test_bits_per_entry_prices_the_scales_the_cache_carries():
+    """The headline width is honest only when the scales are free."""
+    assert bits_per_entry(4, 128) == 4.25          # 32 bits per 128 entries
+    assert bits_per_entry(4, 32) == 5.0            # a quarter of the budget
+    assert bits_per_entry(4, 128, static=True) == 4.0
+    assert bits_per_entry(16, 128) == 16.0         # 16 bits is a no-op
+    # 3.76x is what the measured four-bit cache actually compresses by; the
+    # whole point of calibrating is that it becomes 4.00x.
+    assert round(16 / bits_per_entry(4, 128), 2) == 3.76
+    assert 16 / bits_per_entry(4, 128, static=True) == 4.0
+
+
+def test_a_lookup_snaps_to_the_nearest_calibrated_bucket():
+    torch.manual_seed(1)
+    x = torch.randn(1, 2, 8, 16)
+    book = StaticScaleBook(bits=4, buckets=(0.0, 0.5, 1.0))
+    book.observe(0, "key", x, mask_ratio=0.0)
+    book.observe(0, "key", 5.0 * x, mask_ratio=1.0)
+    book.freeze()
+
+    assert book.bucket_for(0.4) == 0.5
+    near, _ = book.get(0, "key", 0.1)      # snaps to 0.0
+    far, _ = book.get(0, "key", 0.9)       # snaps to 1.0
+    assert float(far.mean()) > 4 * float(near.mean())
+    assert book.fallbacks == 0
+
+    # 0.5 was never calibrated: the nearest neighbour is used and counted.
+    book.get(0, "key", 0.5)
+    assert book.fallbacks == 1
+
+
+def test_a_static_scale_clips_what_calibration_never_saw():
+    """The failure mode that has no dynamic analogue.
+
+    A dynamic scale is derived from the tensor it stores, so nothing can fall
+    outside it. A calibrated one can, and the value is then not rounded but
+    truncated -- which is how an outlier channel loses the outlier that
+    justified giving it its own scale.
+    """
+    torch.manual_seed(2)
+    small = torch.randn(1, 2, 16, 32)
+    large = small * 4.0
+
+    book = StaticScaleBook(bits=4, buckets=(0.0,))
+    book.observe(0, "key", small, mask_ratio=0.0)
+    book.freeze()
+    scale, zero = book.get(0, "key", 0.0)
+
+    _, on_calibration = quantize_kv_static(small, 4, scale, zero)
+    _, off_calibration = quantize_kv_static(large, 4, scale, zero)
+    assert off_calibration > 4 * on_calibration
+    assert off_calibration > 0.5, "three quarters of a four-fold canvas rails"
+
+
+def test_the_envelope_never_clips_and_the_average_canvas_is_finer():
+    """Both reductions are wrong in a different direction, so both are kept."""
+    torch.manual_seed(3)
+    canvases = [torch.randn(1, 2, 16, 32) * s for s in (1.0, 1.5, 3.0)]
+
+    books = {}
+    for reduce in ("max", "mean"):
+        book = StaticScaleBook(bits=4, buckets=(0.0,), reduce=reduce)
+        for c in canvases:
+            book.observe(0, "key", c, mask_ratio=0.0)
+        books[reduce] = book.freeze()
+
+    envelope = books["max"].get(0, "key", 0.0)
+    average = books["mean"].get(0, "key", 0.0)
+    assert float(average[0].mean()) < float(envelope[0].mean()), "a finer step"
+
+    def worst_clip(params):
+        return max(quantize_kv_static(c, 4, *params)[1] for c in canvases)
+
+    assert worst_clip(average) > worst_clip(envelope), "and it pays in rails"
+
+
+def test_the_cache_reads_the_bucket_off_the_mask_it_was_handed():
+    """The selector is free: a sampler knows its mask ratio at every step."""
+    torch.manual_seed(4)
+    x = torch.randn(1, 2, 8, 16)
+    book = StaticScaleBook(bits=4, buckets=(0.0, 1.0))
+    book.observe(0, "key", x, mask_ratio=0.0)
+    book.observe(0, "value", x, mask_ratio=0.0)
+    book.observe(0, "key", 50.0 * x, mask_ratio=1.0)
+    book.observe(0, "value", 50.0 * x, mask_ratio=1.0)
+    book.freeze()
+
+    cfg = KVCacheConfig(enabled=True, decoded_bits=4, masked_bits=4,
+                        scale_book=book)
+    cache = BlockKVCache(cfg, n_layers=1)
+
+    all_masked = torch.ones(1, 8, dtype=torch.bool)
+    coarse, _ = cache.write(0, x, x, mask=all_masked)     # picks the 1.0 book
+    cache.reset()
+    none_masked = torch.zeros(1, 8, dtype=torch.bool)
+    fine, _ = cache.write(0, x, x, mask=none_masked)      # picks the 0.0 book
+
+    err_coarse = float((coarse - x).pow(2).mean())
+    err_fine = float((fine - x).pow(2).mean())
+    assert err_coarse > 100 * err_fine, (err_coarse, err_fine)
+
+    # And the wrong bucket railed nothing at all -- its range was fifty times
+    # too wide. Clipping is one way a static scale goes wrong and not the
+    # important one; a scale that covers everything and resolves nothing does
+    # not show up here at all.
+    assert cache.stats.clipped[0] == 0.0 and cache.stats.clipped[1] == 0.0
+    assert cache.stats.clipped[2] > 0.0
+
+
+def test_static_scales_refuse_the_configurations_they_cannot_serve():
+    torch.manual_seed(5)
+    x = torch.randn(1, 2, 8, 16)
+    book = StaticScaleBook(bits=4, buckets=(0.0,))
+    book.observe(0, "key", x, mask_ratio=0.0)
+
+    with pytest.raises(ValueError):        # not frozen yet
+        KVCacheConfig(scale_book=book)
+    book.freeze()
+
+    # Calibrated at four bits, asked for three: a different quantizer, not a
+    # worse one.
+    cache = BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=3, masked_bits=3, scale_book=book),
+        n_layers=1,
+    )
+    with pytest.raises(ValueError):
+        cache.write(0, x, x, mask=torch.zeros(1, 8, dtype=torch.bool))
+
+    # A per-channel group spans masked and decoded positions together, so the
+    # status split has nowhere to live.
+    split = BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=4, masked_bits=2, scale_book=book),
+        n_layers=1,
+    )
+    with pytest.raises(ValueError):
+        split.write(0, x, x, mask=torch.zeros(1, 8, dtype=torch.bool))
+
+    # No mask and no mask ratio: nothing says which bucket to use.
+    blind = BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=4, masked_bits=4, scale_book=book),
+        n_layers=1,
+    )
+    with pytest.raises(ValueError):
+        blind.write(0, x, x)
+
+
+def test_drift_measurement_does_not_enter_the_write_statistics():
+    torch.manual_seed(6)
+    x = torch.randn(1, 2, 8, 16)
+    book = StaticScaleBook(bits=4, buckets=(0.0,))
+    book.observe(0, "key", x, mask_ratio=0.0)
+    book.observe(0, "value", x, mask_ratio=0.0)
+    book.freeze()
+
+    cache = BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=4, masked_bits=4, scale_book=book),
+        n_layers=1,
+    )
+    cache.mask_ratio = 0.0
+    cache.write(0, x, x)
+    assert len(cache.stats.clipped) == 2          # one per side
+
+    cache.measure_drift(0, x, x)
+    assert len(cache.stats.clipped) == 2, "a measurement is not a write"

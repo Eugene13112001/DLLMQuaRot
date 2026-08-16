@@ -434,6 +434,13 @@ does a changed choice change the output?
     (arXiv 2605.10971) — so an error early is unrecoverable and an error late
     is not. Compare at equal **total** bits, scales included.
 
+    *Built, not yet run:* `check_static_scales.py`. It also carries the control
+    that makes a bad result interpretable — one scale per channel taken from
+    the canvas being stored, which is the same arithmetic as a perfectly
+    calibrated static scale and therefore the ceiling. Without it, "granularity
+    cost this much" and "staleness of the scales cost this much" arrive as one
+    number.
+
 ### Phase D — task numbers (GPU, hours)
 
 13. **`--kv-cache --kv-bits 16` against the 91.50% FP16 baseline.** Answers

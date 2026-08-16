@@ -77,6 +77,19 @@ class KVCacheConfig:
     value_axis: str = "channel"
     symmetric: bool = False
     clip_ratio: float = 0.95
+    # Calibrated per-channel scales, selected by the mask ratio of what is
+    # being stored. Set means the scales stop travelling with the cache: the
+    # group size and the axis no longer apply, because a static scale is
+    # per-channel by construction, and the reported bit width becomes the true
+    # one. Left None the cache quantizes dynamically, which is what every
+    # number measured before this existed did.
+    scale_book: Optional["StaticScaleBook"] = None
+    # Which sides the book applies to. K and V need not be answered together:
+    # the token axis won for K because its outliers sit in fixed channels, and
+    # that is exactly the property a calibrated scale relies on -- V never had
+    # it, and made almost no difference either way. Naming the sides keeps
+    # "static K, dynamic V" expressible instead of assumed.
+    scale_book_kinds: Tuple[str, ...] = ("key", "value")
 
     # --- refresh policy --------------------------------------------------
     # 'never'      keep entries until the block boundary (pure staleness)
@@ -112,6 +125,11 @@ class KVCacheConfig:
                 )
         if not 0 < self.clip_ratio <= 1.0:
             raise ValueError("clip_ratio must be in (0, 1]")
+        if self.scale_book is not None and not self.scale_book.frozen:
+            raise ValueError("scale_book must be frozen before it can quantize")
+        bad = set(self.scale_book_kinds) - {"key", "value"}
+        if bad:
+            raise ValueError(f"scale_book_kinds must be key/value, got {sorted(bad)}")
         if self.refresh_every < 1 or self.min_interval < 1:
             raise ValueError("refresh intervals must be >= 1")
         if self.max_interval < self.min_interval:
@@ -119,6 +137,39 @@ class KVCacheConfig:
 
 
 GROUP_AXES = ("channel", "token")
+
+
+def _affine_params(
+    x_min: torch.Tensor,
+    x_max: torch.Tensor,
+    bits: int,
+    symmetric: bool,
+    clip_ratio: float,
+) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
+    """Scale and zero point from a range, plus the integer bounds.
+
+    Factored out of the group-wise path so that a *static* scale and a dynamic
+    one are produced by the same three lines. The whole static-scale experiment
+    is a comparison between two ways of choosing ``x_min``/``x_max``, and if the
+    arithmetic downstream of that choice differed even slightly the comparison
+    would be measuring the difference in code.
+    """
+    x_max = x_max * clip_ratio
+    x_min = x_min * clip_ratio
+
+    if symmetric:
+        qmax = 2 ** (bits - 1) - 1
+        qmin = -(2 ** (bits - 1))
+        scale = torch.maximum(x_max.abs(), x_min.abs()) / max(qmax, 1)
+        zero = torch.zeros_like(scale)
+    else:
+        qmin, qmax = 0, 2**bits - 1
+        x_min = torch.minimum(x_min, torch.zeros_like(x_min))
+        x_max = torch.maximum(x_max, torch.zeros_like(x_max))
+        scale = (x_max - x_min) / (qmax - qmin)
+        zero = (qmin - x_min / scale.clamp(min=1e-8)).round()
+
+    return scale.clamp(min=1e-8), zero, qmin, qmax
 
 
 def _quantize_last_axis(
@@ -141,22 +192,10 @@ def _quantize_last_axis(
     orig_dtype, shape = x.dtype, x.shape
     xf = x.float().reshape(*shape[:-1], shape[-1] // g, g)
 
-    x_max = xf.amax(dim=-1, keepdim=True) * clip_ratio
-    x_min = xf.amin(dim=-1, keepdim=True) * clip_ratio
-
-    if symmetric:
-        qmax = 2 ** (bits - 1) - 1
-        qmin = -(2 ** (bits - 1))
-        scale = torch.maximum(x_max.abs(), x_min.abs()) / max(qmax, 1)
-        zero = torch.zeros_like(scale)
-    else:
-        qmin, qmax = 0, 2**bits - 1
-        x_min = torch.minimum(x_min, torch.zeros_like(x_min))
-        x_max = torch.maximum(x_max, torch.zeros_like(x_max))
-        scale = (x_max - x_min) / (qmax - qmin)
-        zero = (qmin - x_min / scale.clamp(min=1e-8)).round()
-
-    scale = scale.clamp(min=1e-8)
+    scale, zero, qmin, qmax = _affine_params(
+        xf.amin(dim=-1, keepdim=True), xf.amax(dim=-1, keepdim=True),
+        bits, symmetric, clip_ratio,
+    )
     q = torch.clamp(torch.round(xf / scale) + zero, qmin, qmax)
     out = ((q - zero) * scale).reshape(shape).to(orig_dtype)
     return out[..., :dim] if pad else out
@@ -206,6 +245,241 @@ def quantize_kv(
     return _quantize_last_axis(x, bits, group_size, symmetric, clip_ratio)
 
 
+def channel_range(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Min and max per (head, channel), over batch and every token.
+
+    ``x`` is [B, heads, T, head_dim]; the result is two [heads, 1, head_dim]
+    tensors, shaped to broadcast straight back against ``x``.
+
+    This is the token axis taken to its limit: one group covering every token
+    of a channel. That is the granularity a static scale must have, because a
+    scale that lives in the model cannot depend on how many tokens are in the
+    cache or where they sit.
+    """
+    if x.dim() != 4:
+        raise ValueError(f"expected [B, heads, T, head_dim], got {tuple(x.shape)}")
+    xf = x.float()
+    lo = xf.amin(dim=(0, 2), keepdim=True)[0]
+    hi = xf.amax(dim=(0, 2), keepdim=True)[0]
+    return lo, hi
+
+
+def channel_scales(
+    x: torch.Tensor,
+    bits: int,
+    symmetric: bool = False,
+    clip_ratio: float = 0.95,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """The affine scale and zero point of every channel of ``x``.
+
+    The same numbers a token-axis dynamic quantizer would compute with a group
+    spanning the whole tensor, exposed on their own because the first question
+    about static scales is not how well they quantize -- it is how far they
+    move between one canvas and the next. That is answerable from the scales
+    alone, at the cost of one forward, and it decides whether the rest of the
+    experiment is worth running.
+    """
+    lo, hi = channel_range(x)
+    scale, zero, _, _ = _affine_params(lo, hi, bits, symmetric, clip_ratio)
+    return scale, zero
+
+
+def quantize_kv_static(
+    x: torch.Tensor,
+    bits: int,
+    scale: torch.Tensor,
+    zero: torch.Tensor,
+    symmetric: bool = False,
+) -> Tuple[torch.Tensor, float]:
+    """Fake-quantize with a scale that came from somewhere else.
+
+    ``scale``/``zero`` are [heads, 1, head_dim] and broadcast over tokens: one
+    number per channel of one head, exactly what ``channel_range`` produces.
+    Returns the tensor and the fraction of entries that hit an end of the
+    integer range.
+
+    That fraction is the risk a static scale carries and a dynamic one does
+    not: a scale derived from the tensor it stores cannot be exceeded by it,
+    while a calibrated one can, and an exceeded value is not rounded, it is
+    truncated -- which is how an outlier channel loses the outlier that
+    justified giving it a scale of its own.
+
+    It is **not** zero for a perfect calibration, and reading it as if it were
+    would be the same mistake as judging a control by a transplanted
+    threshold. ``clip_ratio`` deliberately places the rails inside the observed
+    range, so the dynamic path rails too, on any tensor with tails. The number
+    means something only against that reference -- the same measurement with
+    the scales taken from the tensor itself -- which is why the sweep prints
+    the two side by side.
+    """
+    if bits >= 16:
+        return x, 0.0
+    qmin, qmax = (0, 2**bits - 1) if not symmetric else (
+        -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+    )
+    xf = x.float()
+    raw = torch.round(xf / scale) + zero
+    q = torch.clamp(raw, qmin, qmax)
+    clipped = float((raw != q).float().mean())
+    return ((q - zero) * scale).to(x.dtype), clipped
+
+
+def bits_per_entry(
+    bits: int,
+    group_size: int,
+    *,
+    symmetric: bool = False,
+    static: bool = False,
+    scale_bits: int = 16,
+) -> float:
+    """What one cached number really costs, scales included.
+
+    The number a paper reports as "4-bit cache" is 4 only if the scales are
+    free, and a dynamic scale is not: it is computed from the tensor being
+    stored, so it has to be stored beside it. One scale and one zero in fp16
+    per group is 32 bits, which is 0.25 bits per entry at a group of 128 and a
+    full 1 bit at a group of 32 -- a quarter of the budget.
+
+    A static scale lives in the model and does not scale with the cache at all
+    (80 KB for this checkpoint, against 32 GB of weights), so it contributes
+    nothing here. That is the entire arithmetic case for calibrating: the same
+    four bits become 4.00 rather than 4.25, and 16/4.25 = 3.76x becomes 4.00x.
+    """
+    if bits >= 16 or static:
+        return float(bits)
+    per_group = scale_bits if symmetric else 2 * scale_bits
+    return bits + per_group / max(group_size, 1)
+
+
+@dataclass
+class StaticScaleBook:
+    """K/V scales calibrated once and kept in the model, bucketed by mask ratio.
+
+    Two measured facts put this here rather than in a list of ideas.
+
+    *The token axis won because K's outliers sit in fixed channels* -- four bits
+    along tokens were indistinguishable from an exact cache, where the same four
+    along channels were not. A quantity that sits in a fixed channel is exactly
+    the quantity that can be measured once and reused, so the axis result and
+    this one hold each other up.
+
+    *The distribution moves with the mask ratio* -- outliers 4.1 at full mask
+    against 8.7 on a decoded canvas, decision margin 1.988 against 0.756. So one
+    static scale for the whole trajectory is the wrong object, and the fix is
+    free: the mask ratio is known at every sampler step at no cost, so the
+    scales can be bucketed by it and selected by the current one.
+
+    Calibration is a range, not a fit: ``observe`` accumulates per-channel
+    extremes and ``freeze`` turns them into the same affine scale a dynamic
+    quantizer would have produced. ``reduce`` decides what "the" range of a
+    channel is across canvases -- ``"max"`` takes the envelope, which never
+    clips and buys that with a coarser step; ``"mean"`` takes the average
+    canvas, which is finer everywhere and clips on the tails. Which is better is
+    the measurement, not an assumption, so both are here.
+    """
+
+    bits: int = 4
+    symmetric: bool = False
+    clip_ratio: float = 0.95
+    # Representative mask ratios. A lookup snaps to the nearest one, so a
+    # trajectory never lands outside the book. Five is the resolution the
+    # outlier sweep was taken at; one bucket is the ablation that says whether
+    # bucketing was needed at all.
+    buckets: Tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
+    reduce: str = "max"
+
+    def __post_init__(self) -> None:
+        if self.reduce not in ("max", "mean"):
+            raise ValueError("reduce must be 'max' or 'mean'")
+        if not self.buckets:
+            raise ValueError("need at least one bucket")
+        self.buckets = tuple(sorted(float(b) for b in self.buckets))
+        # key -> [lo, hi, n]; key is (bucket, layer, kind)
+        self._acc: Dict[Tuple[float, int, str], List] = {}
+        self._params: Dict[Tuple[float, int, str], Tuple[torch.Tensor, torch.Tensor]] = {}
+        self.frozen = False
+        # How often a lookup had to fall back to a neighbouring bucket. Counted
+        # rather than silently allowed: a fallback that nobody notices is how
+        # the CGQ artifact came to be signed with a component it never ran.
+        self.fallbacks = 0
+
+    # ------------------------------------------------------------ calibration
+
+    def bucket_for(self, mask_ratio: float) -> float:
+        return min(self.buckets, key=lambda b: abs(b - float(mask_ratio)))
+
+    def observe(self, layer: int, kind: str, x: torch.Tensor, mask_ratio: float) -> None:
+        """Add one canvas's K or V to the calibration set."""
+        if self.frozen:
+            raise RuntimeError("book is frozen; build a new one to recalibrate")
+        if kind not in ("key", "value"):
+            raise ValueError(f"kind must be 'key' or 'value', got {kind!r}")
+        lo, hi = channel_range(x)
+        key = (self.bucket_for(mask_ratio), int(layer), kind)
+        acc = self._acc.get(key)
+        if acc is None:
+            self._acc[key] = [lo.cpu(), hi.cpu(), 1]
+            return
+        lo, hi = lo.cpu(), hi.cpu()
+        if self.reduce == "max":
+            acc[0] = torch.minimum(acc[0], lo)
+            acc[1] = torch.maximum(acc[1], hi)
+        else:
+            acc[0] = acc[0] + lo
+            acc[1] = acc[1] + hi
+        acc[2] += 1
+
+    def freeze(self) -> "StaticScaleBook":
+        for key, (lo, hi, n) in self._acc.items():
+            if self.reduce == "mean":
+                lo, hi = lo / n, hi / n
+            scale, zero, _, _ = _affine_params(
+                lo, hi, self.bits, self.symmetric, self.clip_ratio
+            )
+            self._params[key] = (scale, zero)
+        if not self._params:
+            raise RuntimeError("nothing was observed: the book would quantize nothing")
+        self.frozen = True
+        return self
+
+    # ---------------------------------------------------------------- lookup
+
+    def get(
+        self, layer: int, kind: str, mask_ratio: float, device=None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not self.frozen:
+            raise RuntimeError("call freeze() before using the book")
+        bucket = self.bucket_for(mask_ratio)
+        key = (bucket, int(layer), kind)
+        if key not in self._params:
+            candidates = [b for (b, ell, k) in self._params if ell == layer and k == kind]
+            if not candidates:
+                raise KeyError(f"nothing calibrated for layer {layer}, {kind}")
+            self.fallbacks += 1
+            key = (min(candidates, key=lambda b: abs(b - bucket)), int(layer), kind)
+        scale, zero = self._params[key]
+        if device is not None:
+            scale, zero = scale.to(device), zero.to(device)
+        return scale, zero
+
+    # -------------------------------------------------------------- accounting
+
+    @property
+    def n_scalars(self) -> int:
+        """Scales plus zero points held, i.e. what the model has to carry."""
+        return 2 * sum(int(s.numel()) for s, _ in self._params.values())
+
+    def describe(self) -> str:
+        buckets = sorted({b for b, _, _ in self._params})
+        layers = len({ell for _, ell, _ in self._params})
+        kb = self.n_scalars * 2 / 1024        # fp16 storage
+        return (
+            f"static scales: {self.bits} bits, reduce={self.reduce}, "
+            f"{len(buckets)} bucket(s) {buckets}, {layers} layers, "
+            f"{self.n_scalars} numbers = {kb:.0f} KB in fp16"
+        )
+
+
 @dataclass
 class CacheStats:
     """What has to be recorded to tell the two error sources apart."""
@@ -219,6 +493,11 @@ class CacheStats:
     # measured whenever ``measure_drift`` is called.
     staleness_error: List[float] = field(default_factory=list)
     quantization_error: List[float] = field(default_factory=list)
+    # Fraction of entries a static scale railed, one entry per write. Empty
+    # under dynamic scales. Not comparable to zero -- clip_ratio rails a few
+    # percent even when the calibration is exact -- only to the same figure
+    # with the scales taken from the stored tensor itself.
+    clipped: List[float] = field(default_factory=list)
     # Which layer each of those came from. Kept because the two errors are
     # expected to behave differently with depth and the averages hide it:
     # a layer's K/V are computed from the previous layer's already-stale
@@ -234,6 +513,11 @@ class CacheStats:
     @property
     def mean_age(self) -> float:
         return sum(self.ages) / len(self.ages) if self.ages else 0.0
+
+    @property
+    def clip_rate(self) -> float:
+        """Mean share of entries clipped by a static scale, over all writes."""
+        return sum(self.clipped) / len(self.clipped) if self.clipped else 0.0
 
     def drift_by_layer(self) -> Dict[int, Dict[str, float]]:
         """Mean staleness and rounding per layer, and how many samples each.
@@ -269,6 +553,10 @@ class CacheStats:
         if self.quantization_error:
             q = sum(self.quantization_error) / len(self.quantization_error)
             lines.append(f"  quantization error {q:.5f}")
+        if self.clipped:
+            lines.append(
+                f"  clipped by static scales: {100 * self.clip_rate:.3f}% of entries"
+            )
         if self.staleness_error and self.quantization_error:
             s = sum(self.staleness_error) / len(self.staleness_error)
             q = sum(self.quantization_error) / len(self.quantization_error)
@@ -307,6 +595,12 @@ class BlockKVCache:
         self._v: Dict[int, torch.Tensor] = {}
         self._written_at: Dict[int, int] = {}
         self.step = 0
+        # Mask ratio of what is being stored, used to pick a bucket of static
+        # scales. A caller that passes ``mask`` to ``write`` need not set it --
+        # the ratio is read off the mask itself, which is the point: in a real
+        # sampler this quantity is already known at every step and costs
+        # nothing to obtain.
+        self.mask_ratio: Optional[float] = None
 
     # ------------------------------------------------------------- policy
 
@@ -358,8 +652,11 @@ class BlockKVCache:
         the two bit widths differ, masked and decoded positions are quantized
         separately.
         """
-        kq = self._quantize_with_mask(k, mask, "key")
-        vq = self._quantize_with_mask(v, mask, "value")
+        ratio = self.mask_ratio
+        if mask is not None:
+            ratio = float(mask.to(torch.float32).mean())
+        kq = self._quantize_with_mask(k, mask, "key", layer, ratio)
+        vq = self._quantize_with_mask(v, mask, "value", layer, ratio)
 
         self._k[layer], self._v[layer] = kq, vq
         self._written_at[layer] = self.step
@@ -383,13 +680,63 @@ class BlockKVCache:
     def _axis_for(self, kind: str) -> str:
         return self.cfg.key_axis if kind == "key" else self.cfg.value_axis
 
+    def _quantize_static(
+        self,
+        x: torch.Tensor,
+        kind: str,
+        layer: int,
+        mask_ratio: Optional[float],
+        record: bool = True,
+    ) -> torch.Tensor:
+        """Store one side of the cache with scales that came from calibration.
+
+        Refuses rather than falls back when the widths disagree. A scale is
+        computed for a particular number of levels, so a book calibrated at
+        four bits used at three is not a slightly worse quantizer, it is the
+        wrong one -- and it would still produce a table.
+        """
+        book = self.cfg.scale_book
+        bits = self._bits_for(kind, "decoded")
+        if bits != book.bits:
+            raise ValueError(
+                f"{kind} is configured for {bits} bits but the scale book was "
+                f"calibrated at {book.bits}"
+            )
+        if mask_ratio is None:
+            raise ValueError(
+                "static scales are selected by mask ratio: pass `mask` to "
+                "write() or set cache.mask_ratio"
+            )
+        scale, zero = book.get(layer, kind, mask_ratio, device=x.device)
+        out, clipped = quantize_kv_static(x, bits, scale, zero, book.symmetric)
+        if record:
+            self.stats.clipped.append(clipped)
+        return out
+
     def _quantize_with_mask(
-        self, x: torch.Tensor, mask: Optional[torch.Tensor], kind: str = "key"
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        kind: str = "key",
+        layer: int = 0,
+        mask_ratio: Optional[float] = None,
+        record: bool = True,
     ) -> torch.Tensor:
         cfg = self.cfg
         decoded_bits = self._bits_for(kind, "decoded")
         masked_bits = self._bits_for(kind, "masked")
         axis = self._axis_for(kind)
+
+        if cfg.scale_book is not None and kind in cfg.scale_book_kinds:
+            # A static scale is per-channel by construction, so the two
+            # status-dependent widths have nowhere to live here: a group spans
+            # every token of a channel, masked and decoded alike.
+            if decoded_bits != masked_bits:
+                raise ValueError(
+                    "static scales cannot carry two bit widths: a calibrated "
+                    "group spans decoded and masked positions together"
+                )
+            return self._quantize_static(x, kind, layer, mask_ratio, record)
 
         if mask is None or decoded_bits == masked_bits:
             return quantize_kv(
@@ -476,9 +823,12 @@ class BlockKVCache:
         fresh tensor separately isolates the rounding part.
         """
         k_cached, v_cached = self._k[layer], self._v[layer]
-        k_fresh_q = quantize_kv(
-            k_fresh, self._bits_for("key", "decoded"), self.cfg.group_size,
-            self.cfg.symmetric, self.cfg.clip_ratio, axis=self._axis_for("key"),
+        # The same code path the write took, so that the isolated rounding term
+        # is this cache's rounding and not a dynamic stand-in for it -- under a
+        # static book those are different quantizers. ``record=False``: this is
+        # a measurement, and it must not enter the write statistics.
+        k_fresh_q = self._quantize_with_mask(
+            k_fresh, None, "key", layer, self.mask_ratio, record=False
         )
 
         def rel(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -499,4 +849,14 @@ class BlockKVCache:
         }
 
 
-__all__ = ["KVCacheConfig", "BlockKVCache", "CacheStats", "quantize_kv"]
+__all__ = [
+    "KVCacheConfig",
+    "BlockKVCache",
+    "CacheStats",
+    "quantize_kv",
+    "quantize_kv_static",
+    "channel_range",
+    "channel_scales",
+    "bits_per_entry",
+    "StaticScaleBook",
+]
