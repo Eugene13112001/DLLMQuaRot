@@ -341,14 +341,19 @@ def main() -> int:
         # score, so rank 1 is the expert the router was most sure of. A tail
         # concentrated at rank k is a fifth of routes moving and almost none of
         # the computation; weight at rank 1 is the opposite.
-        total = sum(rank_total)
+        # Not `total`: that name holds the sequence length in this scope, and
+        # shadowing it here sent the next windowed forward a window running
+        # from the prefix to the drop count -- 739 minus 224, so rotary was
+        # asked for 515 positions against a 32-row query. The first two runs
+        # passed because they happened before this line.
+        n_drops = sum(rank_total)
         print(f"\nwhere the dropped experts sat in the reference ordering "
-              f"({total} drops):")
+              f"({n_drops} drops):")
         bar_unit = max(total // 40, 1)
         for rank, n in enumerate(rank_total, start=1):
-            print(f"  rank {rank}: {n:>7} ({100 * n / total:5.1f}%) "
+            print(f"  rank {rank}: {n:>7} ({100 * n / n_drops:5.1f}%) "
                   + "#" * (n // bar_unit))
-        head = sum(rank_total[:2]) / total
+        head = sum(rank_total[:2]) / n_drops
         print(f"  the two highest-scored experts account for {100 * head:.1f}% "
               f"of drops; if that is near {200 / len(rank_total):.0f}% the "
               f"rank does not matter, above it the damage is concentrated "
