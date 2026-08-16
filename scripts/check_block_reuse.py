@@ -76,6 +76,23 @@ class ScrambledWindow(BlockKVCache):
         return self._wk[layer], self._wv[layer]
 
 
+def newly_committed(x: torch.Tensor, prev: torch.Tensor, lo: int, hi: int,
+                    mask_id: int) -> List[int]:
+    """Positions inside [lo, hi) that stopped being masked since ``prev``.
+
+    The teacher-forced table is only as good as this: a position counts once,
+    on the step it commits. An earlier version compared against a canvas of
+    -1, so on the first call every position of the block read as newly
+    committed -- the whole block was scored while still masked and then
+    overwritten at step 0, which is why the first column printed 1/32 for
+    every row including the control that must print 100%.
+    """
+    return [
+        pos for pos in range(lo, min(hi, x.shape[-1]))
+        if int(x[0, pos]) != mask_id and int(prev[0, pos]) == mask_id
+    ]
+
+
 def agreement(a: torch.Tensor, b: torch.Tensor) -> float:
     return float((a == b).to(torch.float32).mean())
 
@@ -215,13 +232,19 @@ def main() -> int:
 
             def force(block_idx, step, lo, hi, logits, x, ref=ref, state=state):
                 if state["prev"] is None:
-                    state["prev"] = torch.full_like(x, -1)
-                just = (x[0] != state["prev"][0]).nonzero().flatten()
-                for pos in just.tolist():
-                    if lo <= pos < hi:
-                        hits[block_idx][1] += 1
-                        hits[block_idx][0] += int(x[0, pos] == ref[0, pos])
-                        x[0, pos] = ref[0, pos]
+                    # A canvas of masks, not of -1: with -1 every position of
+                    # the first block reads as just-committed, so the whole
+                    # block gets compared while still masked (1 of 32 agreeing
+                    # by luck) and then overwritten wholesale at step 0. The
+                    # first column was measuring that, and the blocks after it
+                    # were measured against a block that had been corrected
+                    # before it could be damaged.
+                    state["prev"] = torch.full_like(x, adapter.mask_id)
+                for pos in newly_committed(x, state["prev"], lo, hi,
+                                          adapter.mask_id):
+                    hits[block_idx][1] += 1
+                    hits[block_idx][0] += int(x[0, pos] == ref[0, pos])
+                    x[0, pos] = ref[0, pos]
                 state["prev"] = x.clone()
 
             cached_generate(adapter, prompt, gen_cfg, cache,
