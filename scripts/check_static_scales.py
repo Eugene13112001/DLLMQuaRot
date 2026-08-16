@@ -651,8 +651,8 @@ def main() -> int:
             print(f"decision margin at the committed positions: {margin:.3f} "
                   "logits")
             print(f"{'K scales':>22} {'eff.bits':>9} {'compr':>6} "
-                  f"{'rel. err':>10} {'argmax':>8} {'argmax@k':>8} {'':>5} "
-                  f"{'railed':>7}")
+                  f"{'rel. err':>10} {'vs champ':>12} {'argmax':>8} "
+                  f"{'argmax@k':>8} {'':>5} {'railed':>7}")
 
             chance, _ = run_row(dynamic_cache(16, head_dim), batch, mask_ratio,
                                 scramble=True)
@@ -673,11 +673,16 @@ def main() -> int:
                 se = c.agree_k_se
                 se_txt = "     " if se != se else f"±{100 * se:3.0f}%"
                 rail_txt = "      -" if railed != railed else f"{100 * railed:6.2f}%"
-                rse = c.rel_se
-                rel_txt = (f"{c.rel:>10.3e}" if rse != rse
-                           else f"{c.rel:>10.3e}±{100 * rse / max(c.rel, 1e-12):3.0f}%")
+                # Paired against the champion row, canvas by canvas: each
+                # row's own spread is mostly how hard the canvases were, and
+                # that cancels in the difference.
+                delta = "            "
+                if measured and label != next(iter(measured)):
+                    d, dse = c.paired_delta(measured[next(iter(measured))])
+                    if d == d:
+                        delta = f"{100 * d:+6.1f}±{100 * dse:4.1f}%"
                 print(f"{label:>22} {mean_bits:>9.2f} {compr:>6.2f} "
-                      f"{rel_txt} {pct(c.agree)} {pct(c.agree_k)} "
+                      f"{c.rel:>10.3e} {delta} {pct(c.agree)} {pct(c.agree_k)} "
                       f"{se_txt} {rail_txt}{note}")
 
             report_differences(measured, args.group_size)

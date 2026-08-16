@@ -483,9 +483,11 @@ def main() -> int:
     for mask_ratio in args.mask_ratios:
         batch = canvases(mask_ratio)
         print(f"\n--- prefix mask ratio {mask_ratio:.2f} " + "-" * 37)
-        print(f"{'K storage':>16} {'eff.bits':>9} {'compr':>6} {'rel. err':>14} "
-              f"{'argmax':>8} {'argmax@k':>8} {'':>5} {'slots@k':>8} "
-              f"{'captured':>9}")
+        print(f"{'K storage':>16} {'eff.bits':>9} {'compr':>6} {'rel. err':>10} "
+              f"{'vs base':>12} {'argmax':>8} {'argmax@k':>8} {'':>5} "
+              f"{'slots@k':>8} {'captured':>9}")
+
+        base_row = {}
 
         def show(name, c, bits, compr, captured=float("nan"), note=""):
             se = c.agree_k_se
@@ -493,10 +495,14 @@ def main() -> int:
             cap = "        -" if captured != captured else f"{100 * captured:8.1f}%"
             bt = "         " if bits != bits else f"{bits:>9.2f}"
             ct = "      " if compr != compr else f"{compr:>6.2f}"
-            rse = c.rel_se
-            rel_txt = (f"{c.rel:>10.3e}" if rse != rse
-                       else f"{c.rel:>10.3e}±{100 * rse / max(c.rel, 1e-12):3.0f}%")
-            print(f"{name:>16} {bt} {ct} {rel_txt} {pct(c.agree)} "
+            # Against the base width, paired canvas by canvas. Each row's own
+            # spread is mostly how hard the canvases were, which cancels here.
+            delta = "            "
+            if base_row and name != base_row["name"]:
+                d, dse = c.paired_delta(base_row["c"])
+                if d == d:
+                    delta = f"{100 * d:+6.1f}±{100 * dse:4.1f}%"
+            print(f"{name:>16} {bt} {ct} {c.rel:>10.3e} {delta} {pct(c.agree)} "
                   f"{pct(c.agree_k)} {se_txt} {pct(c.slots_k)} {cap}{note}")
 
         # The chance floor first. At a high prefix mask ratio `argmax@k` is
@@ -522,6 +528,8 @@ def main() -> int:
             mean_bits, compr = pair_cost(k_bits, v_bits + v_over)
             note = ("   <-- at the floor"
                     if c.rel >= floor.rel and c.agree <= floor.agree else "")
+            if not base_row:
+                base_row.update(name=label, c=c)
             show(label, c, mean_bits, compr, captured, note)
 
         warn_if_underpowered(measured, args.samples, args.commit_k)

@@ -53,7 +53,8 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass
+from typing import List
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -157,6 +158,14 @@ class Comparison:
     # rest on differences of a few percent between rows -- while the only
     # quantity with an error bar was the one too coarse to resolve them.
     rel_sq_sum: float = 0.0
+    # And the per-canvas errors themselves, in the order the canvases were
+    # measured. Rows of a sweep are run over the *same* canvases, so the
+    # spread that matters when comparing two of them is the spread of their
+    # paired difference -- which is far smaller than either row's own spread,
+    # because most of that is how hard the canvas is rather than how the cache
+    # was stored. Reading `rel_se` as the error bar on a comparison overstates
+    # it several-fold.
+    rel_values: List[float] = field(default_factory=list)
     n_forward: int = 0
     kept: int = 0
     n_pos: int = 0
@@ -166,13 +175,21 @@ class Comparison:
     n_slots: int = 0
 
     def __add__(self, other: "Comparison") -> "Comparison":
-        return Comparison(*(a + b for a, b in zip(
-            (self.rel_sum, self.rel_sq_sum, self.n_forward, self.kept,
-             self.n_pos, self.kept_k, self.n_k, self.slots_hit, self.n_slots),
-            (other.rel_sum, other.rel_sq_sum, other.n_forward, other.kept,
-             other.n_pos, other.kept_k, other.n_k, other.slots_hit,
-             other.n_slots),
-        )))
+        # Written out rather than zipped positionally: the positional form
+        # silently mispairs every field the moment one is inserted, and one
+        # was.
+        return Comparison(
+            rel_sum=self.rel_sum + other.rel_sum,
+            rel_sq_sum=self.rel_sq_sum + other.rel_sq_sum,
+            rel_values=self.rel_values + other.rel_values,
+            n_forward=self.n_forward + other.n_forward,
+            kept=self.kept + other.kept,
+            n_pos=self.n_pos + other.n_pos,
+            kept_k=self.kept_k + other.kept_k,
+            n_k=self.n_k + other.n_k,
+            slots_hit=self.slots_hit + other.slots_hit,
+            n_slots=self.n_slots + other.n_slots,
+        )
 
     @staticmethod
     def _rate(hit: int, n: int) -> float:
@@ -211,6 +228,25 @@ class Comparison:
         var = max(self.rel_sq_sum / n - mean * mean, 0.0) * n / (n - 1)
         return (var / n) ** 0.5
 
+    def paired_delta(self, base: "Comparison") -> tuple:
+        """Relative change in logit error against a baseline row, paired.
+
+        Returns the mean relative difference and its standard error, both as
+        fractions. The rows of a sweep see the same canvases in the same order,
+        so subtracting per canvas removes the thing that dominates each row's
+        own spread -- how hard that canvas is -- and leaves what the storage
+        did. It is the difference between a table that cannot resolve three
+        percent and one that can.
+        """
+        a, b = self.rel_values, base.rel_values
+        if len(a) != len(b) or len(a) < 2:
+            return float("nan"), float("nan")
+        d = [x / y - 1.0 for x, y in zip(a, b) if y > 0]
+        n = len(d)
+        mean = sum(d) / n
+        var = sum((x - mean) ** 2 for x in d) / (n - 1)
+        return mean, (var / n) ** 0.5
+
     @property
     def agree_k_se(self) -> float:
         """Binomial standard error on `argmax@k` -- the resolution of the row.
@@ -248,8 +284,8 @@ def compare(
     rel = float((act - ref).abs().mean() / denom)
 
     kept = act.argmax(-1) == ref.argmax(-1)             # [B, W]
-    out = Comparison(rel_sum=rel, rel_sq_sum=rel * rel, n_forward=1,
-                     kept=int(kept.sum()), n_pos=kept.numel())
+    out = Comparison(rel_sum=rel, rel_sq_sum=rel * rel, rel_values=[rel],
+                     n_forward=1, kept=int(kept.sum()), n_pos=kept.numel())
 
     conf = ref.softmax(-1).max(-1).values                # [B, W]
     if committable is None:
