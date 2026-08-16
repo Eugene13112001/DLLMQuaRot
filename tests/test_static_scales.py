@@ -292,3 +292,59 @@ def test_the_bucket_follows_the_mask_ratio_through_the_model():
     assert err(1.0) > 5 * err(0.0)
     assert book.fallbacks == 0
 
+
+
+# ------------------------------------------------------------- reading rows
+
+
+class _Fake:
+    """Just enough of Comparison for the two reporting helpers."""
+
+    def __init__(self, rate, n):
+        self.agree_k = rate
+        self._n = n
+
+    @property
+    def agree_k_se(self):
+        p = self.agree_k
+        return (p * (1 - p) / self._n) ** 0.5
+
+
+def test_one_standard_error_is_not_a_finding(capsys):
+    """The threshold that put two of this script's own checks in contradiction.
+
+    A 4.17-point gap against a 3.48-point standard error was printed as "real"
+    by the difference report and as "nothing in this table is a difference" by
+    the power check, three lines apart, in the same run.
+    """
+    measured = {
+        "dynamic, group 128": _Fake(0.9479, 96),
+        "dynamic, one group": _Fake(0.9583, 96),
+        "static, 1 bucket": _Fake(0.9479, 96),
+        "static, buckets": _Fake(0.9167, 96),
+    }
+    css.report_differences(measured, 128)
+    out = capsys.readouterr().out
+
+    assert "real" not in out, out
+    assert "suggestive" in out
+    assert "within the resolution" in out
+
+
+def test_the_power_check_asks_for_more_canvases_than_were_used(capsys):
+    measured = {
+        "a": _Fake(0.9479, 96), "b": _Fake(0.9583, 96), "c": _Fake(0.9167, 96),
+    }
+    css.warn_if_underpowered(measured, samples=24, commit_k=4)
+    out = capsys.readouterr().out
+
+    assert "UNDERPOWERED" in out
+    needed = int(out.split("about ")[1].split(" canvases")[0])
+    assert needed > 24, f"advised {needed} to a run that already used 24"
+
+
+def test_a_table_whose_rows_all_agree_is_named_as_such(capsys):
+    css.warn_if_underpowered({"a": _Fake(0.9, 96), "b": _Fake(0.9, 96)},
+                             samples=24, commit_k=4)
+    out = capsys.readouterr().out
+    assert "no sample size resolves them" in out

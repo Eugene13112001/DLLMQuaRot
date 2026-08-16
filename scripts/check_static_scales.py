@@ -144,12 +144,24 @@ def warn_if_underpowered(measured: Dict[str, "Comparison"], samples: int,
         # a degenerate table rather than an underpowered one -- the floor check
         # above it is what catches that.
         return
-    needed = int(p * (1 - p) / target_se**2 / max(commit_k, 1)) + 1
+    # What it would take to resolve *this* spread at two standard errors, not
+    # to reach some fixed error: an earlier version asked for a 3-point
+    # standard error and so advised 17 canvases to a run that had already used
+    # 24 and was still short.
+    needed = (int(4 * p * (1 - p) / spread**2 / max(commit_k, 1)) + 1
+              if spread > 0 else None)
     print(f"      UNDERPOWERED: argmax@k here is a rate over {n} positions "
           f"(standard error {100 * se:.1f} points) and the rows span "
-          f"{100 * spread:.1f}. Nothing in this table is a difference. "
-          f"About {needed} canvases would bring the error to "
-          f"{100 * target_se:.0f} points -- cost is linear in --samples.")
+          f"{100 * spread:.1f}. Nothing in this table is a difference.")
+    if needed is None:
+        print("      Every row scored alike, so no sample size resolves them: "
+              "the configurations are equivalent at this width, or the table "
+              "is degenerate and the floor row will say which.")
+    else:
+        print(f"      Resolving a {100 * spread:.1f}-point gap at two standard "
+              f"errors needs about {needed} canvases against the {samples} "
+              f"used here -- cost is linear in --samples. A gap this size may "
+              f"also simply not exist.")
 
 
 # ------------------------------------------------------------------ survey
@@ -371,7 +383,13 @@ def report_differences(measured: Dict[str, "Comparison"], group_size: int) -> No
         if g is None:
             continue
         lo, hi, se = g
-        verdict = "within the resolution" if abs(hi - lo) <= se else "real"
+        # Two standard errors, not one. One is a 68% interval, and calling that
+        # "real" put this line in direct contradiction with the power check
+        # printed three lines below it -- which uses two and said the same gap
+        # was nothing.
+        verdict = "real" if abs(hi - lo) > 2 * se else (
+            "suggestive" if abs(hi - lo) > se else "within the resolution"
+        )
         print(f"      {name} {lo:6.2f}% -> {hi:6.2f}%  "
               f"({hi - lo:+.2f} +- {se:.2f}, {verdict})  {why}")
 
