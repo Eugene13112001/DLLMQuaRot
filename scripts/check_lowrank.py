@@ -78,7 +78,12 @@ from check_block_cache import (  # noqa: E402
     pct,
     text_ids,
 )
-from check_static_scales import TapCache, overhead_bits, pair_cost  # noqa: E402
+from check_static_scales import (  # noqa: E402
+    TapCache,
+    overhead_bits,
+    pair_cost,
+    warn_if_underpowered,
+)
 
 
 def rms(x: torch.Tensor) -> float:
@@ -154,39 +159,6 @@ def survey_side(
     rows.append(("+1 bit flat", float("nan"), flat_left, bits + 1 + flat_over,
                  1.0, 1.0))
     return rows
-
-
-def warn_if_underpowered(measured: Dict[str, "Comparison"], samples: int,
-                         commit_k: int, target_se: float = 0.03) -> None:
-    """Say so when the table cannot resolve its own rows.
-
-    `argmax@k` is a rate over ``samples * commit_k`` positions, so at four
-    canvases it is sixteen of them: a resolution of 6.25 points and a standard
-    error near seven. Two rows that differ by less than that differ by nothing,
-    and the giveaway is an impossible ordering -- four bits scoring below
-    three, which is what the first run of this sweep printed.
-
-    Printed rather than left to the reader because this project has twice
-    published a row that the sample size could not support.
-    """
-    rates = [c.agree_k for c in measured.values() if c.agree_k == c.agree_k]
-    if len(rates) < 2:
-        return
-    n = max(samples * commit_k, 1)
-    spread = max(rates) - min(rates)
-    p = sum(rates) / len(rates)
-    se = (p * (1 - p) / n) ** 0.5
-    if se <= 0 or spread > 2 * se:
-        # A standard error of zero means every row scored identically, which is
-        # a degenerate table rather than an underpowered one -- the floor check
-        # above it is what catches that.
-        return
-    needed = int(p * (1 - p) / target_se**2 / max(commit_k, 1)) + 1
-    print(f"      UNDERPOWERED: argmax@k here is a rate over {n} positions "
-          f"(standard error {100 * se:.1f} points) and the rows span "
-          f"{100 * spread:.1f}. Nothing in this table is a difference. "
-          f"About {needed} canvases would bring the error to "
-          f"{100 * target_se:.0f} points -- cost is linear in --samples.")
 
 
 def residual_geometry(
