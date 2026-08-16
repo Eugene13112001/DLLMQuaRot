@@ -43,6 +43,7 @@ mixed precision, and it does not need a rank at all.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -95,6 +96,14 @@ def survey_side(
     Returns one row per rank plus the flat-bit reference, all as fractions of
     the uncorrected residual, so the two are directly comparable and neither
     depends on the scale of the tensor.
+
+    Each rank row also carries the comparison stated as a single number. One
+    extra flat bit multiplies the residual by some factor `f`, and that is the
+    local exchange rate between bits and error; a correction that multiplies it
+    by `g` is therefore worth `log g / log f` flat bits. Divide by what it
+    actually cost and the row says outright whether the rank beat the bit. The
+    subtraction was being done by hand off the printed table, which is where
+    arithmetic errors come from.
     """
     rows = []
     n_tokens, head_dim = tensors[0].shape[-2], tensors[0].shape[-1]
@@ -115,12 +124,18 @@ def survey_side(
         return sum(xs) / len(xs)
 
     flat_over = overhead_bits(axis, group, n_tokens, head_dim)
+    flat_left = mean(finer)
+    rate = math.log(flat_left) if 0.0 < flat_left < 1.0 else float("nan")
+
     for r in ranks:
         cost = lowrank_bits(r, n_tokens, head_dim, factor_bits)
-        rows.append((f"rank {r}", mean(capt[r]), mean(left[r]),
-                     bits + flat_over + cost))
-    rows.append(("+1 bit flat", float("nan"), mean(finer),
-                 bits + 1 + flat_over))
+        left_r = mean(left[r])
+        worth = math.log(left_r) / rate if rate == rate and left_r > 0 else float("nan")
+        rows.append((f"rank {r}", mean(capt[r]), left_r,
+                     bits + flat_over + cost, worth, worth / cost if cost else
+                     float("nan")))
+    rows.append(("+1 bit flat", float("nan"), flat_left, bits + 1 + flat_over,
+                 1.0, 1.0))
     return rows
 
 
@@ -196,8 +211,10 @@ def main() -> int:
     print("captured = share of the residual's energy the correction recovers")
     print("left     = what remains, as a fraction of the uncorrected residual")
     print("bits     = total width per entry, correction and scales included")
-    print("The row to beat is the last one in each block: the same question "
-          "asked of one more flat bit, which needs no rank and no factors.")
+    print("worth    = the same error reduction, expressed in flat bits at the "
+          "exchange rate the control row measures")
+    print("x        = worth / cost. Above 1 the rank beat the bit; below it, "
+          "the bits belonged in the base width.")
 
     for mask_ratio in args.mask_ratios:
         collected: Dict[int, List[torch.Tensor]] = {}
@@ -210,17 +227,24 @@ def main() -> int:
         for factor_bits in args.factor_bits:
             print(f"\n  factors at {factor_bits} bits")
             print(f"    {'layer':>5} {'correction':>12} {'captured':>9} "
-                  f"{'left':>7} {'bits':>7}")
+                  f"{'left':>7} {'bits':>7} {'worth':>6} {'cost':>6} {'x':>6}")
+            base_bits = args.bits + overhead_bits(
+                args.key_axis, args.group_size,
+                collected[sorted(collected)[0]][0].shape[-2], head_dim,
+            )
             for layer in sorted(collected):
                 rows = survey_side(collected[layer], args.bits, args.ranks,
                                    args.key_axis, args.group_size, factor_bits)
-                for name, captured, left, bits in rows:
+                for name, captured, left, bits, worth, ratio in rows:
                     cap = "      -" if captured != captured else f"{100 * captured:6.1f}%"
-                    note = ""
                     if name == "+1 bit flat":
-                        note = "   <-- the control"
+                        note, cost = "   <-- the control", 1.0
+                    else:
+                        cost = bits - base_bits
+                        note = "   <-- beats the bit" if ratio > 1.15 else ""
                     print(f"    {layer:>5} {name:>12} {cap:>9} "
-                          f"{left:>7.3f} {bits:>7.2f}{note}")
+                          f"{left:>7.3f} {bits:>7.2f} {worth:>6.2f} "
+                          f"{cost:>6.2f} {ratio:>6.2f}{note}")
                 print()
 
     if args.survey_only:
@@ -245,7 +269,7 @@ def main() -> int:
             canvas_cache[mask_ratio] = batch
         return canvas_cache[mask_ratio]
 
-    def run_row(make_cache, batch, mask_ratio):
+    def run_row(make_cache, batch, mask_ratio, scramble: bool = False):
         pooled, captured = Comparison(), []
         for x, reference, committable in batch:
             cache = make_cache()
@@ -253,6 +277,8 @@ def main() -> int:
             for state in states:
                 state.cache = cache
             refresh_prefix(model, states, x, prefix_len, args.block_length)
+            if scramble:
+                cache.scramble(torch.Generator().manual_seed(0))
             windowed = logits_for_window(
                 model, states, x, prefix_len, total, args.block_length
             )
@@ -292,25 +318,47 @@ def main() -> int:
         batch = canvases(mask_ratio)
         print(f"\n--- prefix mask ratio {mask_ratio:.2f} " + "-" * 37)
         print(f"{'K storage':>16} {'eff.bits':>9} {'compr':>6} {'rel. err':>10} "
-              f"{'argmax':>8} {'argmax@k':>8} {'':>5} {'captured':>9}")
+              f"{'argmax':>8} {'argmax@k':>8} {'':>5} {'slots@k':>8} "
+              f"{'captured':>9}")
 
-        results = {}
+        def show(name, c, bits, compr, captured=float("nan"), note=""):
+            se = c.agree_k_se
+            se_txt = "     " if se != se else f"±{100 * se:3.0f}%"
+            cap = "        -" if captured != captured else f"{100 * captured:8.1f}%"
+            bt = "         " if bits != bits else f"{bits:>9.2f}"
+            ct = "      " if compr != compr else f"{compr:>6.2f}"
+            print(f"{name:>16} {bt} {ct} {c.rel:>10.3e} {pct(c.agree)} "
+                  f"{pct(c.agree_k)} {se_txt} {pct(c.slots_k)} {cap}{note}")
+
+        # The chance floor first. At a high prefix mask ratio `argmax@k` is
+        # degenerate -- the measured floor is 68.75% there, against 9.38% on a
+        # decoded prefix -- so a row cannot be read without it, and the metric
+        # that still discriminates is `slots@k`, whose floor is 12.50%. This
+        # matters here specifically: the residual spectrum says the correction
+        # has something to recover exactly at full mask, which is the one place
+        # the headline metric cannot see it.
+        floor, _ = run_row(make(16), batch, mask_ratio, scramble=True)
+        show("scrambled", floor, float("nan"), float("nan"),
+             note="   <-- chance floor")
+
         for label, bits, rank, factor_bits in rows:
             c, captured = run_row(make(bits, rank, factor_bits), batch, mask_ratio)
             k_bits = bits + k_over + lowrank_bits(rank, prefix_len, head_dim,
                                                   factor_bits)
             mean_bits, compr = pair_cost(k_bits, bits + v_over)
-            se = c.agree_k_se
-            se_txt = "     " if se != se else f"±{100 * se:3.0f}%"
-            cap = "        -" if captured != captured else f"{100 * captured:8.1f}%"
             name = label if rank else f"{label} {bits} bits"
-            print(f"{name:>16} {mean_bits:>9.2f} {compr:>6.2f} {c.rel:>10.3e} "
-                  f"{pct(c.agree)} {pct(c.agree_k)} {se_txt} {cap}")
-            results[(name, round(mean_bits, 2))] = c
+            note = ("   <-- at the floor"
+                    if c.rel >= floor.rel and c.agree <= floor.agree else "")
+            show(name, c, mean_bits, compr, captured, note)
 
         print("      Compare rows at equal eff.bits, not at equal base width. "
               "A correction that beats its own base while costing more than "
               "the next bit up has not beaten anything.")
+        if mask_ratio >= 0.75:
+            print("      At this mask ratio read `slots@k`, not `argmax@k`: "
+                  "every cached position carries the same embedding row, the "
+                  "committed tokens are nearly right whatever the cache does, "
+                  "and what breaks is which positions get committed.")
 
     return 0
 
