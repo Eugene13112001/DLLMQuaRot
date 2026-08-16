@@ -276,6 +276,7 @@ def main() -> int:
     prev = 0.0
     jumped = None
     rank_total: list = []
+    kept_by_layer: dict = {}
     for i in range(n_layers):
         a = full.hidden.get(i)
         b = windowed_trace.hidden.get(i)
@@ -298,6 +299,7 @@ def main() -> int:
             n_tok = ra.shape[0]
             ra_win = ra[prefix_len:total] if n_tok == total else ra
             kept = route_overlap(ra_win, rb)
+            kept_by_layer[i] = kept
 
             wa = full.weights.get(i)
             if wa is not None and wa.shape == ra.shape:
@@ -353,18 +355,14 @@ def main() -> int:
               "grows, the routes were a symptom and the arithmetic compounds "
               "on its own.")
 
-    routed = [full.routes.get(i) is not None for i in range(n_layers)]
-    if any(routed):
-        first_route_change = next(
-            (i for i in range(n_layers)
-             if full.routes.get(i) is not None
-             and windowed_trace.routes.get(i) is not None
-             and route_overlap(
-                 full.routes[i][prefix_len:total]
-                 if full.routes[i].shape[0] == total else full.routes[i],
-                 windowed_trace.routes[i]) < 1.0),
-            None,
-        )
+    # Read off the table rather than recomputing it. An earlier version did
+    # the comparison a second time here and disagreed with the column printed
+    # three lines above -- the summary announced that every router had chosen
+    # identically while the table showed agreement down to 73%. Two
+    # computations of one quantity will eventually differ; one cannot.
+    changed = [i for i, k in sorted(kept_by_layer.items()) if k == k and k < 1.0]
+    if kept_by_layer:
+        first_route_change = changed[0] if changed else None
         if first_route_change is None:
             print("\nEvery router made the identical choice in both runs, so "
                   "the divergence is arithmetic alone -- read the hidden "
