@@ -160,13 +160,13 @@ def main() -> int:
         )
 
     def run(bits: int, policy: str, every: int, reuse: bool,
-            scramble: bool = False):
+            scramble: bool = False, on_step=None):
         outs, hits, ages = [], [], []
         cls = ScrambledWindow if scramble else BlockKVCache
         for prompt in prompts:
             cache = cls(kv_config(bits, policy, every), n_layers)
             out = cached_generate(adapter, prompt, gen_cfg, cache,
-                                  reuse_window=reuse)
+                                  reuse_window=reuse, on_step=on_step)
             outs.append(out)
             hits.append(cache.stats.window_hit_rate)
             ages.append(cache.stats.mean_window_age)
@@ -181,7 +181,29 @@ def main() -> int:
     # which is a tested identity, not an assumption.
     print("\nreference: current block recomputed every step, 16-bit storage "
           "(identical to the dense sampler by construction)")
-    reference, _, _ = run(16, "block", 4, reuse=False)
+    # The margin of each decision as it is taken, per block. Recorded on the
+    # reference because it is a property of the trajectory, not of any cache.
+    # It settles what the rising per-block columns mean: if the margin widens
+    # with block index, later decisions are simply easier and any perturbation
+    # would cost less there, which is a different claim from "the stale window
+    # is diluted by a growing exact prefix".
+    margins: List[List[float]] = [[] for _ in range(n_blocks)]
+    margin_state = {"prev": None}
+
+    def watch_margin(block_idx, step, lo, hi, logits, x):
+        if margin_state["prev"] is None or (block_idx == 0 and step == 0):
+            # Reset per prompt: the canvas restarts all-masked, and comparing
+            # it against the previous prompt's finished one would find nothing
+            # newly committed ever again.
+            margin_state["prev"] = torch.full_like(x, adapter.mask_id)
+        top2 = logits.float().topk(2, dim=-1).values
+        for pos in newly_committed(x, margin_state["prev"], lo, hi,
+                                   adapter.mask_id):
+            gap = top2[0, pos - lo, 0] - top2[0, pos - lo, 1]
+            margins[min(block_idx, n_blocks - 1)].append(float(gap))
+        margin_state["prev"] = x.clone()
+
+    reference, _, _ = run(16, "block", 4, reuse=False, on_step=watch_margin)
 
     # Taken from the adapter rather than recomputed: it decides where the
     # blocks fall when the prompt does not divide evenly.
@@ -224,10 +246,21 @@ def main() -> int:
     # cache changed *at that step*. This is the accumulation measurement; the
     # one above is the end-to-end cost.
 
-    def forced(bits: int, policy: str, every: int):
+    def forced(bits: int, policy: str, every: int, cls=BlockKVCache):
+        """Returns per-block agreement and the exact set of flipped positions.
+
+        The set is the point of the whole teacher-forced arrangement. With the
+        canvas held identical across configurations, a position is comparable
+        between runs, so the flips of one error can be intersected with the
+        flips of another. If they largely coincide, sub-additivity has an
+        explanation rather than just a measurement: both errors are knocking
+        over the same near-ties, and buying down the smaller one changes
+        nothing because those positions were already lost to the larger.
+        """
         hits = [[0, 0] for _ in bounds]
-        for prompt, ref in zip(prompts, reference):
-            cache = BlockKVCache(kv_config(bits, policy, every), n_layers)
+        flipped = set()
+        for i, (prompt, ref) in enumerate(zip(prompts, reference)):
+            cache = cls(kv_config(bits, policy, every), n_layers)
             state = {"prev": None}
 
             def force(block_idx, step, lo, hi, logits, x, ref=ref, state=state):
@@ -243,13 +276,16 @@ def main() -> int:
                 for pos in newly_committed(x, state["prev"], lo, hi,
                                           adapter.mask_id):
                     hits[block_idx][1] += 1
-                    hits[block_idx][0] += int(x[0, pos] == ref[0, pos])
+                    same = int(x[0, pos] == ref[0, pos])
+                    hits[block_idx][0] += same
+                    if not same:
+                        flipped.add((i, pos))
                     x[0, pos] = ref[0, pos]
                 state["prev"] = x.clone()
 
             cached_generate(adapter, prompt, gen_cfg, cache,
                             reuse_window=True, on_step=force)
-        return [h / max(n, 1) for h, n in hits]
+        return [h / max(n, 1) for h, n in hits], flipped
 
     print("\n" + "=" * 78)
     print("the same rows with the text held to the reference: every commit is "
@@ -257,12 +293,65 @@ def main() -> int:
           "only what the cache changed")
     print(f"\n{'policy':>12} {'bits':>5}   per block (committed tokens agreeing)")
     print("-" * 60)
+    flips: Dict[Tuple[int, str], set] = {}
     for bits in args.bits:
         for spec in args.policies:
             name, _, interval = spec.partition(":")
-            blocks = forced(bits, name, int(interval) if interval else 4)
+            blocks, flipped = forced(bits, name, int(interval) if interval else 4)
+            flips[(bits, spec)] = flipped
             print(f"{spec:>12} {bits:>5}   "
                   + " ".join(f"{100 * b:5.1f}" for b in blocks))
+
+    # The floor this table was missing. Rows near 95% do not need it; the row
+    # that never refreshes inside a block sits low enough that "badly damaged"
+    # and "carrying nothing" are not distinguishable without it.
+    floor_blocks, _ = forced(16, "block", 4, cls=ScrambledWindow)
+    print(f"{'scrambled':>12} {'--':>5}   "
+          + " ".join(f"{100 * b:5.1f}" for b in floor_blocks)
+          + "   <-- chance floor")
+    if margins and any(margins):
+        print(f"\n{'':>12} {'':>5}   decision margin per block, logits: "
+              + " ".join(f"{sum(m) / len(m):5.2f}" if m else "  n/a"
+                         for m in margins))
+        print("      A margin that widens left to right means later decisions "
+              "are simply harder to move, and the rising columns above would "
+              "say little about the cache. A flat one leaves dilution as the "
+              "explanation.")
+
+    # ---- do the two errors flip the same positions? -----------------------
+    #
+    # The measurement behind sub-additivity, and the reason it is a mechanism
+    # rather than a coincidence. Under teacher forcing the canvas is identical
+    # across configurations, so a position is the same position in every run
+    # and the flip sets can be intersected.
+
+    low = min(args.bits)
+    base = flips.get((low, "every_n:1"))
+    if base is not None:
+        print("\n" + "=" * 78)
+        print(f"rounding alone ({low} bits, refreshed every step) flips "
+              f"{len(base)} committed positions")
+        print(f"\n{'staleness row':>16} {'flips':>6} {'shared':>8} "
+              f"{'of smaller':>11} {'union':>7} {'together':>9}")
+        for spec in args.policies:
+            stale = flips.get((16, spec))
+            both = flips.get((low, spec))
+            if stale is None or both is None or not stale:
+                continue
+            shared = base & stale
+            smaller = min(len(base), len(stale))
+            print(f"{spec:>16} {len(stale):>6} {len(shared):>8} "
+                  f"{100 * len(shared) / max(smaller, 1):>10.0f}% "
+                  f"{len(base | stale):>7} {len(both):>9}")
+        print("\n`together` against `union` is the whole question. Equal to "
+              "the union means the two errors are independent and their "
+              "damage adds; well below it means they are knocking over the "
+              "same near-ties, and buying down the smaller error changes "
+              "nothing because those positions were already lost to the "
+              "larger. The second is what the allocation rule rests on: match "
+              "the refresh interval to the bit width and stop paying for "
+              "whichever error is not the binding one.")
+
     print("\nFalling left to right here is accumulation and nothing else: the "
           "canvas is identical, so a later block that agrees less is reading a "
           "cache that earlier blocks damaged.")
