@@ -437,3 +437,138 @@ def test_the_mean_logit_error_carries_a_standard_error():
     # One canvas has a mean and no spread, and must say so rather than zero.
     single = cbc.compare(torch.randn(1, 4, 32), torch.randn(1, 4, 32))
     assert single.rel_se != single.rel_se
+
+
+# ------------------------------------------------- reusing the current block
+
+
+from dllmquant.models.llada2_local import cached_generate  # noqa: E402
+
+
+def test_reusing_the_current_block_is_off_by_default():
+    """Every number this project has taken was taken with it off, so the flag
+    must default to the path that produced them and change nothing."""
+    adapter, cache, cfg = _sampler_setup(bits=16)
+    prompt = torch.randint(0, VOCAB - 1, (1, BLOCK))
+
+    # Dense first: cached_generate removes the attention forward on its way
+    # out, and the dense path needs it.
+    dense = _dense_generate(adapter, prompt, cfg)
+    out = cached_generate(adapter, prompt, cfg, cache,
+                          rotary_fn=_rotary, attention_fn=_attention)
+
+    assert cache.stats.window_refreshes == 0
+    assert cache.stats.window_reuses == 0
+    assert torch.equal(out, dense)
+
+
+def test_a_reused_block_is_stored_once_and_read_after():
+    adapter, cache, cfg = _sampler_setup(bits=16)
+    cache.cfg.policy = "block"          # never refresh inside a block
+    prompt = torch.randint(0, VOCAB - 1, (1, BLOCK))
+
+    cached_generate(adapter, prompt, cfg, cache, reuse_window=True,
+                    rotary_fn=_rotary, attention_fn=_attention)
+
+    n_layers = len(adapter.model.model.layers)
+    # One write per layer per block, and every later step reads.
+    assert cache.stats.window_refreshes >= n_layers
+    assert cache.stats.window_reuses > 0
+    assert 0.0 < cache.stats.window_hit_rate < 1.0
+    assert cache.stats.mean_window_age > 0
+
+
+def test_a_reused_block_is_wrong_the_moment_a_token_commits():
+    """Staleness, isolated from rounding at 16 bits, measured on the logits.
+
+    Not on the sampler's output: the stand-in model commits the same token
+    everywhere, so a decision has nowhere to move and the test would pass
+    while measuring nothing. The logits are where the effect is, and this is
+    the only configuration in the codebase where the cache can be wrong for a
+    reason other than its bit width.
+    """
+    model, cache, states = _setup(bits=16)
+    x = torch.randint(0, VOCAB - 1, (1, 12))
+    prefix_len = 8
+
+    refresh_prefix(model, states, x, prefix_len, BLOCK)
+    logits_for_window(model, states, x, prefix_len, 12, BLOCK, window="record")
+
+    # A token in the current block commits: everything stored above is now
+    # keyed on a canvas that no longer exists.
+    moved = x.clone()
+    moved[0, prefix_len + 1] = (int(x[0, prefix_len + 1]) + 1) % (VOCAB - 1)
+
+    fresh = logits_for_window(model, states, moved, prefix_len, 12, BLOCK)
+    stale = logits_for_window(model, states, moved, prefix_len, 12, BLOCK,
+                              window="reuse")
+
+    full = _full_logits(model, moved)[:, prefix_len:12]
+    assert torch.allclose(fresh, full, atol=1e-5, rtol=1e-4), "the exact path moved"
+    assert not torch.allclose(stale, fresh, atol=1e-4), "reuse cost nothing"
+    assert cache.stats.window_reuses == len(model.model.layers)
+
+
+def test_staleness_grows_with_what_has_been_committed_since():
+    model, cache, states = _setup(bits=16)
+    x = torch.randint(0, VOCAB - 1, (1, 12))
+    prefix_len = 8
+
+    refresh_prefix(model, states, x, prefix_len, BLOCK)
+    logits_for_window(model, states, x, prefix_len, 12, BLOCK, window="record")
+
+    def drift(n_committed):
+        moved = x.clone()
+        for i in range(n_committed):
+            moved[0, prefix_len + i] = (int(x[0, prefix_len + i]) + 1) % (VOCAB - 1)
+        fresh = logits_for_window(model, states, moved, prefix_len, 12, BLOCK)
+        stale = logits_for_window(model, states, moved, prefix_len, 12, BLOCK,
+                                  window="reuse")
+        return float((stale - fresh).abs().mean())
+
+    one, three = drift(1), drift(3)
+    assert 0.0 < one < three, (one, three)
+
+
+def test_the_block_store_does_not_survive_the_block():
+    """Indexed by layer, not by position: carrying it over would hand the next
+    block the previous one's keys at the previous one's positions."""
+    cache = BlockKVCache(KVCacheConfig(enabled=True, decoded_bits=16,
+                                       masked_bits=16), n_layers=1)
+    k = torch.randn(1, 2, 4, 8)
+    cache.write_window(0, k, k)
+    assert cache.has_window(0)
+
+    cache.reset_window()
+    assert not cache.has_window(0)
+    with pytest.raises(KeyError):
+        cache.read_window(0)
+
+
+def test_the_two_stores_answer_to_different_clocks():
+    """The prefix is rewritten once per block whatever the policy says; the
+    current block ages every step. One interval for both would tie the cheap
+    decision to the expensive one."""
+    cache = BlockKVCache(
+        KVCacheConfig(enabled=True, policy="every_n", refresh_every=3), n_layers=1
+    )
+    k = torch.randn(1, 2, 4, 128)
+    cache.write(0, k, k)
+    cache.write_window(0, k, k)
+
+    for step in (1, 2):
+        cache.step = step
+        assert cache.should_refresh_window(0, step) is False
+    cache.step = 3
+    assert cache.should_refresh_window(0, 3) is True
+
+    # And under 'block' the current block is never refreshed inside it, while
+    # the prefix still is at the boundary.
+    cache.cfg.policy = "block"
+    assert cache.should_refresh_window(0, 99) is False
+    assert cache.should_refresh(0, 99, block_boundary=True) is True
+
+
+def test_an_empty_block_store_asks_to_be_filled():
+    cache = BlockKVCache(KVCacheConfig(enabled=True, policy="block"), n_layers=1)
+    assert cache.should_refresh_window(0, step=0) is True

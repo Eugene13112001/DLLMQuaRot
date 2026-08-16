@@ -660,6 +660,13 @@ class CacheStats:
     refreshes: int = 0
     reuses: int = 0
     entries_written: int = 0
+    # The current block's store, counted apart from the prefix's. Pooling them
+    # would hide the quantity the refresh policy is tuned against: the prefix
+    # is rewritten once per block whatever the policy says, so a pooled hit
+    # rate mostly reports the block length.
+    window_refreshes: int = 0
+    window_reuses: int = 0
+    window_ages: List[int] = field(default_factory=list)
     # Age (in denoising steps) of every entry at the moment it was read.
     ages: List[int] = field(default_factory=list)
     # Relative error between the cached tensor and a freshly computed one,
@@ -690,6 +697,21 @@ class CacheStats:
     @property
     def mean_age(self) -> float:
         return sum(self.ages) / len(self.ages) if self.ages else 0.0
+
+    @property
+    def window_hit_rate(self) -> float:
+        """Share of steps that reused the current block instead of recomputing.
+
+        This is the number the whole current-block experiment turns on: it is
+        what is saved, and staleness is what it costs.
+        """
+        total = self.window_refreshes + self.window_reuses
+        return self.window_reuses / total if total else 0.0
+
+    @property
+    def mean_window_age(self) -> float:
+        return (sum(self.window_ages) / len(self.window_ages)
+                if self.window_ages else 0.0)
 
     @property
     def clip_rate(self) -> float:
@@ -774,6 +796,15 @@ class BlockKVCache:
         self._k: Dict[int, torch.Tensor] = {}
         self._v: Dict[int, torch.Tensor] = {}
         self._written_at: Dict[int, int] = {}
+        # The block being decoded right now, stored separately from the prefix.
+        # The two are different objects: a closed block cannot change, so the
+        # prefix is exact and only rounding is at stake, while the current
+        # block's tokens are committed between steps and its K/V go stale the
+        # moment they do. Keeping them apart is what lets the two errors be
+        # measured apart -- which is the whole reason this model was chosen.
+        self._wk: Dict[int, torch.Tensor] = {}
+        self._wv: Dict[int, torch.Tensor] = {}
+        self._window_written_at: Dict[int, int] = {}
         self.step = 0
         # Mask ratio of what is being stored, used to pick a bucket of static
         # scales. A caller that passes ``mask`` to ``write`` need not set it --
@@ -1001,6 +1032,75 @@ class BlockKVCache:
                 idx = torch.randperm(t.shape[-2], generator=generator)
                 store[layer] = t.index_select(-2, idx.to(t.device))
 
+    # ------------------------------------------------------- current block
+
+    def should_refresh_window(
+        self, layer: int, step: int, mask_ratio: float = 1.0
+    ) -> bool:
+        """Whether the block being decoded must recompute its own K/V.
+
+        Separate from ``should_refresh`` because the two stores answer to
+        different clocks: the prefix is rewritten once per block boundary and
+        is exact in between, while the current block ages every time a token in
+        it commits. A single interval for both would tie the cheap decision to
+        the expensive one.
+        """
+        if layer not in self._wk:
+            return True
+        p = self.cfg.policy
+        if p in ("never", "block"):
+            return False
+        age = step - self._window_written_at[layer]
+        if p == "every_n":
+            return age >= self.cfg.refresh_every
+        if p == "mask_ratio":
+            return age >= self.interval_for(mask_ratio)
+        raise AssertionError(f"unhandled policy {p}")
+
+    def write_window(
+        self,
+        layer: int,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Quantize and store the current block's K/V; returns what is stored."""
+        ratio = self.mask_ratio
+        if mask is not None:
+            ratio = float(mask.to(torch.float32).mean())
+        kq = self._correct(k, self._quantize_with_mask(k, mask, "key", layer, ratio),
+                           "key")
+        vq = self._correct(v, self._quantize_with_mask(v, mask, "value", layer, ratio),
+                           "value")
+        self._wk[layer], self._wv[layer] = kq, vq
+        self._window_written_at[layer] = self.step
+        self.stats.window_refreshes += 1
+        return kq, vq
+
+    def read_window(self, layer: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        if layer not in self._wk:
+            raise KeyError(f"layer {layer} has no current block cached")
+        self.stats.window_reuses += 1
+        self.stats.window_ages.append(self.step - self._window_written_at[layer])
+        return self._wk[layer], self._wv[layer]
+
+    def has_window(self, layer: int) -> bool:
+        return layer in self._wk
+
+    def window_age(self, layer: int) -> int:
+        return self.step - self._window_written_at.get(layer, self.step)
+
+    def reset_window(self) -> None:
+        """Drop the current block's entries. Called when the block moves on.
+
+        Not optional: the store is indexed by layer, not by position, so
+        carrying it across a block boundary would hand the next block the
+        previous one's keys at the previous one's positions.
+        """
+        self._wk.clear()
+        self._wv.clear()
+        self._window_written_at.clear()
+
     def read(self, layer: int) -> Tuple[torch.Tensor, torch.Tensor]:
         if layer not in self._k:
             raise KeyError(f"layer {layer} has nothing cached")
@@ -1021,6 +1121,7 @@ class BlockKVCache:
         self._k.clear()
         self._v.clear()
         self._written_at.clear()
+        self.reset_window()
         self.step = 0
 
     # ----------------------------------------------------------- analysis

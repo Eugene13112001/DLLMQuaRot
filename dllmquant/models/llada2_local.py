@@ -56,12 +56,20 @@ class CacheState:
     test meaningful.
     """
 
-    __slots__ = ("mode", "cache", "prefix_len", "mask")
+    __slots__ = ("mode", "cache", "prefix_len", "mask", "window", "window_mask")
 
     def __init__(self) -> None:
         self.mode = "off"  # off | record | use
         self.cache: Optional[BlockKVCache] = None
         self.prefix_len = 0
+        # What to do with the K/V of the block being decoded:
+        #   "fresh"   recompute and use, storing nothing  (the exact variant)
+        #   "record"  recompute, use, and store for later steps
+        #   "reuse"   read the stored ones and ignore the fresh ones
+        # This is the only place staleness can enter at all -- the prefix is
+        # exact by construction -- so it is named rather than inferred.
+        self.window = "fresh"
+        self.window_mask: Optional[torch.Tensor] = None
         # Which cached positions still carry the mask token. Passed through to
         # the cache because a masked position's K/V is about to be overwritten
         # and a decoded one's is final, so the two need not be stored at the
@@ -133,6 +141,16 @@ def _make_forward(rotary_fn: Callable, attention_fn: Callable):
             )
         elif state.mode == "use":
             past_key, past_value = state.cache.read(self.layer_idx)
+            if state.window == "reuse":
+                # Deliberately stale: these were computed before the tokens of
+                # this block were committed. The queries stay fresh, because a
+                # sampler step reads the canvas as it is now -- so what is
+                # measured here is exactly the mismatch a reused block causes.
+                key, value = state.cache.read_window(self.layer_idx)
+            elif state.window == "record":
+                key, value = state.cache.write_window(
+                    self.layer_idx, key, value, mask=state.window_mask
+                )
             key = torch.cat([past_key, key], dim=-2)
             value = torch.cat([past_value, value], dim=-2)
 
@@ -201,11 +219,15 @@ def _set_mode(
     mode: str,
     prefix_len: int = 0,
     mask: Optional[torch.Tensor] = None,
+    window: str = "fresh",
+    window_mask: Optional[torch.Tensor] = None,
 ) -> None:
     for state in states:
         state.mode = mode
         state.prefix_len = prefix_len
         state.mask = mask
+        state.window = window
+        state.window_mask = window_mask
 
 
 @torch.no_grad()
@@ -304,8 +326,18 @@ def logits_for_window(
     lo: int,
     hi: int,
     block_length: int,
+    window: str = "fresh",
+    window_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Logits for positions ``[lo, hi)``, reading the prefix from the cache."""
+    """Logits for positions ``[lo, hi)``, reading the prefix from the cache.
+
+    ``window`` decides what happens to the current block's own K/V: recomputed
+    and thrown away (``"fresh"``, the exact variant every earlier number here
+    was taken with), recomputed and stored (``"record"``), or read back from
+    the store (``"reuse"``). Only the last one introduces staleness, and it is
+    the only configuration in this file where the cache can be wrong for a
+    reason other than its bit width.
+    """
     dtype = next(model.parameters()).dtype
     mask = block_causal_mask(
         hi, block_length, rows=(lo, hi), batch_size=x.shape[0],
@@ -313,7 +345,7 @@ def logits_for_window(
     )
     position_ids = torch.arange(lo, hi, device=x.device).unsqueeze(0)
 
-    _set_mode(states, "use", lo)
+    _set_mode(states, "use", lo, window=window, window_mask=window_mask)
     try:
         return forward_window(model, x[:, lo:hi], position_ids, mask)
     finally:
@@ -327,6 +359,7 @@ def cached_generate(
     cfg,
     cache: BlockKVCache,
     *,
+    reuse_window: bool = False,
     rotary_fn: Optional[Callable] = None,
     attention_fn: Optional[Callable] = None,
 ):
@@ -337,16 +370,21 @@ def cached_generate(
     numbers, and a conditional inside it puts them one careless edit away from
     changing; here the untouched path stays untouched by construction.
 
-    This is the *exact* variant of the cache: the prefix is refreshed once at
-    each block boundary and the current block is recomputed at every step, so
-    staleness is structurally zero and the only error is what four-bit storage
-    put there. Reusing the current block across steps -- where staleness
-    actually arises -- is the next increment, and it needs the refresh policies
-    that this one deliberately does not exercise.
+    With ``reuse_window=False`` this is the *exact* variant: the prefix is
+    refreshed once per block boundary and the current block is recomputed at
+    every step, so staleness is structurally zero and the only error is what
+    four-bit storage put there. Correctness is then checkable rather than
+    arguable -- with a 16-bit cache it must commit exactly the tokens the dense
+    sampler commits.
 
-    Because staleness is zero, correctness is checkable rather than arguable:
-    with a 16-bit cache this must commit exactly the tokens the dense sampler
-    commits.
+    With ``reuse_window=True`` the current block is cached too, refreshed on
+    the config's policy, and *that* is where staleness enters. The two errors
+    the thesis is about finally meet in one loop: rounding is redrawn at every
+    write, staleness grows with the number of tokens committed since the last
+    one. Nothing in the analytic tables can see their interaction, because
+    those measure one window against a clean prefix; this measures a whole
+    trajectory, which is also the only place accumulation across blocks can
+    show up.
     """
     device = next(adapter.model.parameters()).device
     prompt_ids = prompt_ids.to(device)
@@ -377,17 +415,35 @@ def cached_generate(
                 adapter.model, states, x, lo, block_length, mask_id=adapter.mask_id
             )
 
+            # The store is indexed by layer, not by position, so last block's
+            # keys would be read at this block's positions.
+            cache.reset_window()
+
             block_mask = x[:, lo:hi] == adapter.mask_id
             budget = get_num_transfer_tokens(block_mask, schedule[block_idx])
 
             for step in range(schedule[block_idx]):
+                still_masked = x[:, lo:hi] == adapter.mask_id
+                window = "fresh"
+                if reuse_window:
+                    # One decision for every layer: the policies here are
+                    # uniform, so layer 0 speaks for all of them. Per-layer
+                    # intervals -- which phase B's router fragility argues for
+                    # -- would be decided here and nowhere else.
+                    ratio = float(still_masked.to(torch.float32).mean())
+                    window = ("record"
+                              if cache.should_refresh_window(0, cache.step, ratio)
+                              else "reuse")
+
                 logits = logits_for_window(
-                    adapter.model, states, x, lo, hi, block_length
+                    adapter.model, states, x, lo, hi, block_length,
+                    window=window,
+                    window_mask=still_masked if window == "record" else None,
                 )
+                cache.advance()
                 probs = torch.softmax(logits.to(torch.float32), dim=-1)
                 confidence, proposal = probs.max(dim=-1)
 
-                still_masked = x[:, lo:hi] == adapter.mask_id
                 k = int(budget[0, step])
                 if k <= 0 or not still_masked.any():
                     continue
