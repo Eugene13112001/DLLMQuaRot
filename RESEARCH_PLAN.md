@@ -421,12 +421,23 @@ does a changed choice change the output?
     recomputed every step. A clean negative — the autoregressive machinery does
     not transfer — is as publishable as a positive, and follows from sinks
     moving.
-11. **Low-rank correction**, `K ≈ Q₃(K) + A·B`. Arithmetic: a 224 × 128 prefix
-    is 28672 numbers, a rank-8 correction is 2816, so 10% overhead and 3 bits +
-    rank 8 ≈ 3.3 bits effective against 4 flat. The hypothesis is specific, not
+11. **Low-rank correction**, `K ≈ Q₃(K) + A·B`. The hypothesis is specific, not
     exploratory: keep V at three bits flat and give the whole rank budget to K,
-    because one bit of K is worth eleven of V. Mandatory control — the same
-    bits spent on a finer group instead.
+    because K is what the softmax exponentiates. Mandatory control — the same
+    bits spent on a finer group, or simply spent flat.
+
+    *The arithmetic this item was justified by was wrong.* A 224 × 128 prefix
+    is 28672 entries and a rank-8 correction is 2816 numbers, so "10% overhead,
+    3 bits + rank 8 ≈ 3.3 bits effective" — but that is 10% of the *count*, and
+    the entries are three bits while the numbers are fp16. In bits the
+    correction costs 1.57 per entry: 4.86 total against 4.29 for four bits
+    flat. It reaches 3.3 only with four-bit factors, which have an error of
+    their own, so factor precision is a swept axis in `check_lowrank.py` rather
+    than a constant. On synthetic channels with this model's measured outlier
+    gains the residual is genuinely low-rank — per-channel scales make the wide
+    channels round coarsest — and the correction still loses to one flat bit.
+    Which is what the survey in that script is for: it settles this on real
+    tensors at the cost of one forward per canvas.
 12. **Static scales bucketed by mask ratio.** Scales are dynamic now, as in
     KIVI. The diffusion move is to calibrate per mask-ratio bucket and select
     by the current one. External justification: attributes commit on distinct

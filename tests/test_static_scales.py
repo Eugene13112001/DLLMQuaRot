@@ -254,3 +254,4 @@ def test_the_bucket_follows_the_mask_ratio_through_the_model():
 
     assert err(1.0) > 5 * err(0.0)
     assert book.fallbacks == 0
+

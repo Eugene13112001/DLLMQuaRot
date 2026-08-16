@@ -90,6 +90,13 @@ class KVCacheConfig:
     # it, and made almost no difference either way. Naming the sides keeps
     # "static K, dynamic V" expressible instead of assumed.
     scale_book_kinds: Tuple[str, ...] = ("key", "value")
+    # Rank of a correction added on top of the quantized tensor, 0 for none.
+    # K only by default: whatever the residual's structure turns out to be, K
+    # is the side whose error is exponentiated by the softmax, and spending the
+    # same budget on both halves the rank each gets.
+    lowrank_rank: int = 0
+    lowrank_kinds: Tuple[str, ...] = ("key",)
+    lowrank_factor_bits: int = 16
 
     # --- refresh policy --------------------------------------------------
     # 'never'      keep entries until the block boundary (pure staleness)
@@ -127,9 +134,14 @@ class KVCacheConfig:
             raise ValueError("clip_ratio must be in (0, 1]")
         if self.scale_book is not None and not self.scale_book.frozen:
             raise ValueError("scale_book must be frozen before it can quantize")
-        bad = set(self.scale_book_kinds) - {"key", "value"}
-        if bad:
-            raise ValueError(f"scale_book_kinds must be key/value, got {sorted(bad)}")
+        for name in ("scale_book_kinds", "lowrank_kinds"):
+            bad = set(getattr(self, name)) - {"key", "value"}
+            if bad:
+                raise ValueError(f"{name} must be key/value, got {sorted(bad)}")
+        if self.lowrank_rank < 0:
+            raise ValueError("lowrank_rank must be >= 0")
+        if not 2 <= self.lowrank_factor_bits <= 16:
+            raise ValueError("lowrank_factor_bits must be in [2, 16]")
         if self.refresh_every < 1 or self.min_interval < 1:
             raise ValueError("refresh intervals must be >= 1")
         if self.max_interval < self.min_interval:
@@ -351,6 +363,91 @@ def bits_per_entry(
     return bits + per_group / max(group_size, 1)
 
 
+def lowrank_residual(
+    x: torch.Tensor,
+    xq: torch.Tensor,
+    rank: int,
+    factor_bits: int = 16,
+) -> Tuple[torch.Tensor, float]:
+    """The best rank-``r`` approximation of what quantization threw away.
+
+    ``K ~ Q(K) + A.B``, per head: the residual of one head is a [T, head_dim]
+    matrix and its truncated SVD is the optimal correction at that rank. The
+    idea is established on *weights* (LQER, CALDERA, ZeroQuant-V2) and untried
+    on a diffusion LM's cache, DART included.
+
+    Returns the correction and the fraction of residual energy it captures --
+    the second is the number that decides whether any of this is worth its
+    bits, and it is cheap to obtain, so it is returned from the same call
+    rather than left to a separate pass.
+
+    Whether the residual *has* a low-rank structure is the whole question, and
+    the obvious answer is wrong in an instructive way. Rounding noise has no
+    preferred directions, so rank r of head_dim should capture about r/head_dim
+    of it -- 6% at rank 8 of 128. It captures far more, because grouping along
+    tokens gives every channel its own scale and a channel four times wider
+    rounds four times coarser: the residual inherits the channel structure of
+    the tensor, and a few outlier channels carry most of its energy. On
+    Gaussian channels with the gains this model's outlier survey reports, rank
+    4 recovers 56% of it.
+
+    Which does not make it a good deal, and the arithmetic says so before any
+    measurement: recovering 56% leaves the residual at 0.66x for 0.79 bits,
+    where one more flat bit leaves it at 0.47x. The correction is competing
+    against the cheapest possible use of the same budget, and against a scheme
+    that spends the budget where the correction found the energy -- the fat
+    channels -- which is mixed precision, not low rank.
+
+    ``factor_bits`` is not decoration. The plan's arithmetic -- 2816 numbers
+    against 28672, "10% overhead, 3 bits + rank 8 = 3.3 bits effective" --
+    counts *numbers*, and the numbers are fp16 while the entries are three
+    bits. In bits the same correction costs 1.57 per entry, so "3 bits + rank
+    8" is 4.57 effective and loses to four bits flat before it is measured. It
+    reaches 3.3 only if the factors are themselves stored at four bits, which
+    is a choice with its own error and is therefore made explicit here.
+    """
+    if rank <= 0:
+        return torch.zeros_like(x), 0.0
+    if x.dim() != 4:
+        raise ValueError(f"expected [B, heads, T, head_dim], got {tuple(x.shape)}")
+
+    resid = (x.float() - xq.float())
+    r = min(rank, resid.shape[-1], resid.shape[-2])
+    u, s, vh = torch.linalg.svd(resid, full_matrices=False)
+
+    total = s.pow(2).sum(dim=-1).clamp(min=1e-12)
+    captured = float((s[..., :r].pow(2).sum(dim=-1) / total).mean())
+
+    a = u[..., :r] * s[..., :r].unsqueeze(-2)        # [B, heads, T, r]
+    b = vh[..., :r, :]                               # [B, heads, r, head_dim]
+    if factor_bits < 16:
+        # One scale per token for A and per rank component for B, which is what
+        # `lowrank_bits` charges for.
+        a = _quantize_last_axis(a, factor_bits, a.shape[-1], False, 1.0)
+        b = _quantize_last_axis(b, factor_bits, b.shape[-1], False, 1.0)
+    return (a @ b).to(x.dtype), captured
+
+
+def lowrank_bits(
+    rank: int,
+    n_tokens: int,
+    head_dim: int,
+    factor_bits: int = 16,
+    scale_bits: int = 16,
+) -> float:
+    """Bits per stored entry that a rank-``rank`` correction adds.
+
+    Counts the factors and, when they are quantized, their own scales -- a
+    correction that needs scales to be read back is not free of them either.
+    """
+    if rank <= 0:
+        return 0.0
+    r = min(rank, head_dim, n_tokens)
+    values = r * (n_tokens + head_dim) * factor_bits
+    scales = 0 if factor_bits >= 16 else 2 * scale_bits * (n_tokens + r)
+    return (values + scales) / (n_tokens * head_dim)
+
+
 @dataclass
 class StaticScaleBook:
     """K/V scales calibrated once and kept in the model, bucketed by mask ratio.
@@ -498,6 +595,10 @@ class CacheStats:
     # percent even when the calibration is exact -- only to the same figure
     # with the scales taken from the stored tensor itself.
     clipped: List[float] = field(default_factory=list)
+    # Share of the quantization residual a low-rank correction recovered, one
+    # entry per corrected write. The quantity that decides whether the rank is
+    # worth the bits it costs.
+    lowrank_captured: List[float] = field(default_factory=list)
     # Which layer each of those came from. Kept because the two errors are
     # expected to behave differently with depth and the averages hide it:
     # a layer's K/V are computed from the previous layer's already-stale
@@ -553,6 +654,9 @@ class CacheStats:
         if self.quantization_error:
             q = sum(self.quantization_error) / len(self.quantization_error)
             lines.append(f"  quantization error {q:.5f}")
+        if self.lowrank_captured:
+            c = sum(self.lowrank_captured) / len(self.lowrank_captured)
+            lines.append(f"  low rank recovered {100 * c:.1f}% of the residual")
         if self.clipped:
             lines.append(
                 f"  clipped by static scales: {100 * self.clip_rate:.3f}% of entries"
@@ -655,14 +759,29 @@ class BlockKVCache:
         ratio = self.mask_ratio
         if mask is not None:
             ratio = float(mask.to(torch.float32).mean())
-        kq = self._quantize_with_mask(k, mask, "key", layer, ratio)
-        vq = self._quantize_with_mask(v, mask, "value", layer, ratio)
+        kq = self._correct(k, self._quantize_with_mask(k, mask, "key", layer, ratio),
+                           "key")
+        vq = self._correct(v, self._quantize_with_mask(v, mask, "value", layer, ratio),
+                           "value")
 
         self._k[layer], self._v[layer] = kq, vq
         self._written_at[layer] = self.step
         self.stats.refreshes += 1
         self.stats.entries_written += int(k.shape[-2]) if k.dim() >= 2 else 0
         return kq, vq
+
+    def _correct(self, x: torch.Tensor, xq: torch.Tensor, kind: str) -> torch.Tensor:
+        """Add the low-rank correction, if this side was given one."""
+        cfg = self.cfg
+        if cfg.lowrank_rank <= 0 or kind not in cfg.lowrank_kinds:
+            return xq
+        if self._bits_for(kind, "decoded") >= 16:
+            return xq          # nothing was thrown away, so nothing to recover
+        correction, captured = lowrank_residual(
+            x, xq, cfg.lowrank_rank, cfg.lowrank_factor_bits
+        )
+        self.stats.lowrank_captured.append(captured)
+        return xq + correction
 
     def _bits_for(self, kind: str, status: str) -> int:
         """Bit width for one side of the cache at one position status.
@@ -858,5 +977,7 @@ __all__ = [
     "channel_range",
     "channel_scales",
     "bits_per_entry",
+    "lowrank_residual",
+    "lowrank_bits",
     "StaticScaleBook",
 ]
