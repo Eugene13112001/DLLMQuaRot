@@ -266,6 +266,7 @@ def compare(
     *,
     committable: torch.Tensor | None = None,
     top_k: int = 4,
+    sink: list | None = None,
 ) -> Comparison:
     """Compare a cached forward against the exact one.
 
@@ -290,6 +291,18 @@ def compare(
     conf = ref.softmax(-1).max(-1).values                # [B, W]
     if committable is None:
         committable = torch.ones_like(conf, dtype=torch.bool)
+
+    if sink is not None:
+        # Every committable position, not just the top few. The rate metrics
+        # restrict to what the sampler would commit, which is right for
+        # predicting accuracy and wrong for tracing a curve: it keeps only the
+        # confident tail, where margins are large and flips are rare. Here the
+        # whole window is wanted, because the question is how the flip rate
+        # varies *with* the margin, and that needs the small margins too.
+        top2 = ref.topk(2, dim=-1).values
+        margins = (top2[..., 0] - top2[..., 1])[committable]
+        flipped = (~kept)[committable].to(torch.int)
+        sink.extend(zip(margins.tolist(), flipped.tolist()))
     n_avail = int(committable.sum())
     if n_avail == 0:
         # Nothing in this window is masked, so nothing here would be committed
@@ -306,6 +319,66 @@ def compare(
     out.slots_hit = len(set(ref_top.tolist()) & set(act_top.tolist()))
     out.n_slots = k
     return out
+
+
+from contextlib import nullcontext as _nullcontext
+
+COLLAPSE_EDGES = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+
+
+def report_collapse(rows: list, mean_abs: float, dump=None) -> None:
+    """Does one curve describe every configuration at once?
+
+    The claim under test is that a decision flips when the perturbation eats
+    its margin, and nothing else matters: the bit width and the grouping axis
+    enter only through the *size* of the perturbation. If that is right, then
+    plotting flip rate against margin divided by perturbation should put every
+    configuration on one curve -- a data collapse, which is a far stronger
+    statement than a fitted formula and needs no free parameter.
+
+    The perturbation is estimated as `rel * mean|logit|`, the same conversion
+    the header of each table prints. It is a scale, not a calibration: a common
+    factor on every row shifts the x axis and cannot create a collapse that is
+    not there.
+
+    Read down each column. If the numbers agree, the curve is one curve and the
+    margin is the whole story. If a column drifts systematically with bit width
+    or with the axis, then something beyond the margin is at work -- and that
+    is worth knowing before the mechanism goes into a paper.
+    """
+    if not rows:
+        return
+    print("\n=== does one curve fit them all? " + "=" * 42)
+    print("flip rate against margin / perturbation, where perturbation = "
+          f"rel. err * {mean_abs:.2f}")
+    print("every committable position, not just the committed ones")
+
+    header = "".join(f"{e:>9.2f}" for e in COLLAPSE_EDGES) + f"{'more':>9}"
+    print(f"\n{'configuration':>18} {'n':>6}" + header)
+    print("-" * (25 + 9 * (len(COLLAPSE_EDGES) + 1)))
+
+    for label, rel, pairs in rows:
+        delta = max(rel * mean_abs, 1e-9)
+        buckets = [[0, 0] for _ in range(len(COLLAPSE_EDGES) + 1)]
+        for margin, flipped in pairs:
+            x = margin / delta
+            i = next((j for j, e in enumerate(COLLAPSE_EDGES) if x < e),
+                     len(COLLAPSE_EDGES))
+            buckets[i][0] += flipped
+            buckets[i][1] += 1
+        cells = "".join(
+            f"{100 * hit / n:>8.0f}%" if n >= 8 else f"{'-':>9}"
+            for hit, n in buckets
+        )
+        print(f"{label:>18} {len(pairs):>6}" + cells)
+        if dump is not None:
+            for margin, flipped in pairs:
+                dump.write(f"{label},{rel:.6e},{margin:.6f},{flipped}\n")
+
+    print("\nA column that holds steady down the table means the margin "
+          "explains the flips and the configuration enters only through the "
+          "perturbation. A column that drifts with bit width means it does "
+          "not, and the mechanism needs more than the margin.")
 
 
 def pct(value: float) -> str:
@@ -421,6 +494,17 @@ def main() -> int:
     ap.add_argument("--axis-group", type=int, default=32,
                     help="group size for the grouping-axis sweep")
     ap.add_argument("--skip-axis-sweep", action="store_true")
+    ap.add_argument("--collapse", action="store_true",
+                    help="test whether one curve describes every row: flip "
+                         "rate against margin divided by perturbation. If the "
+                         "columns hold steady down the table, the margin "
+                         "explains the damage and the configuration enters "
+                         "only through the size of its error -- which is a "
+                         "law rather than a table, and needs no fitted "
+                         "parameter to state.")
+    ap.add_argument("--dump-flips", default="",
+                    help="also append the raw (config, rel. err, margin, "
+                         "flipped) rows here, for plotting later")
     ap.add_argument("--samples", type=int, default=4,
                     help="independent canvases (different prompt and different "
                          "decoded content) pooled into every row. One is not "
@@ -478,7 +562,8 @@ def main() -> int:
             canvas_cache[mask_ratio] = batch
         return canvas_cache[mask_ratio]
 
-    def sweep(make_cache, batch, scramble: bool = False) -> Comparison:
+    def sweep(make_cache, batch, scramble: bool = False,
+              sink: list | None = None) -> Comparison:
         """One configuration, pooled over every canvas."""
         pooled = Comparison()
         for x, reference, committable in batch:
@@ -493,7 +578,7 @@ def main() -> int:
             )
             pooled = pooled + compare(reference, windowed,
                                       committable=committable,
-                                      top_k=args.commit_k)
+                                      top_k=args.commit_k, sink=sink)
         return pooled
 
     def flat_cache(bits, group, key_axis=None, value_axis=None):
@@ -560,11 +645,18 @@ def main() -> int:
                       "Expected this high -- masked positions share an "
                       "embedding row, so there is little in the prefix to lose.")
 
+        collapse_rows: list = []
         groups = sorted({min(g, head_dim) for g in args.group_sizes})
         for key_axis in args.key_axes:
             for group_size in groups:
                 for bits in args.bits:
-                    c = sweep(flat_cache(bits, group_size, key_axis), batch)
+                    sink = [] if args.collapse else None
+                    c = sweep(flat_cache(bits, group_size, key_axis), batch,
+                              sink=sink)
+                    if sink is not None:
+                        collapse_rows.append(
+                            (f"{bits}b {key_axis[:3]}/{size}", c.rel, sink)
+                        )
 
                     size = f"{group_size}=h" if group_size == head_dim else str(group_size)
                     label = size if len(args.key_axes) == 1 else f"{size}/{key_axis[:3]}"
@@ -592,6 +684,11 @@ def main() -> int:
                     elif c.rel >= chance.rel and c.agree <= chance.agree:
                         flag = "   <-- at the floor: carries nothing"
                     row(str(bits), label, c, flag)
+
+        if collapse_rows:
+            with (open(args.dump_flips, "a", encoding="utf-8")
+                  if args.dump_flips else _nullcontext()) as dump:
+                report_collapse(collapse_rows, mean_abs, dump)
 
     print("\nThe 16-bit row is the control: quantize_kv returns the tensor "
           "untouched there, so it is not a measurement of storage at all -- it "
