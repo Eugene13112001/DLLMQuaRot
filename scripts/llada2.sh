@@ -35,4 +35,11 @@ if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
     echo "picked GPU $CUDA_VISIBLE_DEVICES (most free memory)" >&2
 fi
 
+# Line-buffered, because these runs are long and are watched through a log
+# file. Redirected stdout is block-buffered by default, so a run prints
+# nothing for its first several kilobytes while the progress bars -- which go
+# to stderr -- keep scrolling. That reads exactly like a run that loaded the
+# model and then hung.
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+
 exec python "$@"
