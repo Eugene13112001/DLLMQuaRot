@@ -285,7 +285,8 @@ def main() -> int:
 
             cached_generate(adapter, prompt, gen_cfg, cache,
                             reuse_window=True, on_step=force)
-        return [h / max(n, 1) for h, n in hits], flipped
+        pooled = sum(h for h, _ in hits) / max(sum(n for _, n in hits), 1)
+        return [h / max(n, 1) for h, n in hits], flipped, pooled
 
     print("\n" + "=" * 78)
     print("the same rows with the text held to the reference: every commit is "
@@ -294,18 +295,61 @@ def main() -> int:
     print(f"\n{'policy':>12} {'bits':>5}   per block (committed tokens agreeing)")
     print("-" * 60)
     flips: Dict[Tuple[int, str], set] = {}
+    frontier: Dict[Tuple[int, str], float] = {}
     for bits in args.bits:
         for spec in args.policies:
             name, _, interval = spec.partition(":")
-            blocks, flipped = forced(bits, name, int(interval) if interval else 4)
+            blocks, flipped, pooled = forced(
+                bits, name, int(interval) if interval else 4
+            )
             flips[(bits, spec)] = flipped
+            frontier[(bits, spec)] = 1.0 - pooled
             print(f"{spec:>12} {bits:>5}   "
                   + " ".join(f"{100 * b:5.1f}" for b in blocks))
+
+    # ---- does the best policy depend on the bit width? --------------------
+    #
+    # The question two neighbouring literatures leave open between them. The
+    # refresh-policy papers tune when and where to recompute on an *exact*
+    # cache; the cache-quantization papers pick a width and leave the policy
+    # alone. Neither can see what happens to the first choice when the second
+    # is made.
+    #
+    # The prediction is specific. At 16 bits the only error is staleness, so
+    # refreshing more often helps all the way down. At 4 bits rounding puts a
+    # floor under the damage, so past some interval a shorter one buys
+    # nothing -- the knee moves, and a policy tuned without quantization
+    # over-refreshes once the cache is quantized.
+
+    if len(args.bits) > 1 and len(args.policies) > 1:
+        print("\n" + "=" * 78)
+        print("damage against refresh interval, one row per bit width")
+        print("(share of committed tokens the cache changed, text held fixed)")
+        header = "".join(f"{s:>12}" for s in args.policies)
+        print(f"\n{'bits':>6}{header}")
+        print("-" * (6 + 12 * len(args.policies)))
+        for bits in args.bits:
+            cells = "".join(
+                f"{100 * frontier[(bits, s)]:>11.1f}%"
+                if (bits, s) in frontier else f"{'-':>12}"
+                for s in args.policies
+            )
+            print(f"{bits:>6}{cells}")
+
+        print("\n      What to read: the *spacing* along each row, not the "
+              "level. A row that keeps improving as the interval shortens is "
+              "paying for staleness and nothing else. A row that flattens has "
+              "hit its rounding floor, and every refresh past that point is "
+              "spent on an error the bit width already fixed.")
+        print("      If the rows flatten at different intervals, the best "
+              "policy depends on the width -- which is the claim, and it says "
+              "that policies tuned on an exact cache over-refresh a quantized "
+              "one.")
 
     # The floor this table was missing. Rows near 95% do not need it; the row
     # that never refreshes inside a block sits low enough that "badly damaged"
     # and "carrying nothing" are not distinguishable without it.
-    floor_blocks, _ = forced(16, "block", 4, cls=ScrambledWindow)
+    floor_blocks, _, _ = forced(16, "block", 4, cls=ScrambledWindow)
     print(f"{'scrambled':>12} {'--':>5}   "
           + " ".join(f"{100 * b:5.1f}" for b in floor_blocks)
           + "   <-- chance floor")
