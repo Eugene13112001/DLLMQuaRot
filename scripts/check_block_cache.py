@@ -655,7 +655,7 @@ def main() -> int:
                               sink=sink)
                     if sink is not None:
                         collapse_rows.append(
-                            (f"{bits}b {key_axis[:3]}/{size}", c.rel, sink)
+                            (f"{bits}b {key_axis[:3]}/{group_size}", c.rel, sink)
                         )
 
                     size = f"{group_size}=h" if group_size == head_dim else str(group_size)
