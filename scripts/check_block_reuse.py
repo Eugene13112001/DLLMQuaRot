@@ -39,6 +39,7 @@ the method.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -133,6 +134,18 @@ def main() -> int:
                          "128 tokens and 4 prompts it is 512 trials.")
     ap.add_argument("--group-size", type=int, default=128)
     ap.add_argument("--key-axis", default="token", choices=["channel", "token"])
+    ap.add_argument("--dump-margins", default=None,
+                    help="write per-position decision margins to this JSON. "
+                         "The teacher-forced canvas makes a position the same "
+                         "position in every configuration, so the margins can "
+                         "be joined across cells and the composition of the "
+                         "two errors read off directly: the margin shift is a "
+                         "linear functional of the perturbation, so the shifts "
+                         "must add even where the lengths compose in "
+                         "quadrature. Also records the top-1 probability, "
+                         "which is what a confidence-thresholded sampler "
+                         "commits on -- if quantization compresses it, the "
+                         "achievable parallelism falls with it.")
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(
@@ -259,6 +272,7 @@ def main() -> int:
         """
         hits = [[0, 0] for _ in bounds]
         flipped = set()
+        margins_here: Dict[str, List[float]] = {}
         for i, (prompt, ref) in enumerate(zip(prompts, reference)):
             cache = cls(kv_config(bits, policy, every), n_layers)
             state = {"prev": None}
@@ -273,8 +287,18 @@ def main() -> int:
                     # were measured against a block that had been corrected
                     # before it could be damaged.
                     state["prev"] = torch.full_like(x, adapter.mask_id)
+                top2 = logits.float().topk(2, dim=-1).values
+                probs = logits.float().softmax(dim=-1).amax(dim=-1)
                 for pos in newly_committed(x, state["prev"], lo, hi,
                                           adapter.mask_id):
+                    # Recorded at the step the position commits and before the
+                    # reference overwrites it: after the overwrite the canvas
+                    # is identical again, so this is the only moment where the
+                    # cache's effect on this decision is visible.
+                    margins_here[f"{i}:{pos}"] = [
+                        float(top2[0, pos - lo, 0] - top2[0, pos - lo, 1]),
+                        float(probs[0, pos - lo]),
+                    ]
                     hits[block_idx][1] += 1
                     same = int(x[0, pos] == ref[0, pos])
                     hits[block_idx][0] += same
@@ -286,7 +310,7 @@ def main() -> int:
             cached_generate(adapter, prompt, gen_cfg, cache,
                             reuse_window=True, on_step=force)
         pooled = sum(h for h, _ in hits) / max(sum(n for _, n in hits), 1)
-        return [h / max(n, 1) for h, n in hits], flipped, pooled
+        return [h / max(n, 1) for h, n in hits], flipped, pooled, margins_here
 
     print("\n" + "=" * 78)
     print("the same rows with the text held to the reference: every commit is "
@@ -296,12 +320,14 @@ def main() -> int:
     print("-" * 60)
     flips: Dict[Tuple[int, str], set] = {}
     frontier: Dict[Tuple[int, str], float] = {}
+    margins_by_cell: Dict[str, Dict[str, List[float]]] = {}
     for bits in args.bits:
         for spec in args.policies:
             name, _, interval = spec.partition(":")
-            blocks, flipped, pooled = forced(
+            blocks, flipped, pooled, cell_margins = forced(
                 bits, name, int(interval) if interval else 4
             )
+            margins_by_cell[f"{bits}/{spec}"] = cell_margins
             flips[(bits, spec)] = flipped
             frontier[(bits, spec)] = 1.0 - pooled
             print(f"{spec:>12} {bits:>5}   "
@@ -349,7 +375,7 @@ def main() -> int:
     # The floor this table was missing. Rows near 95% do not need it; the row
     # that never refreshes inside a block sits low enough that "badly damaged"
     # and "carrying nothing" are not distinguishable without it.
-    floor_blocks, _, _ = forced(16, "block", 4, cls=ScrambledWindow)
+    floor_blocks, _, _, _ = forced(16, "block", 4, cls=ScrambledWindow)
     print(f"{'scrambled':>12} {'--':>5}   "
           + " ".join(f"{100 * b:5.1f}" for b in floor_blocks)
           + "   <-- chance floor")
@@ -423,8 +449,57 @@ def main() -> int:
           "there. The distance from them to the 4- and 3-bit rows is what "
           "rounding adds on top -- and whether the two add or one absorbs the "
           "other is the question this whole line of work opened with.")
-    return 0
 
+    if args.dump_margins:
+        # Written rather than analysed here on purpose: the regressions that
+        # settle the composition need no GPU, and running them inside the
+        # sweep would tie a five-line fit to a twenty-minute job.
+        payload = {
+            "config": {
+                "model": args.model, "bits": args.bits,
+                "policies": args.policies, "samples": args.samples,
+                "gen_length": args.gen_length,
+                "block_length": args.block_length,
+                "group_size": args.group_size, "key_axis": args.key_axis,
+                "prompt_tokens": args.prompt_tokens,
+            },
+            "fields": ["margin", "top1_prob"],
+            "cells": margins_by_cell,
+        }
+        with open(args.dump_margins, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        cells = len(margins_by_cell)
+        positions = len(next(iter(margins_by_cell.values()), {}))
+        print()
+        print(f"wrote {cells} cells x ~{positions} positions to "
+              f"{args.dump_margins}")
+        print("What it is for, in three fits, all on joined positions.")
+        print("  1. Additivity of the margin shift. Regress the shift of the "
+              "both-errors")
+        print("     cell on the sum of the two single-error shifts. The shift "
+              "is a linear")
+        print("     functional of the perturbation, so a slope of 1 is the "
+              "prediction; a")
+        print("     slope below 1 is systematic cancellation.")
+        print("  2. Independence of sign. Correlate the two single-error "
+              "shifts. Near zero")
+        print("     means they compose by quadrature, which is why the flip "
+              "count grows")
+        print("     sub-additively even though the shifts themselves add.")
+        print("  3. Shrinkage. Regress a cell's margin on the reference "
+              "margin. The slope")
+        print("     is the coefficient of 2608.06564 -- about 0.86 at four "
+              "bits if their")
+        print("     framework transfers to a diffusion model, and for "
+              "staleness it is a")
+        print("     number nobody has.")
+        print("The top-1 probability is here for a fourth question: a "
+              "confidence-thresholded")
+        print("sampler commits every position above its threshold, so if "
+              "quantization")
+        print("compresses that probability it caps the parallelism the "
+              "sampler can reach.")
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

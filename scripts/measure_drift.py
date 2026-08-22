@@ -249,6 +249,90 @@ def report_cache_drift(states, layers, args, bounds) -> None:
           "actually incur. Where the ratio is below 1, four-bit storage costs "
           "more than the staleness it is being blamed for.")
 
+    geometry_table(args, states, layers, bounds)
+
+
+def geometry_table(args, states, layers, bounds) -> None:
+    """Do the two displacements point the same way, or sideways?
+
+    What a reader of the cache gets back decomposes exactly:
+
+        Q(K_old) - K_new  =  [Q(K_old) - K_old]  +  [K_old - K_new]
+                               rounding              staleness
+
+    Two vectors in one space, added. The table above gives their lengths; it
+    cannot give the angle, and the angle decides how they compose. In a space
+    of this dimension two unrelated vectors are nearly orthogonal, so lengths
+    add in quadrature rather than linearly -- and with staleness four to ten
+    times the longer, adding rounding on top lengthens the total by a few
+    percent rather than by its own length. That is a mechanism for the
+    absorption measured on decisions, and it is checkable here rather than
+    argued.
+
+    Three columns settle it. ``cos`` against zero: a systematic positive value
+    means the errors reinforce, negative means they cancel, zero means they
+    compose by quadrature. ``|r+s|`` measured against the quadrature
+    prediction: if quadrature holds these agree and the ratio sits at 1. The
+    null for the cosine concentrates at zero with width about 1/sqrt(D), and D
+    here is thousands of elements, so anything past a few hundredths is far
+    outside chance.
+    """
+    print(f"\n=== geometry of the two displacements: {args.bits}-bit storage, "
+          f"group {args.group_size}, K along {args.key_axis}s " + "=" * 6)
+    print("r = rounding of the stale entry, s = staleness; current block only")
+    print(f"{'layer':>5} {'d':>3} {'|r|':>9} {'|s|':>9} {'cos':>8} "
+          f"{'|r+s|':>9} {'quadrature':>11} {'ratio':>7}")
+
+    for layer in layers:
+        for d in args.deltas:
+            rn, sn, cs, tot, quad = [], [], [], [], []
+            for t in range(len(states) - d):
+                old = states[t]["data"][layer]
+                new = states[t + d]["data"][layer]
+                keep = states[t]["keep"]
+                block_idx = states[t]["snap"].block_idx
+                closed = torch.tensor(
+                    [block_of(int(p), bounds) < block_idx for p in keep]
+                )
+                if not (~closed).any():
+                    continue
+                # The current block only: the prefix carries no staleness under
+                # a block-causal mask, so an angle there would be an angle
+                # against the zero vector.
+                k_old = old["k"][:, :, ~closed].float()
+                k_new = new["k"][:, :, ~closed].float()
+                k_q = quantize_kv(old["k"], args.bits, args.group_size,
+                                  axis=args.key_axis)[:, :, ~closed].float()
+
+                r = (k_q - k_old).flatten()
+                sv = (k_old - k_new).flatten()
+                nr, ns = r.norm(), sv.norm()
+                if nr == 0 or ns == 0:
+                    continue
+                rn.append(float(nr))
+                sn.append(float(ns))
+                cs.append(float(torch.dot(r, sv) / (nr * ns)))
+                tot.append(float((r + sv).norm()))
+                quad.append(float(torch.sqrt(nr ** 2 + ns ** 2)))
+
+            if not cs:
+                continue
+
+            def mean(v):
+                return sum(v) / len(v)
+
+            m_tot, m_quad = mean(tot), mean(quad)
+            print(f"{layer:>5} {d:>3} {mean(rn):>9.4f} {mean(sn):>9.4f} "
+                  f"{mean(cs):>8.4f} {m_tot:>9.4f} {m_quad:>11.4f} "
+                  f"{m_tot / m_quad:>7.4f}")
+
+    print("\nA cos near zero with the last ratio near 1.0 is quadrature: the "
+          "smaller\ndisplacement adds almost nothing to the total, which is why "
+          "buying it down\nwith bits buys so little once staleness is present. A "
+          "systematically negative\ncos would be cancellation instead -- a "
+          "different mechanism with a different\nprediction, and one the "
+          "decision-level tables cannot separate on their own.")
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
