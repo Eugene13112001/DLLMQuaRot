@@ -49,6 +49,9 @@ from dllmquant.calib.prompts import load_prompts  # noqa: E402
 from dllmquant.config import DLLMQuantConfig, TMASConfig  # noqa: E402
 from dllmquant.models import build_adapter  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from trace_window_path import ROUTER_NAMES, force_routes  # noqa: E402
+
 
 def rel(a: torch.Tensor, b: torch.Tensor) -> float:
     """Relative RMS difference, against b's own scale."""
@@ -101,6 +104,41 @@ def capture(adapter, x: torch.Tensor, layers: List[int], max_positions: int):
     return out, keep
 
 
+def record_routes(adapter, x: torch.Tensor):
+    """Every router's expert choice on one forward, keyed by layer.
+
+    Only the integer output is kept: that is the choice, and it is the one
+    thing ``force_routes`` overrides. Everything downstream of it -- gathering
+    the scores, normalising them, the routed scaling -- keeps running in the
+    checkpoint's own code, so pinning changes what is selected and nothing
+    about how the selection is used.
+    """
+    routes: Dict[int, torch.Tensor] = {}
+    handles = []
+
+    def hook(i):
+        def fn(module, inputs, output):
+            parts = output if isinstance(output, (tuple, list)) else (output,)
+            for t in parts:
+                if (isinstance(t, torch.Tensor) and t.numel()
+                        and not t.is_floating_point()):
+                    routes[i] = t.detach()
+                    return
+        return fn
+
+    for i, block in enumerate(adapter.blocks):
+        for name, module in block.named_modules():
+            if (name.split(".")[-1] in ROUTER_NAMES
+                    and hasattr(module, "num_experts")):
+                handles.append(module.register_forward_hook(hook(i)))
+    try:
+        adapter.model(x, **adapter.forward_kwargs(x))
+    finally:
+        for h in handles:
+            h.remove()
+    return routes
+
+
 def block_of(position: int, bounds) -> int:
     for idx, (lo, hi) in enumerate(bounds):
         if lo <= position < hi:
@@ -127,6 +165,20 @@ def main() -> int:
     ap.add_argument("--bits", type=int, default=4,
                     help="storage width for the rounding half of the split")
     ap.add_argument("--group-size", type=int, default=128)
+    ap.add_argument("--pin-routes", action="store_true",
+                    help="hold every router to the choice it made on the first "
+                         "captured step. The prefix column is the exactness "
+                         "claim of this project in numbers, and a MoE puts a "
+                         "second thing between the mask and that number: an "
+                         "expert sees the batch its router gathered, so when "
+                         "the current block's tokens change, the reduction "
+                         "order changes with them and a closed token's output "
+                         "moves in arithmetic even though the mask makes it "
+                         "independent in exact arithmetic. Pinning removes "
+                         "that channel. If the prefix column then goes to "
+                         "zero, the residue was dispatch and the structural "
+                         "claim stands; if it does not, something reaches "
+                         "closed blocks that should not.")
     ap.add_argument("--key-axis", default="token", choices=["channel", "token"],
                     help="direction a group runs in for K. Measured to matter "
                          "more than any other knob on this cache: along "
@@ -158,13 +210,24 @@ def main() -> int:
     print(f"\n{len(snapshots)} steps, {len(layers)} of {len(adapter.blocks)} layers "
           f"measured, sequence {total} tokens, blocks {len(bounds)}")
 
+    restore = None
+    if args.pin_routes:
+        first = snapshots[0].input_ids.unsqueeze(0).to(device)
+        routes = record_routes(adapter, first)
+        restore = force_routes(adapter.blocks, routes, 0, total)
+        print(f"  routes pinned from step 1 on {len(routes)} layers")
+
     states = []
-    for snap in snapshots:
-        x = snap.input_ids.unsqueeze(0).to(device)
-        captured, keep = capture(adapter, x, layers, args.max_positions)
-        states.append({"data": captured, "keep": keep, "snap": snap})
-        print(f"  captured step {snap.step + 1}/{len(snapshots)} "
-              f"(mask ratio {snap.mask_ratio:.2f})")
+    try:
+        for snap in snapshots:
+            x = snap.input_ids.unsqueeze(0).to(device)
+            captured, keep = capture(adapter, x, layers, args.max_positions)
+            states.append({"data": captured, "keep": keep, "snap": snap})
+            print(f"  captured step {snap.step + 1}/{len(snapshots)} "
+                  f"(mask ratio {snap.mask_ratio:.2f})")
+    finally:
+        if restore is not None:
+            restore()
 
     report_latent_drift(states, layers, args.deltas)
     report_cache_drift(states, layers, args, bounds)

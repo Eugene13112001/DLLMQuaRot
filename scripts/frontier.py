@@ -48,7 +48,7 @@ DAMAGE = {
     4: {"every_n:1": 3.9, "every_n:2": 5.4, "every_n:3": 8.9,
         "every_n:4": 10.6, "block": 62.0},
     3: {"every_n:1": 5.6, "every_n:2": 7.9, "every_n:3": 9.8,
-        "every_n:4": 12.5},
+        "every_n:4": 12.5, "block": 63.7},
 }
 
 ORDER = ["every_n:1", "every_n:2", "every_n:3", "every_n:4", "block"]
