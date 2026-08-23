@@ -130,30 +130,48 @@ def main() -> int:
         print(f"{name:>16} {c:>8.3f} {b:>9.3f} {r:>7.3f}   {describe(name)}")
 
     # ---------------------------------------------------------------- 2, 3
-    if STALE in cells:
-        d_s = [cells[STALE][k][0] - cells[REFERENCE][k][0] for k in keys]
-        print("\n=== 2-3. how the two shifts compose ===")
+    widths = sorted({n.split("/")[0] for n in names} - {"16"},
+                    key=lambda b: -int(b))
+    policies = [n.split("/", 1)[1] for n in names if n.startswith("16/")]
+    policies = [p for p in policies if p != "every_n:1"]
+
+    if policies and widths:
+        print("\n=== 2-3. how the two shifts compose, per staleness row ===")
         print()
-        print(f"{'bits':>5} {'slope':>8} {'r':>7} {'corr':>7} "
+        print(f"{'bits':>5} {'policy':>11} {'slope':>8} {'r':>7} {'corr':>7} "
               f"{'sd(dr)':>8} {'sd(ds)':>8} {'sd(both)':>9} {'quadr':>8} "
-              f"{'sum':>8}")
-        print("-" * 74)
-        for bits in ("4", "3"):
-            rnd, both = f"{bits}/every_n:1", f"{bits}/every_n:2"
-            if rnd not in cells or both not in cells:
+              f"{'sum':>8} {'saturated':>10}")
+        print("-" * 98)
+        for policy in policies:
+            stale = f"16/{policy}"
+            if stale not in cells:
                 continue
-            d_r = [cells[rnd][k][0] - cells[REFERENCE][k][0] for k in keys]
-            d_b = [cells[both][k][0] - cells[REFERENCE][k][0] for k in keys]
-            slope, _, r = fit([a + b for a, b in zip(d_r, d_s)], d_b)
-            _, _, corr = fit(d_r, d_s)
-            sr, ss, sb = sd(d_r), sd(d_s), sd(d_b)
-            print(f"{bits:>5} {slope:>8.3f} {r:>7.3f} {corr:>7.3f} "
-                  f"{sr:>8.3f} {ss:>8.3f} {sb:>9.3f} "
-                  f"{(sr ** 2 + ss ** 2) ** 0.5:>8.3f} {sr + ss:>8.3f}")
+            d_s = [cells[stale][k][0] - cells[REFERENCE][k][0] for k in keys]
+            for bits in widths:
+                rnd, both = f"{bits}/every_n:1", f"{bits}/{policy}"
+                if rnd not in cells or both not in cells:
+                    continue
+                d_r = [cells[rnd][k][0] - cells[REFERENCE][k][0] for k in keys]
+                d_b = [cells[both][k][0] - cells[REFERENCE][k][0] for k in keys]
+                slope, _, r = fit([a + b for a, b in zip(d_r, d_s)], d_b)
+                _, _, corr = fit(d_r, d_s)
+                sr, ss, sb = sd(d_r), sd(d_s), sd(d_b)
+                # Saturation: the margin one error already took, the other
+                # cannot take again. Under any additive composition this share
+                # stays small; under saturation it is the majority.
+                sat = sum(abs(y) < max(abs(a), abs(c))
+                          for a, c, y in zip(d_r, d_s, d_b)) / len(keys)
+                print(f"{bits:>5} {policy:>11} {slope:>8.3f} {r:>7.3f} "
+                      f"{corr:>7.3f} {sr:>8.3f} {ss:>8.3f} {sb:>9.3f} "
+                      f"{(sr ** 2 + ss ** 2) ** 0.5:>8.3f} {sr + ss:>8.3f} "
+                      f"{100 * sat:>9.0f}%")
         print()
-        print("  A slope of 1 means the shifts add, as a linear functional")
-        print("  must. corr near zero means they compose by quadrature -- and")
-        print("  then sd(both) sits at the quadrature column, not at the sum.")
+        print("  A slope of 1 would mean the shifts add, as a linear")
+        print("  functional must in the small-perturbation regime. corr near")
+        print("  zero would mean they compose by quadrature. `saturated` is")
+        print("  the share of positions where the two errors together move the")
+        print("  margin LESS than the larger of them alone -- the direct")
+        print("  signature of a margin that cannot be taken twice.")
 
     # ---------------------------------------------------------------- 4
     block = cfg.get("block_length", 32)
