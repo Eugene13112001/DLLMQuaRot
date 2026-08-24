@@ -198,7 +198,103 @@ def main() -> int:
     print("  6.4-7.3 later. A fall means a quantized cache caps the")
     print("  parallelism a confidence-thresholded sampler reaches -- which is")
     print("  the number dInfer, Fast-dLLM and DMax sell.")
+
+    # ---------------------------------------------------------------- 5
+    kappa_table(cells, keys, names)
     return 0
+
+
+def kappa_table(cells, keys, names) -> None:
+    """The exact decomposition: where the sub-additivity actually lives.
+
+    The shrinkage coefficient is a regression slope, so
+
+        c = cov(m_ref, m_cell) / var(m_ref),      m_cell = m_ref + dm
+        d = 1 - c = -cov(m_ref, dm) / var(m_ref)
+
+    Covariance is bilinear. That makes ``d`` *strictly additive in the shift*:
+    if the shifts add, the deficits add exactly -- no dimension argument, no
+    concentration of measure, no fitted constant. So the whole interaction of
+    the two errors collapses into one measurable quantity, the residual of that
+    additivity projected back onto the reference margin:
+
+        rho   = dm_both - dm_rounding - dm_staleness
+        kappa = cov(m_ref, rho) / var(m_ref)
+        d_both = d_r + d_s - kappa            <- an identity, not a model
+
+    Which is why quadrature is a numerical coincidence rather than a law: it
+    holds exactly when kappa happens to equal ``d_r + d_s - hypot(d_r, d_s)``,
+    and nothing so far says it must.
+
+    Two things worth watching. The two ways of computing kappa -- from the
+    deficits and from the residual directly -- must agree to rounding; they are
+    the same number and disagreement means the joining is wrong. And when the
+    smaller error is much smaller, absorption in exact form would read
+    ``kappa -> d_r``, since then ``d_both -> d_s`` and the smaller error adds
+    nothing at all.
+    """
+    if REFERENCE not in cells:
+        return
+    ref = [cells[REFERENCE][k][0] for k in keys]
+    n = len(ref)
+    mref = sum(ref) / n
+    var = sum((x - mref) ** 2 for x in ref) / n
+    if var == 0:
+        return
+
+    def deficit(name):
+        """1 - c, straight from the covariance rather than from a regression."""
+        dm = [cells[name][k][0] - cells[REFERENCE][k][0] for k in keys]
+        mdm = sum(dm) / n
+        cov = sum((a - mref) * (b - mdm) for a, b in zip(ref, dm)) / n
+        return -cov / var
+
+    widths = sorted({x.split("/")[0] for x in names} - {"16"}, key=lambda b: -int(b))
+    policies = [x.split("/", 1)[1] for x in names if x.startswith("16/")]
+    policies = [p for p in policies if p != "every_n:1"]
+    if not widths or not policies:
+        return
+
+    print("\n=== 5. exact decomposition: d_both = d_r + d_s - kappa ===")
+    print()
+    print(f"{'bits':>5} {'policy':>11} {'d_r':>7} {'d_s':>7} {'d_both':>7} "
+          f"{'kappa':>7} {'direct':>7} {'k/d_r':>7} {'k needed':>9} {'diff':>7}")
+    print("-" * 82)
+    for policy in policies:
+        stale = f"16/{policy}"
+        if stale not in cells:
+            continue
+        d_s = deficit(stale)
+        dm_s = [cells[stale][k][0] - cells[REFERENCE][k][0] for k in keys]
+        for bits in widths:
+            rnd, both = f"{bits}/every_n:1", f"{bits}/{policy}"
+            if rnd not in cells or both not in cells:
+                continue
+            d_r, d_b = deficit(rnd), deficit(both)
+            kappa = d_r + d_s - d_b
+
+            # The same number the other way: straight from the residual.
+            dm_r = [cells[rnd][k][0] - cells[REFERENCE][k][0] for k in keys]
+            dm_b = [cells[both][k][0] - cells[REFERENCE][k][0] for k in keys]
+            rho = [b - a - c for a, c, b in zip(dm_r, dm_s, dm_b)]
+            mrho = sum(rho) / n
+            direct = sum((a - mref) * (r - mrho) for a, r in zip(ref, rho)) / n / var
+
+            needed = d_r + d_s - (d_r ** 2 + d_s ** 2) ** 0.5
+            print(f"{bits:>5} {policy:>11} {d_r:>7.3f} {d_s:>7.3f} {d_b:>7.3f} "
+                  f"{kappa:>7.3f} {direct:>7.3f} {kappa / d_r:>7.3f} "
+                  f"{needed:>9.3f} {kappa - needed:>+7.3f}")
+    print()
+    print("  `kappa` and `direct` are the same quantity computed two ways and")
+    print("  must agree. `k/d_r` at 1.0 is absorption in exact form: the")
+    print("  smaller error adds nothing, d_both = d_s. `k needed` is what")
+    print("  quadrature would require, and `diff` is how far the data is from")
+    print("  needing it -- small there means quadrature fits, but it is a")
+    print("  coincidence of this range, not a derivation.")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 if __name__ == "__main__":
