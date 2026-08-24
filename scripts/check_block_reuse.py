@@ -287,17 +287,41 @@ def main() -> int:
                     # were measured against a block that had been corrected
                     # before it could be damaged.
                     state["prev"] = torch.full_like(x, adapter.mask_id)
-                top2 = logits.float().topk(2, dim=-1).values
-                probs = logits.float().softmax(dim=-1).amax(dim=-1)
+                lg = logits.float()
+                top2v, top2i = lg.topk(2, dim=-1)
+                probs = lg.softmax(dim=-1).amax(dim=-1)
                 for pos in newly_committed(x, state["prev"], lo, hi,
                                           adapter.mask_id):
                     # Recorded at the step the position commits and before the
                     # reference overwrites it: after the overwrite the canvas
                     # is identical again, so this is the only moment where the
                     # cache's effect on this decision is visible.
+                    #
+                    # The margin is signed and taken *in the reference's
+                    # ordering*: logit(reference token) minus the best of the
+                    # rest. The cell's own top-2 gap is the wrong quantity for
+                    # a regression across cells -- once a position flips, that
+                    # gap belongs to a different pair of candidates, so the
+                    # perturbed variable stops being the same variable as the
+                    # reference's. That contamination is visible directly: the
+                    # correlation against the reference margin is 0.738 at age
+                    # 1 (5.4% flipped) and collapses to 0.198 at 'block' (62%
+                    # flipped). The signed form has one ordering everywhere and
+                    # crosses zero exactly when the token flips, so the flip
+                    # set and the margin become the same measurement.
+                    j = pos - lo
+                    ref_tok = int(ref[0, pos])
+                    best_i = int(top2i[0, j, 0])
+                    if best_i == ref_tok:
+                        signed = float(top2v[0, j, 0] - top2v[0, j, 1])
+                    else:
+                        signed = float(lg[0, j, ref_tok] - top2v[0, j, 0])
                     margins_here[f"{i}:{pos}"] = [
-                        float(top2[0, pos - lo, 0] - top2[0, pos - lo, 1]),
-                        float(probs[0, pos - lo]),
+                        signed,
+                        float(probs[0, j]),
+                        # kept so the old, contaminated definition stays
+                        # recoverable and the two can be compared on one dump
+                        float(top2v[0, j, 0] - top2v[0, j, 1]),
                     ]
                     hits[block_idx][1] += 1
                     same = int(x[0, pos] == ref[0, pos])
@@ -463,7 +487,12 @@ def main() -> int:
                 "group_size": args.group_size, "key_axis": args.key_axis,
                 "prompt_tokens": args.prompt_tokens,
             },
-            "fields": ["margin", "top1_prob"],
+            # "margin" is signed and in the reference's ordering:
+            # logit(reference token) - max over the rest. Negative
+            # exactly when the position flipped. "own_top2_gap" is the
+            # older, contaminated definition, kept for comparison.
+            "fields": ["margin", "top1_prob", "own_top2_gap"],
+            "margin_def": "signed_reference_ordering",
             "cells": margins_by_cell,
         }
         with open(args.dump_margins, "w", encoding="utf-8") as fh:

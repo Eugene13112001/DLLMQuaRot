@@ -94,6 +94,10 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=0.95,
                     help="the confidence a parallel sampler commits above; "
                          "0.95 is what the checkpoint's own generate uses")
+    ap.add_argument("--allow-legacy-margins", action="store_true",
+                    help="read a dump whose margins are the cell's own top-2 "
+                         "gap. Only for comparing the two definitions on one "
+                         "run; the flip-heavy cells are not trustworthy.")
     args = ap.parse_args()
 
     with open(args.dump, encoding="utf-8") as fh:
@@ -103,6 +107,27 @@ def main() -> int:
 
     print(f"cells: {', '.join(sorted(cells))}")
     print(f"config: {cfg}")
+
+    # Which margin definition the dump carries decides whether any of the
+    # fits below mean anything. The old dumps recorded the cell's *own* top-2
+    # gap, which for a flipped position is the gap between a different pair of
+    # candidates -- the regressand stops being the same variable as the
+    # regressor, and the correlation falls apart exactly where flips are
+    # common (0.738 at age 1, 0.198 at 'block'). Refuse rather than print
+    # numbers that look fine and are not.
+    mdef = payload.get("margin_def")
+    if mdef != "signed_reference_ordering":
+        print()
+        print(f"this dump's margins are "
+              f"'{mdef or 'own_top2_gap (legacy)'}', not "
+              f"'signed_reference_ordering'.")
+        print("Every fit below assumes one candidate ordering shared across "
+              "cells. Re-dump with the current check_block_reuse.py, or pass "
+              "--allow-legacy-margins to read it anyway and know the "
+              "flip-heavy cells are contaminated.")
+        if not args.allow_legacy_margins:
+            return 1
+        print("--allow-legacy-margins given: continuing on contaminated data.")
 
     if REFERENCE not in cells:
         print(f"\nno {REFERENCE} cell: there is nothing to regress against. "
@@ -114,6 +139,26 @@ def main() -> int:
     print(f"\n{len(keys)} positions present in all {len(names)} cells")
 
     ref_m = [cells[REFERENCE][k][0] for k in keys]
+
+    # Free cross-check, and the reason the signed form is worth a re-dump: a
+    # negative margin *is* a flipped position, so the share of negatives must
+    # reproduce the agreement row that check_block_reuse.py printed for the
+    # same cell. If these two disagree, the dump and the sweep are not
+    # describing the same run and nothing below is worth reading.
+    print()
+    print("=== 0. flips implied by the sign, against the printed rows ===")
+    print(f"{'cell':>16} {'negative':>9} {'agree%':>8}")
+    for name in names:
+        col = [cells[name][k][0] for k in keys]
+        neg = sum(1 for v in col if v < 0)
+        print(f"{name:>16} {neg:>9} {100 * (1 - neg / len(col)):>8.2f}")
+    ref_neg = sum(1 for v in ref_m if v < 0)
+    if ref_neg:
+        print()
+        print(f"{ref_neg} negative margins in the reference cell "
+              f"itself, which should be impossible: "
+              f"there the committed token is the reference token "
+              f"by construction. Check the canvas pinning.")
 
     # ---------------------------------------------------------------- 1
     print("\n=== 1. shrinkage: a cell's margin against the reference margin ===")
