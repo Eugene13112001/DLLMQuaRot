@@ -154,6 +154,16 @@ def main() -> int:
             "unfinished": unfinished, "unfinished_wrong": unfinished_wrong,
             "recoverable": recoverable,
             "acc_ceiling": 100.0 * (correct + recoverable) / total,
+            # accuracy = (share that concluded) x (accuracy among those).
+            # The two factors are different failure modes: a configuration
+            # can lose points by reasoning wrong or by never getting to an
+            # answer, and only the first is what the metric is meant to
+            # report. Publish the pair, never either half alone --
+            # conditioning on "concluded" conditions on a consequence of the
+            # treatment, so the right-hand factor is descriptive, not causal.
+            "concluded": 100.0 * (total - no_marker) / total,
+            "acc_given": (100.0 * correct / (total - no_marker)
+                          if total - no_marker else float("nan")),
             "gen_length": cfg.get("gen_length"),
             "reported_cut_off": payload.get("cut_off"),
             "samples": samples,
@@ -171,6 +181,27 @@ def main() -> int:
         print(f"{r['label']:>14} {r['total']:>5} {r['acc']:>7.2f} "
               f"{r['wrong']:>6} {r['no_marker']:>8} {r['unfinished']:>6} "
               f"{r['recoverable']:>6} {r['acc_ceiling']:>9.2f}")
+
+    print()
+    print("=== accuracy split into its two factors ===")
+    print(f"{'config':>14} {'concluded%':>11} {'acc|concluded%':>16} "
+          f"{'acc%':>7}")
+    print("-" * 52)
+    for r in rows:
+        print(f"{r['label']:>14} {r['concluded']:>11.2f} "
+              f"{r['acc_given']:>16.2f} {r['acc']:>7.2f}")
+    print()
+    print("  A configuration can lose points two ways: by reasoning wrong, "
+          "or by never")
+    print("  arriving at an answer. Only the first is what the metric is "
+          "meant to report.")
+    print("  Read the pair together and never either half alone -- "
+          "'concluded' is itself")
+    print("  affected by the configuration, so the right-hand column is "
+          "descriptive, not")
+    print("  a causal effect: if a damaged run only finishes the easy "
+          "questions, its")
+    print("  conditional accuracy is flattered.")
 
     print()
     print("  no mark  replies with no 'answer is' / \\boxed line. The answer "
