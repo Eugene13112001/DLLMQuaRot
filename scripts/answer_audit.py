@@ -33,7 +33,11 @@ from typing import Optional
 _MARKER = re.compile(r"(?:final\s+answer|answer)\s*(?:is|:)", re.IGNORECASE)
 _BOXED = re.compile(r"\\boxed\{")
 
-# A finished reply ends on sentence punctuation or a closing delimiter.
+# A finished reply ends on sentence punctuation or a closing delimiter --
+# but the instructed format is "The answer is N", which ends on a digit, so
+# this test alone flags almost every *correct* reply. It is only meaningful
+# on replies that never reached the marker: there, ending mid-number or
+# mid-noun is the signature of running out of canvas.
 _ENDS_CLEAN = re.compile(r"[.!?)\]\}\"'*\s]$")
 
 _NUMBER = re.compile(r"-?\$?\d[\d,]*\.?\d*")
@@ -101,7 +105,9 @@ def main() -> int:
                 no_marker += 1
                 no_marker_wrong += wrong
 
-            if not _ENDS_CLEAN.search(text):
+            # Truncation, not merely an unmarked reply: it never reached the
+            # instructed closing line AND it stops mid-sentence.
+            if not marked and not _ENDS_CLEAN.search(text):
                 unfinished += 1
                 unfinished_wrong += wrong
 
@@ -144,8 +150,11 @@ def main() -> int:
     print("  no mark  replies with no 'answer is' / \\boxed line. The answer "
           "was scored")
     print("           off the last number in the text, which is a guess.")
-    print("  unfin    replies not ending on sentence punctuation -- ran out "
-          "of canvas.")
+    print("  unfin    subset of 'no mark' that also stops mid-sentence: "
+          "ran out of canvas.")
+    print("           'no mark' minus 'unfin' ended cleanly without the "
+          "marker -- those are")
+    print("           extractor failures, not truncations.")
     print("  recov    wrong AND unmarked AND the gold value sits in the last "
           "few lines:")
     print("           the extractor's failure, not the model's. A floor, not "
