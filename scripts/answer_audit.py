@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
-import sys
-from typing import Optional
+from typing import Dict, Optional
 
 # The instruction given to the model asks for a line "The answer is N". A
 # completion without one did not reach its own conclusion, whatever else it
@@ -63,6 +63,31 @@ def mentions_gold(text: str, gold: float, tail_chars: int) -> bool:
         if value is not None and abs(value - gold) < 1e-6:
             return True
     return False
+
+
+def mcnemar(b: int, c: int) -> float:
+    """Exact two-sided McNemar p-value on the discordant pairs.
+
+    Only questions the two runs disagree about carry information: the ones
+    both got right and both got wrong say nothing about which is better.
+    Under the null the b + c disagreements split like a fair coin.
+
+    This is the test to use here rather than comparing two accuracies. The
+    same 200 questions are asked of every configuration, so the comparison
+    is paired, and pairing is worth a great deal at this sample size: two
+    unpaired accuracies near 90% carry a standard error of about 2.1 points
+    each, which would hide exactly the one-to-two-point effects the weight
+    sweep is looking for.
+    """
+    n = b + c
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, i) for i in range(min(b, c) + 1))
+    return min(1.0, 2.0 * tail / (2 ** n))
+
+
+def by_question(samples) -> Dict[str, dict]:
+    return {s.get("question", ""): s for s in samples}
 
 
 def main() -> int:
@@ -131,6 +156,7 @@ def main() -> int:
             "acc_ceiling": 100.0 * (correct + recoverable) / total,
             "gen_length": cfg.get("gen_length"),
             "reported_cut_off": payload.get("cut_off"),
+            "samples": samples,
         })
 
     if not rows:
@@ -189,6 +215,34 @@ def main() -> int:
               "quantization is")
         print("  the extractor, not the model, and the raw column must not "
               "go in the chart.")
+
+        print()
+        print("=== paired test against the first dump (McNemar, exact) ===")
+        print(f"{'config':>14} {'paired':>7} {'lost':>5} {'gained':>7} "
+              f"{'p':>8}")
+        print("-" * 46)
+        base_by_q = by_question(base["samples"])
+        for r in rows[1:]:
+            other = by_question(r["samples"])
+            shared = [q for q in base_by_q if q in other]
+            lost = sum(1 for q in shared
+                       if base_by_q[q].get("correct")
+                       and not other[q].get("correct"))
+            gained = sum(1 for q in shared
+                         if not base_by_q[q].get("correct")
+                         and other[q].get("correct"))
+            p = mcnemar(lost, gained)
+            print(f"{r['label']:>14} {len(shared):>7} {lost:>5} "
+                  f"{gained:>7} {p:>8.3f}")
+        print()
+        print("  lost/gained  questions the first dump got right and this "
+              "one wrong, and back.")
+        print("  Only those carry information. A p above 0.05 means this "
+              "configuration is")
+        print("  not measurably worse -- which for four-bit weights is the "
+              "expected result,")
+        print("  and is a claim the raw accuracy column cannot make on its "
+              "own.")
 
     return 0
 
