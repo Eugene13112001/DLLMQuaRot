@@ -101,18 +101,21 @@ def _head(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return F.linear(x, tr.wte.weight)
 
 
-def bidirectional_bias(
-    q_len: int, k_len: int, dtype: torch.dtype, device
-) -> torch.Tensor:
-    """The additive bias for unmasked attention over ``k_len`` keys.
+def bidirectional_bias(k_len: int, dtype: torch.dtype, device) -> torch.Tensor:
+    """The additive bias for unmasked attention, as a full ``k_len`` square.
 
-    All zeros, which is what ``get_bidirectional_attention_bias`` returns --
-    reproduced here at the shape a windowed forward needs, ``(1, 1, q_len,
-    k_len)``, instead of building the full square and slicing it. Passing
-    ``None`` instead would leave the choice of mask to the block, and the
-    block's default is not guaranteed to stay non-causal across revisions.
+    Square, not pre-sliced to the window, because the block slices it itself:
+    its attention takes ``[key_len - query_len : key_len, :key_len]``, the
+    usual convention for a bias handed down whole from the model's forward.
+    Passing the already-narrow ``(1, 1, q_len, k_len)`` makes that slice read
+    past the end and the error surfaces inside SDPA as a shape mismatch that
+    names neither the bias nor the window.
+
+    All zeros, matching ``get_bidirectional_attention_bias``. Passing ``None``
+    instead would leave the choice of mask to the block, and its default is
+    not guaranteed to stay non-causal across revisions.
     """
-    return torch.zeros((1, 1, q_len, k_len), dtype=dtype, device=device)
+    return torch.zeros((1, 1, k_len, k_len), dtype=dtype, device=device)
 
 
 @torch.no_grad()
@@ -137,7 +140,7 @@ def run_blocks(
     x = _embed(model, input_ids)
     q_len = input_ids.shape[1]
     past_len = 0 if past_kv is None else int(past_kv[0][0].shape[-2])
-    bias = bidirectional_bias(q_len, past_len + q_len, x.dtype, x.device)
+    bias = bidirectional_bias(past_len + q_len, x.dtype, x.device)
 
     harvested: List[Tuple[torch.Tensor, torch.Tensor]] = []
     for i, block in enumerate(blocks(model)):

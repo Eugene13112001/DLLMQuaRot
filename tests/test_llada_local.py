@@ -73,7 +73,15 @@ class StubBlock(nn.Module):
 
         scores = q @ k.transpose(-1, -2) / (D_MODEL ** 0.5)
         if attention_bias is not None:
-            scores = scores + attention_bias[0]
+            # The checkpoint hands the bias down whole and each block cuts its
+            # own view out of it. Reproduced exactly, because getting this
+            # wrong is invisible without a past and fatal with one -- the
+            # first version of this file passed a pre-sliced bias and the
+            # mismatch surfaced inside SDPA naming neither the bias nor the
+            # window.
+            q_len, k_len = q.shape[-2], k.shape[-2]
+            bias = attention_bias[:, :, k_len - q_len:k_len, :k_len]
+            scores = scores + bias[0]
         att = torch.softmax(scores, dim=-1) @ v
         return x + self.out(att), present
 
@@ -121,9 +129,10 @@ def test_finds_blocks_under_both_layouts(model):
     assert len(blocks(StubWrapped(model))) == N_LAYERS
 
 
-def test_bias_is_zero_and_shaped_for_a_window():
-    bias = bidirectional_bias(4, 10, torch.float32, "cpu")
-    assert bias.shape == (1, 1, 4, 10)
+def test_bias_is_a_zero_square_over_all_keys():
+    """Square, not window-shaped: the block cuts its own slice out of it."""
+    bias = bidirectional_bias(10, torch.float32, "cpu")
+    assert bias.shape == (1, 1, 10, 10)
     assert torch.count_nonzero(bias) == 0
 
 
