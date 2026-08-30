@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dllmquant.cache import BlockKVCache, KVCacheConfig  # noqa: E402
 from dllmquant.config import DLLMQuantConfig, TMASConfig  # noqa: E402
 from dllmquant.models import build_adapter  # noqa: E402
-from dllmquant.models.llada2_local import cached_generate  # noqa: E402
+from dllmquant.models import llada2_local, llada_local  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_block_cache import text_ids  # noqa: E402
@@ -106,7 +106,17 @@ def per_block(a: torch.Tensor, b: torch.Tensor, bounds) -> List[float]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True)
-    ap.add_argument("--model-type", default="llada2_moe", choices=["llada2_moe"])
+    ap.add_argument("--model-type", default="llada2_moe",
+                    choices=["llada2_moe", "llada"],
+                    help="'llada' is the dense family (LLaDA-1.5), where "
+                         "the prefix is what ages: attention is "
+                         "bidirectional, so a closed position keeps "
+                         "attending to the masked tail and its K/V goes "
+                         "stale on its own. Under llada2_moe's "
+                         "block-causal mask the prefix is exact and only "
+                         "the current block can be stale. Same two errors, "
+                         "opposite regime -- which is the whole reason to "
+                         "run both.")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--device-map", default=None)
@@ -156,6 +166,22 @@ def main() -> int:
     adapter.load()
     print(adapter.describe())
 
+    # Which sampler drives the run. The two share a signature so everything
+    # below is written once, but they do not share a meaning for staleness:
+    # see the --model-type help. `hit_rate` follows the same split -- on the
+    # MoE path the measured quantity is the current block's store, on the
+    # dense path there is no such store and the prefix itself is what gets
+    # reused, so reading the window counters there would report a flat zero.
+    dense = args.model_type == "llada"
+    sampler = llada_local if dense else llada2_local
+    cached_generate = sampler.cached_generate
+
+    def hit_and_age(cache):
+        if dense:
+            ages = cache.stats.ages
+            return cache.stats.hit_rate, (sum(ages) / len(ages) if ages else 0.0)
+        return cache.stats.window_hit_rate, cache.stats.mean_window_age
+
     n_layers = len(adapter.blocks)
     gen_cfg = TMASConfig(gen_length=args.gen_length,
                          block_length=args.block_length,
@@ -181,8 +207,9 @@ def main() -> int:
             out = cached_generate(adapter, prompt, gen_cfg, cache,
                                   reuse_window=reuse, on_step=on_step)
             outs.append(out)
-            hits.append(cache.stats.window_hit_rate)
-            ages.append(cache.stats.mean_window_age)
+            hit, age = hit_and_age(cache)
+            hits.append(hit)
+            ages.append(age)
         return outs, (sum(hits) / len(hits)), (sum(ages) / len(ages))
 
     print(f"\ngenerating {args.gen_length} tokens = {n_blocks} blocks of "

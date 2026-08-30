@@ -201,16 +201,19 @@ def cached_generate(
     cfg,
     cache: BlockKVCache,
     *,
+    reuse_window: bool = True,
     on_step: Optional[Callable] = None,
 ):
     """The semi-autoregressive sampler with a quantized, ageing prefix cache.
 
     Deliberately mirrors ``llada2_local.cached_generate`` in shape and in the
     meaning of its arguments so the same measurement scripts drive both, but
-    one knob is missing here and its absence is the point: there is no
-    ``reuse_window``. On LLaDA2.0 the prefix is exact and staleness can only be
-    injected into the current block. Here the prefix is the thing that ages,
-    so the policy governs it directly and the window is always fresh.
+    ``reuse_window`` means something different here and the difference is the
+    point. On LLaDA2.0 the prefix is exact by construction, so staleness can
+    only be injected into the current block and the flag says whether to cache
+    that block. Here it is the *prefix* that ages, so the flag says whether to
+    let it: ``False`` refreshes every step, which is the exact variant, and
+    ``True`` follows the configured policy.
 
     A 16-bit cache refreshed every step must reproduce the uncached sampler
     token for token; that equivalence is what makes anything measured off this
@@ -245,8 +248,16 @@ def cached_generate(
 
             # One decision for every layer: the policies are uniform, so layer
             # 0 speaks for all of them, as on the MoE path.
-            if cache.should_refresh(0, cache.step, ratio,
-                                    block_boundary=(step == 0)):
+            stale = reuse_window and not cache.should_refresh(
+                0, cache.step, ratio, block_boundary=(step == 0)
+            )
+            if stale:
+                # Counted here rather than in the store: the store cannot see
+                # a read it was never asked for, and a reused prefix is
+                # exactly a read that did not happen.
+                cache.stats.reuses += 1
+                cache.stats.ages.append(cache.age(0))
+            else:
                 refresh_prefix(adapter.model, cache, x, lo, adapter.mask_id)
 
             logits = logits_from_lo(adapter.model, cache, x, lo)[:, : hi - lo, :]
