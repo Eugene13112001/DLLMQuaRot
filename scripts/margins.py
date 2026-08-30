@@ -244,6 +244,38 @@ def main() -> int:
     print("  parallelism a confidence-thresholded sampler reaches -- which is")
     print("  the number dInfer, Fast-dLLM and DMax sell.")
 
+    # ---------------------------------------------------------------- 4b
+    # The law has two arguments, age and bit width, and both are properties of
+    # the store. A third axis would be a property of the *trajectory*: a block
+    # decoded late reads K/V that earlier blocks already damaged, so if the
+    # shrinkage coefficient depends on which block a decision sits in, the
+    # damage accumulates along the sequence and one number per cell is hiding
+    # it. Free to ask -- the block index is in the position key.
+    print()
+    print("=== 4b. shrinkage fitted separately per block ===")
+    print("    a slope that falls left to right is accumulation along the")
+    print("    sequence, not a property of the store")
+    print()
+    head = "".join(f"{'blk ' + str(i):>14}" for i in range(n_blocks))
+    print(f"{'cell':>16} {head}")
+    print("-" * (17 + 14 * n_blocks))
+    for name in names:
+        if name == REFERENCE:
+            continue
+        cols = []
+        for b in range(n_blocks):
+            sub = [k for k in keys if (pos_of(k) - first) // block == b]
+            if len(sub) < 8:
+                cols.append(f"{'--':>14}")
+                continue
+            cb, _, rb = fit([cells[REFERENCE][k][0] for k in sub],
+                            [cells[name][k][0] for k in sub])
+            cols.append(f"{cb:>8.3f}/{rb:>4.2f}")
+        print(f"{name:>16} " + "".join(cols))
+    print()
+    print("  c / r per block. r below about 0.4 means the fit in that cell is")
+    print("  not determined and its c says nothing -- read those as blank.")
+
     # ---------------------------------------------------------------- 5
     kappa_table(cells, keys, names)
     return 0
