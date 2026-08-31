@@ -81,8 +81,9 @@ def main() -> int:
                     help="QuaRot rotations (not part of the paper)")
     ap.add_argument("--online-mlp", action="store_true")
 
-    g = ap.add_argument_group("KV cache (LLaDA2.0 only; block diffusion makes "
-                              "the prefix exactly reusable)")
+    g = ap.add_argument_group(
+        "KV cache (both families; block diffusion makes LLaDA2.0's prefix "
+        "exactly reusable, while LLaDA-1.5's ages on its own)")
     g.add_argument("--kv-cache", action="store_true",
                    help="read the prefix from a quantized cache instead of "
                         "recomputing it at every denoising step")
@@ -175,14 +176,20 @@ def main() -> int:
 
     generate = None
     if args.kv_cache:
-        if args.model_type != "llada2_moe":
-            raise SystemExit(
-                "--kv-cache needs block-causal attention. LLaDA-1.5 attends "
-                "over the whole sequence in both directions, so no position's "
-                "K/V is ever final and there is nothing to reuse."
-            )
         from dllmquant.cache import BlockKVCache, KVCacheConfig
-        from dllmquant.models.llada2_local import cached_generate
+        # The two families cache the same tensors for different reasons, and
+        # the flag means something different in each. Under LLaDA2.0's
+        # block-causal mask a closed position cannot see the block being
+        # decoded, so the prefix is exact by construction and only the current
+        # block can go stale. LLaDA-1.5 attends over everything in both
+        # directions: the prefix keeps attending to the masked tail, the tail
+        # changes at every commit, and the prefix ages on its own. Reusing it
+        # is still worth doing -- that is what the dense path measures -- but
+        # it is an approximation everywhere rather than in one window.
+        if args.model_type == "llada":
+            from dllmquant.models.llada_local import cached_generate
+        else:
+            from dllmquant.models.llada2_local import cached_generate
 
         kv_cfg = KVCacheConfig(
             enabled=True,
