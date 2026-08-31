@@ -234,18 +234,49 @@ def main() -> int:
     if len(rows) > 1:
         base = rows[0]
         print()
-        print("=== damage against the first dump, raw and corrected ===")
-        print(f"{'config':>14} {'raw':>8} {'corrected':>11}")
-        print("-" * 36)
+        print("=== damage against the first dump, on the shared questions ===")
+        print(f"{'config':>14} {'shared':>7} {'base%':>7} {'this%':>7} "
+              f"{'raw':>7} {'corrected':>10}")
+        print("-" * 50)
+        base_by_q = by_question(base["samples"])
         for r in rows[1:]:
-            print(f"{r['label']:>14} "
-                  f"{base['acc'] - r['acc']:>8.2f} "
-                  f"{base['acc_ceiling'] - r['acc_ceiling']:>11.2f}")
+            other = by_question(r["samples"])
+            shared = [q for q in base_by_q if q in other]
+            n = len(shared) or 1
+            b_acc = 100.0 * sum(1 for q in shared
+                                if base_by_q[q].get("correct")) / n
+            o_acc = 100.0 * sum(1 for q in shared
+                                if other[q].get("correct")) / n
+            # The ceiling counts a wrong-and-unmarked reply as correct when
+            # the gold value sits near its end -- the extractor's failure
+            # rather than the model's.
+            def ceiling(table):
+                hit = 0
+                for q in shared:
+                    s = table[q]
+                    if s.get("correct"):
+                        hit += 1
+                        continue
+                    text = s.get("completion", "")
+                    if _MARKER.search(text) or _BOXED.search(text):
+                        continue
+                    gold = s.get("gold")
+                    if gold is not None and mentions_gold(text, float(gold),
+                                                          args.tail_chars):
+                        hit += 1
+                return 100.0 * hit / n
+            print(f"{r['label']:>14} {len(shared):>7} {b_acc:>7.2f} "
+                  f"{o_acc:>7.2f} {b_acc - o_acc:>7.2f} "
+                  f"{ceiling(base_by_q) - ceiling(other):>10.2f}")
         print()
-        print("  If the two columns disagree, part of the measured cost of "
-              "quantization is")
-        print("  the extractor, not the model, and the raw column must not "
-              "go in the chart.")
+        print("  Damage is computed only on questions both runs answered. "
+              "Dumps taken at")
+        print("  different --n-eval do not share a question set, and "
+              "subtracting one run's")
+        print("  accuracy from another's would compare different exams.")
+        print("  If raw and corrected disagree, part of the measured cost is "
+              "the extractor,")
+        print("  not the model, and the raw column must not go in the chart.")
 
         print()
         print("=== paired test against the first dump (McNemar, exact) ===")
