@@ -183,3 +183,23 @@ def test_no_prefix_falls_back_to_a_full_pass(model):
     full, _ = run_blocks(model, x, None)
     got = logits_from_lo(model, cache, x, 0)
     torch.testing.assert_close(got, full, rtol=1e-5, atol=1e-5)
+
+
+def test_a_refresh_counts_once_not_once_per_layer(model):
+    """The hit rate divides refreshes by refreshes plus reuses.
+
+    `write` counts per layer, which is right where layers decide for
+    themselves; here they are all rewritten together against a reuse counter
+    that ticks once per step, so an uncorrected count would divide layers by
+    steps. The budget axis is computed from that ratio.
+    """
+    from dllmquant.cache import BlockKVCache, KVCacheConfig
+
+    x = torch.randint(0, VOCAB, (1, 12))
+    cache = BlockKVCache(KVCacheConfig(enabled=True), N_LAYERS)
+
+    refresh_prefix(model, cache, x, 5, mask_id=VOCAB - 1)
+    assert cache.stats.refreshes == 1
+
+    refresh_prefix(model, cache, x, 5, mask_id=VOCAB - 1)
+    assert cache.stats.refreshes == 2

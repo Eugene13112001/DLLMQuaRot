@@ -172,6 +172,7 @@ def refresh_prefix(
     if lo <= 0:
         return
     mask = (x[:, :lo] == mask_id)
+    before = cache.stats.refreshes
     for layer, (k, v) in enumerate(harvested):
         cache.write(
             layer,
@@ -179,6 +180,13 @@ def refresh_prefix(
             v[..., :lo, :].contiguous(),
             mask=mask,
         )
+    # One refresh, not thirty-two. `write` counts per layer, which is the
+    # right unit on the MoE path where each layer decides for itself, but
+    # here every layer is rewritten together and the reuse counter opposite
+    # it ticks once per step. Left uncorrected the hit rate divides layers by
+    # steps and reports a number that is not a rate of anything -- and the
+    # budget axis in `frontier.py` is computed from exactly that.
+    cache.stats.refreshes = before + 1
 
 
 @torch.no_grad()
