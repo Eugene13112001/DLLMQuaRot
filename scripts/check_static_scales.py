@@ -492,7 +492,18 @@ def main() -> int:
     calib_texts = [text_ids(adapter, total, seed=1000 + i)
                    for i in range(args.calib_samples)]
 
-    states = install_block_cache(model, BlockKVCache(KVCacheConfig(), n_layers))
+    # The two families reach the same tensors by different routes. The MoE
+    # path taps the cache-aware attention, which is the only place its K/V
+    # exist after RoPE; the dense path can simply ask for them, because its
+    # blocks return the pair the checkpoint's own `use_cache` builds. Going
+    # through `install_block_cache` on the dense model would drag in the
+    # vendored LLaDA2 module, which does not import under the transformers
+    # version LLaDA-1.5 needs -- the failure is at call time, not import time,
+    # so the dispatch belongs here rather than at the top of the file.
+    dense = args.model_type == "llada"
+    states = (None if dense
+              else install_block_cache(model, BlockKVCache(KVCacheConfig(),
+                                                           n_layers)))
 
     def canvas_for(text, seed, mask_ratio):
         return masked_canvas(adapter, text, args.block_length, prefix_len,
@@ -501,6 +512,12 @@ def main() -> int:
 
     def raw_kv(x, mask_ratio) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
         """One forward, keeping the exact K/V the cache would have written."""
+        if dense:
+            from dllmquant.models.llada_local import run_blocks
+            _, harvested = run_blocks(model, x, None, collect=True)
+            return {i: (k[..., :prefix_len, :].contiguous(),
+                        v[..., :prefix_len, :].contiguous())
+                    for i, (k, v) in enumerate(harvested)}
         sink: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         tap = TapCache(n_layers, sink)
         tap.mask_ratio = mask_ratio
