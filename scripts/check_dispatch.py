@@ -47,7 +47,80 @@ from dllmquant.modules import wrap_linears  # noqa: E402
 
 from check_block_cache import text_ids  # noqa: E402
 from measure_drift import record_routes  # noqa: E402
-from trace_window_path import route_overlap  # noqa: E402
+from trace_window_path import ROUTER_NAMES, route_overlap  # noqa: E402
+
+
+def capture_routes(adapter, thunk):
+    """Every router's choice during ``thunk``, keyed by layer.
+
+    ``record_routes`` runs its own plain forward, which is right for the
+    activation mode and wrong for the cache one: there the prefix has to be
+    written first, and that write is itself a forward whose routes would
+    overwrite the ones being measured. Here the caller decides what runs.
+    """
+    routes: Dict[int, torch.Tensor] = {}
+    handles = []
+
+    def hook(i):
+        def fn(module, inputs, output):
+            parts = output if isinstance(output, (tuple, list)) else (output,)
+            for t in parts:
+                if (isinstance(t, torch.Tensor) and t.numel()
+                        and not t.is_floating_point()):
+                    routes[i] = t.detach()
+                    return
+        return fn
+
+    for i, block in enumerate(adapter.blocks):
+        for name, module in block.named_modules():
+            if (name.split(".")[-1] in ROUTER_NAMES
+                    and hasattr(module, "num_experts")):
+                handles.append(module.register_forward_hook(hook(i)))
+    try:
+        thunk()
+    finally:
+        for h in handles:
+            h.remove()
+    return routes
+
+
+def routes_through_cache(adapter, x, bits, lo, total, block_length,
+                         group_size, key_axis):
+    """Routes on the window, with the prefix read back from a quantized store.
+
+    This is the measurement the activation mode cannot make. Pinning routes
+    was the obvious way to ask what the router does to a cache error, and it
+    does not work: holding the gate to an all-masked canvas's choices halves
+    the decision margins, so damage rises everywhere and the comparison is
+    against a different operating point (4.6). Quantizing the store instead
+    leaves the model exactly where it was and changes one thing.
+
+    The prefix write is deliberately outside the capture: it is a full forward
+    of its own, and its routes are not the ones under test.
+    """
+    from dllmquant.cache import BlockKVCache, KVCacheConfig
+    from dllmquant.models.llada2_local import (
+        install_block_cache, logits_for_window, refresh_prefix,
+        remove_block_cache,
+    )
+
+    cache = BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=bits, masked_bits=bits,
+                      group_size=group_size, key_axis=key_axis,
+                      policy="every_n", refresh_every=1),
+        len(adapter.blocks),
+    )
+    states = install_block_cache(adapter.model, cache)
+    try:
+        refresh_prefix(adapter.model, states, x, lo, block_length,
+                       mask_id=adapter.mask_id)
+        return capture_routes(
+            adapter,
+            lambda: logits_for_window(adapter.model, states, x, lo, total,
+                                      block_length),
+        )
+    finally:
+        remove_block_cache(adapter.model)
 
 
 def quantize_activations(adapter, a_bits: int, group_size: int) -> None:
@@ -102,6 +175,21 @@ def main() -> int:
     ap.add_argument("--model-type", default="llada2_moe", choices=["llada2_moe"])
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--mode", default="activations",
+                    choices=["activations", "cache"],
+                    help="what gets quantized. 'activations' asks whether "
+                         "per-token quantization breaks the MoE's dispatch, "
+                         "which is the 85-point question. 'cache' asks the "
+                         "other half: whether the router is what turns a "
+                         "four-bit cache into a rounding floor ten times the "
+                         "dense model's")
+    ap.add_argument("--kv-bits", type=int, nargs="+", default=[4, 3],
+                    help="cache mode: widths to compare against a lossless "
+                         "store at the same operating point")
+    ap.add_argument("--kv-group-size", type=int, default=128)
+    ap.add_argument("--kv-key-axis", default="token",
+                    choices=["channel", "token"])
+    ap.add_argument("--block-length", type=int, default=32)
     ap.add_argument("--a-bits", type=int, default=4)
     ap.add_argument("--a-group-sizes", type=int, nargs="+", default=[-1, 128],
                     help="-1 is one scale per token across all channels, which "
@@ -139,7 +227,13 @@ def main() -> int:
             x[:, args.prompt_tokens:args.prompt_tokens + keep] = filler[:, :keep]
         canvases[ratio] = x
 
-    print(f"\nactivations at {args.a_bits} bits, weights and router untouched")
+    print()
+    if args.mode == "cache":
+        print(f"cache at {args.kv_bits} bits against a lossless store, "
+              f"group {args.kv_group_size}, K along {args.kv_key_axis}")
+        print("weights, activations and router all untouched")
+    else:
+        print(f"activations at {args.a_bits} bits, weights and router untouched")
     print(f"canvas {total} tokens, mask ratios "
           + ", ".join(f"{r:.2f}" for r in args.mask_ratios))
 
@@ -157,7 +251,34 @@ def main() -> int:
             break
 
     rows: List[tuple] = []
-    for gs in args.a_group_sizes:
+
+    if args.mode == "cache":
+        # One model, one canvas, one thing changed. The reference is the same
+        # windowed forward at sixteen bits, so the prefix is written and read
+        # back through the same path and only the rounding differs. That is
+        # what pinning could not give: it moved the operating point instead of
+        # isolating a variable (4.6).
+        lo = total - args.block_length
+        reference = {
+            r: routes_through_cache(adapter, x, 16, lo, total,
+                                    args.block_length, args.kv_group_size,
+                                    args.kv_key_axis)
+            for r, x in canvases.items()
+        }
+        for ratio, x in canvases.items():
+            for bits in args.kv_bits:
+                got = routes_through_cache(adapter, x, bits, lo, total,
+                                           args.block_length,
+                                           args.kv_group_size,
+                                           args.kv_key_axis)
+                overlaps = [route_overlap(reference[ratio][i], got[i])
+                            for i in sorted(got) if i in reference[ratio]]
+                overlaps = [o for o in overlaps if o == o]
+                rows.append((f"{bits}-bit cache", ratio,
+                             sum(overlaps) / max(len(overlaps), 1),
+                             min(overlaps) if overlaps else float("nan")))
+
+    for gs in (args.a_group_sizes if args.mode == "activations" else []):
         # Reloaded per setting: wrap_linears replaces modules in place, and
         # unwrapping is not the inverse of wrapping once a second quantizer
         # has been layered on top of the first. Dropped explicitly first --
@@ -199,15 +320,30 @@ def main() -> int:
               f"{'--':>12}   <-- destroyed-dispatch floor")
 
     print()
-    print("  Agreement near the floor means per-token quantization is not")
-    print("  making the model worse at arithmetic -- it is sending tokens to")
-    print("  different experts, and the 6% of replies that reach an answer is")
-    print("  what that looks like downstream. Agreement near 100% would send")
-    print("  the explanation back to precision, where bit width is the lever.")
-    print()
-    print("  The router is left in full precision here on purpose: perturbing")
-    print("  the gate itself would move dispatch by construction. What is")
-    print("  being asked is whether perturbing everything else suffices.")
+    if args.mode == "cache":
+        print("  This is the amplifier measured directly. The cache's rounding")
+        print("  floor on decisions is ten times the dense model's -- 3.9% and")
+        print("  5.6% against 0.7% and 0.4% -- and K's channel structure is")
+        print("  the same in both families (2.6b), so the difference has to")
+        print("  come from what the model does with the error rather than")
+        print("  from the error itself. Agreement well below 100% here says")
+        print("  a four-bit store is enough to re-dispatch tokens, and the")
+        print("  route flip is what nineteen layers then compound.")
+        print()
+        print("  Nothing else is touched, so the operating point is the one")
+        print("  every other table in this project was measured at. Pinning")
+        print("  the routes cannot do that: it halves the decision margins")
+        print("  and moves the comparison somewhere else entirely (4.6).")
+    else:
+        print("  Agreement near the floor means per-token quantization is not")
+        print("  making the model worse at arithmetic -- it is sending tokens to")
+        print("  different experts, and the 6% of replies that reach an answer is")
+        print("  what that looks like downstream. Agreement near 100% would send")
+        print("  the explanation back to precision, where bit width is the lever.")
+        print()
+        print("  The router is left in full precision here on purpose: perturbing")
+        print("  the gate itself would move dispatch by construction. What is")
+        print("  being asked is whether perturbing everything else suffices.")
     return 0
 
 
