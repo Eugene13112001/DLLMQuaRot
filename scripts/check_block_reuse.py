@@ -52,6 +52,8 @@ from dllmquant.cache import BlockKVCache, KVCacheConfig  # noqa: E402
 from dllmquant.config import DLLMQuantConfig, TMASConfig  # noqa: E402
 from dllmquant.models import build_adapter  # noqa: E402
 from dllmquant.models import llada2_local, llada_local  # noqa: E402
+from measure_drift import record_routes  # noqa: E402
+from trace_window_path import force_routes  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_block_cache import text_ids  # noqa: E402
@@ -144,6 +146,22 @@ def main() -> int:
                          "128 tokens and 4 prompts it is 512 trials.")
     ap.add_argument("--group-size", type=int, default=128)
     ap.add_argument("--key-axis", default="token", choices=["channel", "token"])
+    ap.add_argument("--pin-routes", action="store_true",
+                    help="hold every router to the choice it made on the "
+                         "all-masked canvas, for the whole sweep. On tensors "
+                         "this already showed that a fifth to a third of what "
+                         "the current block calls staleness is route churn "
+                         "rather than the state moving, and that the router "
+                         "turns a small arithmetic shift into a discrete "
+                         "change of expert. Neither of those says what it does "
+                         "to a decision, which is the quantity every table "
+                         "here is in. Pinned, the rounding floor and the "
+                         "staleness rows can be read again with the amplifier "
+                         "switched off: if the floor collapses toward the "
+                         "dense model's 0.7%% while the block row barely "
+                         "moves, the router is amplifying rounding "
+                         "selectively -- and if both move together it "
+                         "amplifies whatever it is given")
     ap.add_argument("--dump-margins", default=None,
                     help="write per-position decision margins to this JSON. "
                          "The teacher-forced canvas makes a position the same "
@@ -190,6 +208,24 @@ def main() -> int:
 
     prompts = [text_ids(adapter, args.prompt_tokens, seed=i).unsqueeze(0)
                for i in range(args.samples)]
+
+    restore = None
+    if args.pin_routes:
+        if dense:
+            raise SystemExit("--pin-routes needs a router; the dense family "
+                             "has none")
+        # Pinned from the all-masked canvas of the first prompt and held for
+        # every cell, so the amplifier is off in the same way everywhere and
+        # the rows stay comparable to each other. Pinning per prompt would
+        # switch the thing under test between rows.
+        first = torch.full((1, args.prompt_tokens + args.gen_length),
+                           adapter.mask_id, dtype=torch.long,
+                           device=next(adapter.model.parameters()).device)
+        first[:, :args.prompt_tokens] = prompts[0].to(first.device)
+        routes = record_routes(adapter, first)
+        restore = force_routes(adapter.blocks, routes, 0, first.shape[1])
+        print(f"  routes pinned on {len(routes)} layers -- every row below is "
+              f"measured with the router's amplifier switched off")
 
     def kv_config(bits: int, policy: str, every: int) -> KVCacheConfig:
         return KVCacheConfig(
