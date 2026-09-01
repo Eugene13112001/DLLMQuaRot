@@ -505,6 +505,36 @@ def main() -> int:
               else install_block_cache(model, BlockKVCache(KVCacheConfig(),
                                                            n_layers)))
 
+    # The three cached-forward calls the sweep needs, one implementation per
+    # family. The dense path has no block-causal mask and no window store to
+    # thread through: its prefix rides the checkpoint's own `layer_past`, so a
+    # windowed forward is a call rather than a mode.
+    if dense:
+        from dllmquant.models.llada_local import (  # noqa: E402
+            logits_from_lo as _dense_window,
+            refresh_prefix as _dense_refresh,
+            run_blocks as _dense_run,
+        )
+
+        def full_logits_for(x):
+            return _dense_run(model, x, None)[0]
+
+        def fill_prefix(cache, x):
+            _dense_refresh(model, cache, x, prefix_len, adapter.mask_id)
+
+        def window_logits(cache, x):
+            return _dense_window(model, cache, x, prefix_len)[:, :total - prefix_len]
+    else:
+        def full_logits_for(x):
+            return full_logits(model, x, args.block_length)
+
+        def fill_prefix(cache, x):
+            refresh_prefix(model, states, x, prefix_len, args.block_length)
+
+        def window_logits(cache, x):
+            return logits_for_window(model, states, x, prefix_len, total,
+                                     args.block_length)
+
     def canvas_for(text, seed, mask_ratio):
         return masked_canvas(adapter, text, args.block_length, prefix_len,
                              mask_ratio, args.window_mask_ratio,
@@ -588,7 +618,7 @@ def main() -> int:
             batch = []
             for i, text in enumerate(eval_texts):
                 x = canvas_for(text, i, mask_ratio)
-                reference = full_logits(model, x, args.block_length)[:, prefix_len:]
+                reference = full_logits_for(x)[:, prefix_len:]
                 batch.append(
                     (x, reference, x[:, prefix_len:total] == adapter.mask_id)
                 )
@@ -600,14 +630,13 @@ def main() -> int:
         for x, reference, committable in batch:
             cache = make_cache()
             cache.mask_ratio = mask_ratio
-            for state in states:
-                state.cache = cache
-            refresh_prefix(model, states, x, prefix_len, args.block_length)
+            if not dense:
+                for state in states:
+                    state.cache = cache
+            fill_prefix(cache, x)
             if scramble:
                 cache.scramble(torch.Generator().manual_seed(0))
-            windowed = logits_for_window(
-                model, states, x, prefix_len, total, args.block_length
-            )
+            windowed = window_logits(cache, x)
             pooled = pooled + compare(reference, windowed,
                                       committable=committable,
                                       top_k=args.commit_k)
