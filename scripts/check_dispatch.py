@@ -31,6 +31,7 @@ would look like numerically.
 from __future__ import annotations
 
 import argparse
+import gc
 import pathlib
 import sys
 from typing import Dict, List
@@ -159,7 +160,14 @@ def main() -> int:
     for gs in args.a_group_sizes:
         # Reloaded per setting: wrap_linears replaces modules in place, and
         # unwrapping is not the inverse of wrapping once a second quantizer
-        # has been layered on top of the first.
+        # has been layered on top of the first. Dropped explicitly first --
+        # rebinding the name is not enough to give the card back before the
+        # next load asks for it, and on a shared node the gap decides whether
+        # this fits at all.
+        adapter = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         adapter = build_adapter(cfg)
         adapter.load()
         quantize_activations(adapter, args.a_bits, gs)
