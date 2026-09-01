@@ -71,8 +71,14 @@ class StubBlock(nn.Module):
             k = torch.cat([layer_past[0], k], dim=-2)
             v = torch.cat([layer_past[1], v], dim=-2)
 
+        return x + self.out(
+            self._scaled_dot_product_attention(q, k, v, attn_mask=attention_bias)
+        ), present
+
+    def _scaled_dot_product_attention(self, q, k, v, attn_mask=None,
+                                      dropout_p=0.0, is_causal=False):
         scores = q @ k.transpose(-1, -2) / (D_MODEL ** 0.5)
-        if attention_bias is not None:
+        if attn_mask is not None:
             # The checkpoint hands the bias down whole and each block cuts its
             # own view out of it. Reproduced exactly, because getting this
             # wrong is invisible without a past and fatal with one -- the
@@ -80,10 +86,9 @@ class StubBlock(nn.Module):
             # mismatch surfaced inside SDPA naming neither the bias nor the
             # window.
             q_len, k_len = q.shape[-2], k.shape[-2]
-            bias = attention_bias[:, :, k_len - q_len:k_len, :k_len]
+            bias = attn_mask[:, :, k_len - q_len:k_len, :k_len]
             scores = scores + bias[0]
-        att = torch.softmax(scores, dim=-1) @ v
-        return x + self.out(att), present
+        return torch.softmax(scores, dim=-1) @ v
 
 
 class StubTransformer(nn.Module):
@@ -203,3 +208,99 @@ def test_a_refresh_counts_once_not_once_per_layer(model):
 
     refresh_prefix(model, cache, x, 5, mask_id=VOCAB - 1)
     assert cache.stats.refreshes == 2
+
+
+def _cache(bits=16):
+    from dllmquant.cache import BlockKVCache, KVCacheConfig
+    return BlockKVCache(
+        KVCacheConfig(enabled=True, decoded_bits=bits, masked_bits=bits,
+                      policy="every_n", refresh_every=1),
+        N_LAYERS,
+    )
+
+
+def test_recording_the_window_changes_nothing_at_16_bits(model):
+    """Storing the block's own K/V losslessly must be a no-op.
+
+    The window store is the axis that compares to LLaDA2.0: there the prefix
+    is exact and only the current block can be stale, so the dense path needs
+    the same knob before the two are measuring one object.
+    """
+    from dllmquant.models.llada_local import (
+        install_window_store, remove_window_store)
+
+    x = torch.randint(0, VOCAB, (1, 12))
+    lo, width = 5, 3
+    cache = _cache()
+    full, _ = run_blocks(model, x, None)
+    refresh_prefix(model, cache, x, lo, mask_id=VOCAB - 1)
+
+    states = install_window_store(model, cache)
+    try:
+        got = logits_from_lo(model, cache, x, lo, states=states,
+                             window="record", width=width)
+    finally:
+        remove_window_store(model)
+    torch.testing.assert_close(got, full[:, lo:, :], rtol=1e-3, atol=1e-3)
+
+
+def test_reusing_an_unchanged_window_changes_nothing(model):
+    """Read back what was just written, with the canvas untouched."""
+    from dllmquant.models.llada_local import (
+        install_window_store, remove_window_store)
+
+    x = torch.randint(0, VOCAB, (1, 12))
+    lo, width = 5, 3
+    cache = _cache()
+    full, _ = run_blocks(model, x, None)
+    refresh_prefix(model, cache, x, lo, mask_id=VOCAB - 1)
+
+    states = install_window_store(model, cache)
+    try:
+        logits_from_lo(model, cache, x, lo, states=states,
+                       window="record", width=width)
+        got = logits_from_lo(model, cache, x, lo, states=states,
+                             window="reuse", width=width)
+    finally:
+        remove_window_store(model)
+    torch.testing.assert_close(got, full[:, lo:, :], rtol=1e-3, atol=1e-3)
+
+
+def test_a_stale_window_moves_the_logits_and_the_suffix_stays_fresh(model):
+    """The point of the knob: reuse after the canvas moved must differ.
+
+    And it must differ *because of the block*, not the tail -- the suffix is
+    recomputed every step, so swapping only the block's slice is what makes
+    this staleness rather than a different model.
+    """
+    from dllmquant.models.llada_local import (
+        install_window_store, remove_window_store)
+
+    x = torch.randint(0, VOCAB, (1, 12))
+    lo, width = 5, 3
+    cache = _cache()
+    refresh_prefix(model, cache, x, lo, mask_id=VOCAB - 1)
+
+    states = install_window_store(model, cache)
+    try:
+        logits_from_lo(model, cache, x, lo, states=states,
+                       window="record", width=width)
+        x[0, lo] = (int(x[0, lo]) + 7) % VOCAB          # a token commits
+        stale = logits_from_lo(model, cache, x, lo, states=states,
+                               window="reuse", width=width)
+        fresh = logits_from_lo(model, cache, x, lo, states=states,
+                               window="off", width=width)
+    finally:
+        remove_window_store(model)
+    assert not torch.allclose(stale, fresh, rtol=1e-3, atol=1e-3)
+
+
+def test_removing_the_store_restores_the_original_method(model):
+    from dllmquant.models.llada_local import (
+        install_window_store, remove_window_store)
+
+    before = [b._scaled_dot_product_attention for b in blocks(model)]
+    install_window_store(model, _cache())
+    remove_window_store(model)
+    after = [b._scaled_dot_product_attention for b in blocks(model)]
+    assert all(a.__func__ is bf.__func__ for a, bf in zip(after, before))

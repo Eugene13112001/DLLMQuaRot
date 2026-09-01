@@ -32,8 +32,18 @@ loop is driven directly here -- the same choice already made in
 **What is forwarded.** The window is ``[lo, total)`` -- the current block *and*
 the masked tail -- not just the block. Bidirectional attention means the block's
 queries read the tail, so dropping it would not be staleness but a different
-model. The saving and the staleness both sit in the prefix, which is where
-LLaDA-1.5 accumulates its drift anyway.
+model.
+
+**Two stores on two clocks, and the distinction is the experiment.** The prefix
+rides the checkpoint's own ``layer_past``; ``stale_prefix`` lets the policy age
+it, which is the axis unique to bidirectional attention. The current block
+cannot go through ``layer_past`` at all -- its keys are built inside the
+forward, after rotary, and ``layer_past`` only prepends -- so ``reuse_window``
+hooks ``_scaled_dot_product_attention``, which sees q, k and v assembled, and
+swaps the block's slice of k and v there. That second axis is the one LLaDA2.0
+has, and without it the two families are measured on different objects: the
+first grid run this way put damage at 3.0% against 63.7%, which compares a
+prefix of settled tokens with a block that changes every step.
 """
 
 from __future__ import annotations
@@ -118,6 +128,99 @@ def bidirectional_bias(k_len: int, dtype: torch.dtype, device) -> torch.Tensor:
     return torch.zeros((1, 1, k_len, k_len), dtype=dtype, device=device)
 
 
+class WindowState:
+    """Per-block switch for the current block's own K/V.
+
+    The prefix goes through ``layer_past``, which the checkpoint already
+    supports. The current block cannot: its keys are computed inside the
+    forward, after rotary, and ``layer_past`` only prepends. So this hooks the
+    one method that sees them assembled --
+    ``LLaDABlock._scaled_dot_product_attention``, which receives q, k and v
+    with rotary applied and the past already concatenated -- and swaps the
+    block's slice of k and v before handing them on.
+
+    Nothing is reimplemented: the original method is called with edited
+    tensors, so the kernel choice, the bias handling and the dropout stay the
+    checkpoint's own.
+    """
+
+    __slots__ = ("mode", "cache", "layer", "start", "width", "mask", "orig")
+
+    def __init__(self) -> None:
+        self.mode = "off"  # off | record | reuse
+        self.cache: Optional[BlockKVCache] = None
+        self.layer = 0
+        # Where the block sits inside the assembled key axis. The forward
+        # covers [lo, total) and the past covers [0, lo), so the block is the
+        # first `width` keys after the past -- not the tail, which is the
+        # masked suffix and must stay fresh.
+        self.start = 0
+        self.width = 0
+        self.mask: Optional[torch.Tensor] = None
+        self.orig: Optional[Callable] = None
+
+
+def _make_sdpa(state: "WindowState"):
+    def sdpa(self, q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False):
+        if state.mode != "off" and state.width > 0:
+            a, b = state.start, state.start + state.width
+            if state.mode == "record":
+                kk, vv = state.cache.write_window(
+                    state.layer,
+                    k[..., a:b, :].contiguous(),
+                    v[..., a:b, :].contiguous(),
+                    mask=state.mask,
+                )
+            else:
+                # Deliberately stale: computed before the tokens committed
+                # since the last refresh. The queries stay fresh, so what is
+                # measured is exactly the mismatch a reused block causes.
+                kk, vv = state.cache.read_window(state.layer)
+            k = torch.cat([k[..., :a, :], kk, k[..., b:, :]], dim=-2)
+            v = torch.cat([v[..., :a, :], vv, v[..., b:, :]], dim=-2)
+        return state.orig(q, k, v, attn_mask=attn_mask,
+                          dropout_p=dropout_p, is_causal=is_causal)
+    return sdpa
+
+
+def install_window_store(model: nn.Module, cache: BlockKVCache) -> List[WindowState]:
+    """Hook every block's attention kernel, switched off."""
+    import types
+
+    states = []
+    for i, block in enumerate(blocks(model)):
+        state = WindowState()
+        state.cache = cache
+        state.layer = i
+        state.orig = block._scaled_dot_product_attention
+        block._dllm_window = state
+        block._scaled_dot_product_attention = types.MethodType(
+            _make_sdpa(state), block
+        )
+        states.append(state)
+    return states
+
+
+def remove_window_store(model: nn.Module) -> None:
+    for block in blocks(model):
+        block.__dict__.pop("_scaled_dot_product_attention", None)
+        block.__dict__.pop("_dllm_window", None)
+
+
+def set_window(
+    states: List[WindowState],
+    mode: str,
+    start: int = 0,
+    width: int = 0,
+    mask: Optional[torch.Tensor] = None,
+) -> None:
+    for state in states:
+        state.mode = mode
+        state.start = start
+        state.width = width
+        state.mask = mask
+
+
 @torch.no_grad()
 def run_blocks(
     model: nn.Module,
@@ -195,13 +298,37 @@ def logits_from_lo(
     cache: BlockKVCache,
     x: torch.Tensor,
     lo: int,
+    *,
+    states: Optional[List["WindowState"]] = None,
+    window: str = "off",
+    width: int = 0,
+    window_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Logits for positions ``lo..`` reading the prefix out of the store."""
+    """Logits for positions ``lo..``, prefix from the store, block optional.
+
+    ``window`` switches the current block's own K/V: ``off`` recomputes it
+    every step, ``record`` recomputes and stores it, ``reuse`` reads the stored
+    one back. Its offset inside the key axis is the prefix length, because the
+    forward covers ``[lo, total)`` and the past covers ``[0, lo)``.
+    """
+    n_layers = len(blocks(model))
     if lo <= 0 or not cache.has(0):
-        logits, _ = run_blocks(model, x, None)
+        if states is not None:
+            set_window(states, window, 0, width, window_mask)
+        try:
+            logits, _ = run_blocks(model, x, None)
+        finally:
+            if states is not None:
+                set_window(states, "off")
         return logits[:, lo:, :]
-    past = [cache.read(i) for i in range(len(blocks(model)))]
-    logits, _ = run_blocks(model, x[:, lo:], past)
+    past = [cache.read(i) for i in range(n_layers)]
+    if states is not None:
+        set_window(states, window, lo, width, window_mask)
+    try:
+        logits, _ = run_blocks(model, x[:, lo:], past)
+    finally:
+        if states is not None:
+            set_window(states, "off")
     return logits
 
 
@@ -213,6 +340,7 @@ def cached_generate(
     cache: BlockKVCache,
     *,
     reuse_window: bool = True,
+    stale_prefix: bool = False,
     on_step: Optional[Callable] = None,
 ):
     """The semi-autoregressive sampler with a quantized, ageing prefix cache.
@@ -249,52 +377,76 @@ def cached_generate(
     schedule = _split_evenly(cfg.steps, len(bounds))
 
     cache.reset()
-    for block_idx, (lo, hi) in enumerate(bounds):
-        block_mask = x[:, lo:hi] == adapter.mask_id
-        budget = get_num_transfer_tokens(block_mask, schedule[block_idx])
+    states = install_window_store(adapter.model, cache) if reuse_window else None
+    try:
+        for block_idx, (lo, hi) in enumerate(bounds):
+            cache.reset_window()
+            block_mask = x[:, lo:hi] == adapter.mask_id
+            budget = get_num_transfer_tokens(block_mask, schedule[block_idx])
 
-        for step in range(schedule[block_idx]):
-            still_masked = x[:, lo:hi] == adapter.mask_id
-            ratio = float(still_masked.to(torch.float32).mean())
+            for step in range(schedule[block_idx]):
+                still_masked = x[:, lo:hi] == adapter.mask_id
+                ratio = float(still_masked.to(torch.float32).mean())
 
-            # One decision for every layer: the policies are uniform, so layer
-            # 0 speaks for all of them, as on the MoE path.
-            stale = reuse_window and not cache.should_refresh(
-                0, cache.step, ratio, block_boundary=(step == 0)
-            )
-            if stale:
-                # Counted here rather than in the store: the store cannot see
-                # a read it was never asked for, and a reused prefix is
-                # exactly a read that did not happen.
-                cache.stats.reuses += 1
-                cache.stats.ages.append(cache.age(0))
-            else:
-                refresh_prefix(adapter.model, cache, x, lo, adapter.mask_id)
+                # Two stores on two clocks, as on the MoE path. The prefix is
+                # rewritten at the block boundary; letting the policy age it too
+                # is a second axis, reachable with stale_prefix, and it is not the
+                # one that compares to LLaDA2.0.
+                stale = stale_prefix and not cache.should_refresh(
+                    0, cache.step, ratio, block_boundary=(step == 0)
+                )
+                if stale:
+                    # Counted here rather than in the store: the store cannot see
+                    # a read it was never asked for, and a reused prefix is
+                    # exactly a read that did not happen.
+                    cache.stats.reuses += 1
+                    cache.stats.ages.append(cache.age(0))
+                elif step == 0 or stale_prefix:
+                    refresh_prefix(adapter.model, cache, x, lo, adapter.mask_id)
 
-            logits = logits_from_lo(adapter.model, cache, x, lo)[:, : hi - lo, :]
-            cache.advance()
+                # One decision for every layer: the policies are uniform, so layer
+                # 0 speaks for all of them.
+                window = "off"
+                if reuse_window:
+                    window = ("record"
+                          if cache.should_refresh_window(0, cache.step, ratio)
+                          else "reuse")
 
-            probs = torch.softmax(logits.to(torch.float32), dim=-1)
-            confidence, proposal = probs.max(dim=-1)
+                logits = logits_from_lo(
+                    adapter.model, cache, x, lo,
+                    states=states, window=window, width=hi - lo,
+                    window_mask=still_masked if window == "record" else None,
+                )[:, : hi - lo, :]
+                cache.advance()
 
-            k = int(budget[0, step])
-            if k <= 0 or not still_masked.any():
-                continue
+                probs = torch.softmax(logits.to(torch.float32), dim=-1)
+                confidence, proposal = probs.max(dim=-1)
 
-            score = torch.where(
-                still_masked, confidence, torch.full_like(confidence, -torch.inf)
-            )
-            take = min(k, int(still_masked.sum()))
-            chosen = torch.topk(score[0], k=take).indices
-            x[0, lo + chosen] = proposal[0, chosen]
+                k = int(budget[0, step])
+                if k <= 0 or not still_masked.any():
+                    continue
 
-            if on_step is not None:
-                on_step(block_idx, step, lo, hi, logits, x)
+                score = torch.where(
+                    still_masked, confidence, torch.full_like(confidence, -torch.inf)
+                )
+                take = min(k, int(still_masked.sum()))
+                chosen = torch.topk(score[0], k=take).indices
+                x[0, lo + chosen] = proposal[0, chosen]
+
+                if on_step is not None:
+                    on_step(block_idx, step, lo, hi, logits, x)
+    finally:
+        if states is not None:
+            remove_window_store(adapter.model)
 
     return x
 
 
 __all__ = [
+    "WindowState",
+    "install_window_store",
+    "remove_window_store",
+    "set_window",
     "blocks",
     "bidirectional_bias",
     "cached_generate",
