@@ -419,7 +419,19 @@ class TapCache(BlockKVCache):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True)
-    ap.add_argument("--model-type", default="llada2_moe", choices=["llada2_moe"])
+    ap.add_argument("--model-type", default="llada2_moe",
+                    choices=["llada2_moe", "llada"],
+                    help="the dense family is here to separate two outlier "
+                         "stories that look like one. Its activations are far "
+                         "more outlier-heavy than the MoE's -- ratio 244 "
+                         "against 8.7 -- and yet its cache tolerates three "
+                         "bits almost for free, 0.4%% against 5.6%%. If K's "
+                         "channels are also stable there, the two are one "
+                         "phenomenon and the inverse ordering needs "
+                         "explaining; if they are not, the tensor that "
+                         "decides for weights and the tensor that decides for "
+                         "the cache are simply different, and the axis result "
+                         "was never expected to transfer")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--device-map", default=None)
