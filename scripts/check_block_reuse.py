@@ -209,23 +209,34 @@ def main() -> int:
     prompts = [text_ids(adapter, args.prompt_tokens, seed=i).unsqueeze(0)
                for i in range(args.samples)]
 
-    restore = None
+    if args.pin_routes and dense:
+        raise SystemExit("--pin-routes needs a router; the dense family has none")
+
+    seq_len = args.prompt_tokens + args.gen_length
+
+    def pin_for(prompt):
+        """Hold this prompt's routers to what its own all-masked canvas chose.
+
+        Per prompt, not once for the sweep. Recording on one prompt and
+        forcing the result on the others is not "the amplifier off" but a
+        different model: the tokens are sent to experts chosen for somebody
+        else's text. The first version of this did exactly that, and it made
+        every row two to three times worse instead of better -- which reads
+        as a finding until one notices the reference row still says 100%,
+        because both sides of that comparison were equally wrong.
+        """
+        if not args.pin_routes:
+            return None
+        device_ = next(adapter.model.parameters()).device
+        x = torch.full((1, seq_len), adapter.mask_id, dtype=torch.long,
+                       device=device_)
+        x[:, :args.prompt_tokens] = prompt.to(device_)
+        return force_routes(adapter.blocks, record_routes(adapter, x),
+                            0, seq_len)
+
     if args.pin_routes:
-        if dense:
-            raise SystemExit("--pin-routes needs a router; the dense family "
-                             "has none")
-        # Pinned from the all-masked canvas of the first prompt and held for
-        # every cell, so the amplifier is off in the same way everywhere and
-        # the rows stay comparable to each other. Pinning per prompt would
-        # switch the thing under test between rows.
-        first = torch.full((1, args.prompt_tokens + args.gen_length),
-                           adapter.mask_id, dtype=torch.long,
-                           device=next(adapter.model.parameters()).device)
-        first[:, :args.prompt_tokens] = prompts[0].to(first.device)
-        routes = record_routes(adapter, first)
-        restore = force_routes(adapter.blocks, routes, 0, first.shape[1])
-        print(f"  routes pinned on {len(routes)} layers -- every row below is "
-              f"measured with the router's amplifier switched off")
+        print(f"  routes pinned per prompt on its own all-masked canvas -- "
+              f"every row below has the router's amplifier switched off")
 
     def kv_config(bits: int, policy: str, every: int) -> KVCacheConfig:
         return KVCacheConfig(
@@ -240,8 +251,13 @@ def main() -> int:
         cls = ScrambledWindow if scramble else BlockKVCache
         for prompt in prompts:
             cache = cls(kv_config(bits, policy, every), n_layers)
-            out = cached_generate(adapter, prompt, gen_cfg, cache,
-                                  reuse_window=reuse, on_step=on_step)
+            undo = pin_for(prompt)
+            try:
+                out = cached_generate(adapter, prompt, gen_cfg, cache,
+                                      reuse_window=reuse, on_step=on_step)
+            finally:
+                if undo is not None:
+                    undo()
             outs.append(out)
             hit, age = hit_and_age(cache)
             hits.append(hit)
@@ -394,8 +410,13 @@ def main() -> int:
                     x[0, pos] = ref[0, pos]
                 state["prev"] = x.clone()
 
-            cached_generate(adapter, prompt, gen_cfg, cache,
-                            reuse_window=True, on_step=force)
+            undo = pin_for(prompt)
+            try:
+                cached_generate(adapter, prompt, gen_cfg, cache,
+                                reuse_window=True, on_step=force)
+            finally:
+                if undo is not None:
+                    undo()
         pooled = sum(h for h, _ in hits) / max(sum(n for _, n in hits), 1)
         return [h / max(n, 1) for h, n in hits], flipped, pooled, margins_here
 
