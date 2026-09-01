@@ -87,6 +87,17 @@ def main() -> int:
     g.add_argument("--kv-cache", action="store_true",
                    help="read the prefix from a quantized cache instead of "
                         "recomputing it at every denoising step")
+    g.add_argument("--kv-policy", default="every_n",
+                   choices=["never", "every_n", "block", "mask_ratio"],
+                   help="when the cache is allowed to go stale. 'block' never "
+                        "refreshes inside a block, which is the regime "
+                        "Fast-dLLM ships")
+    g.add_argument("--kv-refresh-every", type=int, default=4,
+                   help="steps between refreshes under 'every_n'. 1 is the "
+                        "exact variant and is the control this axis needs: at "
+                        "a lossless width it must reproduce the uncached run, "
+                        "so any gap at a longer interval is staleness and "
+                        "nothing else")
     g.add_argument("--kv-bits", type=int, default=4)
     g.add_argument("--kv-key-axis", default="token",
                    choices=["channel", "token"],
@@ -193,6 +204,8 @@ def main() -> int:
 
         kv_cfg = KVCacheConfig(
             enabled=True,
+            policy=args.kv_policy,
+            refresh_every=args.kv_refresh_every,
             decoded_bits=args.kv_bits,
             masked_bits=args.kv_masked_bits or args.kv_bits,
             key_bits=args.kv_key_bits or None,
@@ -202,7 +215,8 @@ def main() -> int:
             value_axis=args.kv_value_axis,
         )
         n_layers = len(adapter.blocks)
-        print(f"\nKV cache on: {args.kv_bits} bits, group {args.kv_group_size}"
+        print(f"\nKV cache on: {args.kv_bits} bits, group {args.kv_group_size}, {args.kv_policy}"
+              + (f":{args.kv_refresh_every}" if args.kv_policy == "every_n" else "")
               + (f", K at {args.kv_key_bits}" if args.kv_key_bits else "")
               + (f", V at {args.kv_value_bits}" if args.kv_value_bits else ""))
 
@@ -244,6 +258,9 @@ def main() -> int:
                         "n_eval": args.n_eval,
                         "kv_cache": args.kv_cache,
                         "kv_bits": args.kv_bits if args.kv_cache else None,
+                        "kv_policy": args.kv_policy if args.kv_cache else None,
+                        "kv_refresh_every": (args.kv_refresh_every
+                                             if args.kv_cache else None),
                         "kv_group_size": args.kv_group_size if args.kv_cache else None,
                         "kv_key_axis": args.kv_key_axis if args.kv_cache else None,
                         "kv_value_axis": args.kv_value_axis if args.kv_cache else None,
