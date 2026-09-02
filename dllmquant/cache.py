@@ -669,6 +669,14 @@ class CacheStats:
     window_ages: List[int] = field(default_factory=list)
     # Age (in denoising steps) of every entry at the moment it was read.
     ages: List[int] = field(default_factory=list)
+    # Steps a confidence-thresholded sampler actually needed, one entry per
+    # block. Under a fixed schedule this stays empty: there the number of
+    # steps is an input, not an observation, and the parallelism it implies
+    # cannot depend on the cache. It is the only quantity in this file that
+    # the cache is allowed to make worse in a way a user would feel -- the
+    # decisions it damages turn out not to change the answer, so throughput
+    # is where the price lands.
+    steps_used: List[int] = field(default_factory=list)
     # Relative error between the cached tensor and a freshly computed one,
     # measured whenever ``measure_drift`` is called.
     staleness_error: List[float] = field(default_factory=list)

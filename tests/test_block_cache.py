@@ -594,3 +594,47 @@ def test_refreshing_every_step_makes_reuse_a_no_op():
     assert torch.equal(out, dense)
     assert cache.stats.window_reuses == 0, "nothing should have been reused"
     assert cache.stats.window_refreshes > 0
+
+
+def test_threshold_sampling_makes_the_step_count_an_observation():
+    """Under a schedule the commits per step are an input; under a threshold
+    they are what the model's confidence allows.
+
+    That distinction is the whole reason this exists. Every damage number in
+    the project is a share of decisions that moved, and the task grid shows
+    those decisions do not change a single answer at any width. Steps are the
+    one quantity left that a damaged cache can make worse in a way a user
+    feels, and a schedule fixes it in advance so the cache cannot touch it.
+    """
+    from dllmquant.models.llada2_local import cached_generate
+
+    adapter, cache, cfg = _sampler_setup(16)
+    remove_block_cache(adapter.model)
+    prompt = torch.randint(0, VOCAB - 1, (1, BLOCK))
+
+    x = cached_generate(adapter, prompt, cfg, cache, reuse_window=True,
+                        threshold=0.0, rotary_fn=_rotary,
+                        attention_fn=_attention)
+
+    # A threshold of zero commits every masked position at once, so one step
+    # per block and nothing left masked.
+    assert cache.stats.steps_used
+    assert all(n == 1 for n in cache.stats.steps_used)
+    assert (x[:, BLOCK:] != adapter.mask_id).all()
+
+
+def test_an_impossible_threshold_still_commits_one_token_per_step():
+    """A step that commits nothing cannot end, and the sampler would spin
+    until the cap with the block still masked."""
+    from dllmquant.models.llada2_local import cached_generate
+
+    adapter, cache, cfg = _sampler_setup(16)
+    remove_block_cache(adapter.model)
+    prompt = torch.randint(0, VOCAB - 1, (1, BLOCK))
+
+    x = cached_generate(adapter, prompt, cfg, cache, reuse_window=True,
+                        threshold=2.0, rotary_fn=_rotary,
+                        attention_fn=_attention)
+
+    assert all(n == BLOCK for n in cache.stats.steps_used)
+    assert (x[:, BLOCK:] != adapter.mask_id).all()

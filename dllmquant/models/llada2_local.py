@@ -360,6 +360,8 @@ def cached_generate(
     cache: BlockKVCache,
     *,
     reuse_window: bool = False,
+    threshold: Optional[float] = None,
+    max_steps_per_block: int = 0,
     on_step: Optional[Callable] = None,
     rotary_fn: Optional[Callable] = None,
     attention_fn: Optional[Callable] = None,
@@ -432,8 +434,24 @@ def cached_generate(
             block_mask = x[:, lo:hi] == adapter.mask_id
             budget = get_num_transfer_tokens(block_mask, schedule[block_idx])
 
-            for step in range(schedule[block_idx]):
+            # Two samplers, and the difference is the point. Under the
+            # schedule the number of committed tokens per step is an input,
+            # so parallelism cannot depend on the cache and the only thing a
+            # stale entry can do is change *which* token commits. Under a
+            # threshold the count is an observation: a position commits when
+            # the model is sure enough, so a cache that flattens confidence
+            # buys fewer commits per step and the block takes longer. That is
+            # where the price lands -- the damaged decisions turn out not to
+            # change the answer (section 5), and this is the quantity that
+            # does move.
+            cap = max_steps_per_block or (hi - lo)
+            n_steps = cap if threshold is not None else schedule[block_idx]
+            used = 0
+            for step in range(n_steps):
                 still_masked = x[:, lo:hi] == adapter.mask_id
+                if threshold is not None and not still_masked.any():
+                    break
+                used = step + 1
                 window = "fresh"
                 if reuse_window:
                     # One decision for every layer: the policies here are
@@ -454,19 +472,35 @@ def cached_generate(
                 probs = torch.softmax(logits.to(torch.float32), dim=-1)
                 confidence, proposal = probs.max(dim=-1)
 
-                k = int(budget[0, step])
-                if k <= 0 or not still_masked.any():
+                if not still_masked.any():
                     continue
 
                 score = torch.where(
                     still_masked, confidence, torch.full_like(confidence, -torch.inf)
                 )
-                take = min(k, int(still_masked.sum()))
-                chosen = torch.topk(score[0], k=take).indices
+                if threshold is None:
+                    k = int(budget[0, step])
+                    if k <= 0:
+                        continue
+                    take = min(k, int(still_masked.sum()))
+                    chosen = torch.topk(score[0], k=take).indices
+                else:
+                    # Everything the model is sure enough about, and never
+                    # nothing: a step that commits no token cannot end, and
+                    # the sampler would spin until the cap. The single
+                    # forced commit is the one the reference decoders make
+                    # too, and it is what keeps a flattened confidence
+                    # expensive rather than fatal.
+                    chosen = (score[0] >= threshold).nonzero(as_tuple=True)[0]
+                    if chosen.numel() == 0:
+                        chosen = score[0].argmax().reshape(1)
                 x[0, lo + chosen] = proposal[0, chosen]
 
                 if on_step is not None:
                     on_step(block_idx, step, lo, hi, logits, x)
+
+            if threshold is not None:
+                cache.stats.steps_used.append(used)
     finally:
         remove_block_cache(adapter.model)
 
