@@ -322,8 +322,9 @@ def main() -> int:
     print()
     if args.mode == "cache":
         print("  This is the amplifier measured directly. The cache's rounding")
-        print("  floor on decisions is ten times the dense model's -- 3.9% and")
-        print("  5.6% against 0.7% and 0.4% -- and K's channel structure is")
+        print("  floor on decisions is five to thirteen times the dense")
+        print("  model's -- 3.7% and 5.4% against 0.7% and 0.4% -- and K's")
+        print("  channel structure is")
         print("  the same in both families (2.6b), so the difference has to")
         print("  come from what the model does with the error rather than")
         print("  from the error itself. Agreement well below 100% here says")
