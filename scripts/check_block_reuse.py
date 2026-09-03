@@ -162,6 +162,21 @@ def main() -> int:
                          "moves, the router is amplifying rounding "
                          "selectively -- and if both move together it "
                          "amplifies whatever it is given")
+    ap.add_argument("--key-bits", type=int, default=0,
+                    help="quantize K to this width and leave V at 16, to "
+                         "separate the two candidate amplifiers behind the "
+                         "5-13x rounding floor against the dense model. The "
+                         "router is one: it turns a small arithmetic shift "
+                         "into a discrete change of expert. GQA is the other "
+                         "and has nothing to do with routing -- sixteen query "
+                         "heads read four K heads here, so one stored row is "
+                         "read by four, against one on LLaDA-1.5. V shares "
+                         "that fan-out but does not pass through the softmax, "
+                         "so K-only against V-only at equal width tells the "
+                         "two apart. 0 = follow --bits")
+    ap.add_argument("--value-bits", type=int, default=0,
+                    help="the mirror of --key-bits: quantize V and leave K at "
+                         "16. 0 = follow --bits")
     ap.add_argument("--rotate-qk", action="store_true",
                     help="insert QuaRot's R4 -- a head-wise Hadamard on Q and "
                          "K after RoPE, so the store holds rotated keys. It "
@@ -256,9 +271,24 @@ def main() -> int:
         print(f"  routes pinned per prompt on its own all-masked canvas -- "
               f"every row below has the router's amplifier switched off")
 
+    if args.key_bits or args.value_bits:
+        which = "K" if args.key_bits else "V"
+        other = "V" if args.key_bits else "K"
+        print(f"  only {which} is quantized ({args.key_bits or args.value_bits} "
+              f"bits); {other} is stored at 16, so the row isolates one tensor")
+
     def kv_config(bits: int, policy: str, every: int) -> KVCacheConfig:
+        # A width of 0 means "follow --bits"; 16 on the other side is a
+        # no-op store, so one flag isolates one tensor.
+        key_bits = args.key_bits or None
+        value_bits = args.value_bits or None
+        if key_bits and not value_bits:
+            value_bits = 16
+        elif value_bits and not key_bits:
+            key_bits = 16
         return KVCacheConfig(
             enabled=True, decoded_bits=bits, masked_bits=bits,
+            key_bits=key_bits, value_bits=value_bits,
             group_size=args.group_size, key_axis=args.key_axis,
             value_axis="channel", policy=policy, refresh_every=every,
         )
