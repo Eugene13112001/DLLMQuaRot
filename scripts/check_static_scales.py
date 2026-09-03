@@ -464,6 +464,18 @@ def main() -> int:
     ap.add_argument("--survey-only", action="store_true",
                     help="stop after the cheap check. It costs one forward per "
                          "canvas and can refute the rest.")
+    ap.add_argument("--rotate-qk", action="store_true",
+                    help="insert QuaRot's R4 before measuring. This is a "
+                         "prediction against the result below, not for it. A "
+                         "static scale works because K's outliers sit in fixed "
+                         "channels and stay there between canvases; R4 exists "
+                         "to smear exactly that structure, and it was measured "
+                         "to do so -- with it the channel axis stops being "
+                         "catastrophic (2.8a). So calibrating K should stop "
+                         "being free: the scales should move more between "
+                         "canvases and the railed fraction should rise. If "
+                         "they do not, the fixed-channel account is carrying "
+                         "less of the static-scale result than it looks.")
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(
@@ -473,6 +485,12 @@ def main() -> int:
     adapter = build_adapter(cfg)
     adapter.load()
     print(adapter.describe())
+
+    if args.rotate_qk:
+        from dllmquant.algos.quarot import install_qk_rotation
+        install_qk_rotation(adapter)
+        print("R4 installed: K's outliers are smeared across channels, which "
+              "is the structure a static scale relies on")
 
     model = adapter.model
     device = next(model.parameters()).device
