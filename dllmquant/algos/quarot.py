@@ -503,3 +503,66 @@ __all__ = [
     "OnlineHadamard",
     "install_online_hadamard",
 ]
+
+
+@torch.no_grad()
+def install_qk_rotation(adapter, seed: int = 0):
+    """Insert R4 into a loaded adapter's attention. Returns the remover.
+
+    The patch point is the module-level ``apply_rotary_pos_emb`` of whatever
+    file defines the model class, because that call sits exactly where R4 has
+    to go: after the rotary embedding, and *before* K reaches the cache. A
+    rotation applied later would leave the store holding unrotated keys, which
+    is the one thing this experiment is about.
+
+    One matrix serves every layer and both sides. Attention is untouched in
+    exact arithmetic -- (QH)(KH)^T = QK^T -- so any change this produces on a
+    16-bit control is a bug, and that control is the first thing to run.
+
+    Partial RoPE is not a problem. LLaDA2.0 rotates only
+    ``head_dim * partial_rotary_factor`` channels, so H mixes rotated
+    coordinates with unrotated ones; the invariance argument never referred to
+    RoPE, only to H being orthogonal and applied to both sides.
+
+    GQA is not a problem either. Q arrives with sixteen heads and K with four,
+    but H acts on the last axis -- head_dim -- which they share.
+
+    Why it is worth running: the token axis wins because K's outliers sit in
+    fixed channels (2.1), and static scales work for the same reason (2.6b).
+    R4 exists to smear exactly those outliers. So it predicts against both
+    results, and a null here would be as informative as an effect.
+    """
+    import sys
+
+    mod = sys.modules[type(adapter.model).__module__]
+    orig = getattr(mod, "apply_rotary_pos_emb", None)
+    if orig is None:
+        raise RuntimeError(
+            f"{mod.__name__} has no module-level apply_rotary_pos_emb, so "
+            "there is no single point where R4 lands post-RoPE and pre-cache. "
+            "Patching per-module forwards would be the fallback."
+        )
+
+    cfg = adapter.model.config
+    head_dim = getattr(cfg, "head_dim", None) or (
+        cfg.hidden_size // cfg.num_attention_heads
+    )
+    h = random_hadamard_matrix(head_dim, seed=seed)
+
+    state = {"h": h, "calls": 0}
+
+    def patched(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+        q, k = orig(q, k, cos, sin, position_ids, unsqueeze_dim)
+        hd = state["h"]
+        if hd.device != q.device:
+            hd = state["h"] = hd.to(q.device)
+        state["calls"] += 1
+        return rotate_qk(q, k, hd)
+
+    patched.rotation_state = state
+    mod.apply_rotary_pos_emb = patched
+
+    def remove():
+        mod.apply_rotary_pos_emb = orig
+
+    return remove

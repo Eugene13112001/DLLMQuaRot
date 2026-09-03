@@ -162,6 +162,18 @@ def main() -> int:
                          "moves, the router is amplifying rounding "
                          "selectively -- and if both move together it "
                          "amplifies whatever it is given")
+    ap.add_argument("--rotate-qk", action="store_true",
+                    help="insert QuaRot's R4 -- a head-wise Hadamard on Q and "
+                         "K after RoPE, so the store holds rotated keys. It "
+                         "predicts against two results here rather than for "
+                         "them. The token axis wins because K's outliers sit "
+                         "in fixed channels, and static scales work for the "
+                         "same reason; R4 exists to smear exactly those "
+                         "outliers across channels. So the axis gap should "
+                         "narrow or vanish, and the rounding floor should "
+                         "move. Run the 16-bit row first: attention is exactly "
+                         "invariant under R4, so any change there is a bug, "
+                         "not a finding.")
     ap.add_argument("--dump-margins", default=None,
                     help="write per-position decision margins to this JSON. "
                          "The teacher-forced canvas makes a position the same "
@@ -183,6 +195,12 @@ def main() -> int:
     adapter = build_adapter(cfg)
     adapter.load()
     print(adapter.describe())
+
+    if args.rotate_qk:
+        from dllmquant.algos.quarot import install_qk_rotation
+        install_qk_rotation(adapter)
+        print("R4 installed: Q and K rotated head-wise after RoPE, so the "
+              "store holds rotated keys")
 
     # Which sampler drives the run. The two share a signature so everything
     # below is written once, but they do not share a meaning for staleness:

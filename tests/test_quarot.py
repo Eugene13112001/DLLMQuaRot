@@ -692,3 +692,71 @@ def test_rotate_only_refuses_to_save_an_unrotated_model():
     pipeline = DLLMQuantPipeline(cfg, adapter=SimpleNamespace(describe=lambda: ""))
     with pytest.raises(ValueError, match="unrotated"):
         pipeline.run([])
+
+
+def test_install_qk_rotation_patches_post_rope_and_preserves_scores():
+    """R4 lands on the rotary call, and attention does not notice it.
+
+    The installer is the part that can be wrong in a way `rotate_qk` cannot:
+    it has to find the one call that sits after RoPE and before the cache
+    update. Patching the module-level function is how it gets there, so this
+    checks the patch composes with the original rather than replacing it, and
+    that the scores it feeds attention are the unrotated ones.
+    """
+    import sys
+    import types
+
+    from dllmquant.algos.quarot import install_qk_rotation
+
+    head_dim, n_q, n_kv, seq = 8, 4, 2, 6
+    calls = {"n": 0}
+
+    def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+        calls["n"] += 1
+        return q * cos, k * cos
+
+    mod = types.ModuleType("fake_modeling")
+    mod.apply_rotary_pos_emb = apply_rotary_pos_emb
+    sys.modules["fake_modeling"] = mod
+
+    class FakeModel:
+        __module__ = "fake_modeling"
+
+        class config:
+            head_dim = 8
+            hidden_size = 32
+            num_attention_heads = 4
+
+    class FakeAdapter:
+        model = FakeModel()
+
+    try:
+        remove = install_qk_rotation(FakeAdapter(), seed=3)
+        patched = mod.apply_rotary_pos_emb
+        assert patched is not apply_rotary_pos_emb
+
+        torch.manual_seed(0)
+        q = torch.randn(1, n_q, seq, head_dim, dtype=torch.float64)
+        k = torch.randn(1, n_kv, seq, head_dim, dtype=torch.float64)
+        cos = torch.randn(1, 1, seq, head_dim, dtype=torch.float64)
+
+        qr, kr = patched(q, k, cos, cos)
+        assert calls["n"] == 1, "the original rotary call must still run"
+
+        # Scores are what attention consumes, and R4 must leave them alone.
+        # GQA: one K head serves several Q heads, so compare per K head.
+        qb, kb = q * cos, k * cos
+        rep = n_q // n_kv
+        for h in range(n_kv):
+            base = qb[:, h * rep:(h + 1) * rep] @ kb[:, h:h + 1].transpose(-1, -2)
+            rot = qr[:, h * rep:(h + 1) * rep] @ kr[:, h:h + 1].transpose(-1, -2)
+            assert torch.allclose(base, rot, atol=1e-10), h
+
+        # And the keys themselves did move -- otherwise the test above would
+        # pass on a no-op patch.
+        assert not torch.allclose(kr, kb, atol=1e-6)
+
+        remove()
+        assert mod.apply_rotary_pos_emb is apply_rotary_pos_emb
+    finally:
+        del sys.modules["fake_modeling"]
