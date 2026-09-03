@@ -280,12 +280,21 @@ def main() -> int:
     def kv_config(bits: int, policy: str, every: int) -> KVCacheConfig:
         # A width of 0 means "follow --bits"; 16 on the other side is a
         # no-op store, so one flag isolates one tensor.
-        key_bits = args.key_bits or None
-        value_bits = args.value_bits or None
-        if key_bits and not value_bits:
-            value_bits = 16
-        elif value_bits and not key_bits:
-            key_bits = 16
+        #
+        # The guard on `bits` is load-bearing and was missing at first. The
+        # reference is built by run(16, ...), through this same function, so an
+        # unguarded override quantized the reference's K as well and every row
+        # was measured against a damaged baseline. The tell was the reference's
+        # own decision margins moving between runs that should have shared
+        # them. Sixteen bits means a no-op store, and that has to include this.
+        key_bits = value_bits = None
+        if bits < 16:
+            key_bits = args.key_bits or None
+            value_bits = args.value_bits or None
+            if key_bits and not value_bits:
+                value_bits = 16
+            elif value_bits and not key_bits:
+                key_bits = 16
         return KVCacheConfig(
             enabled=True, decoded_bits=bits, masked_bits=bits,
             key_bits=key_bits, value_bits=value_bits,
