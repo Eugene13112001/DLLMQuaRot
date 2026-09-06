@@ -70,19 +70,46 @@ def main() -> int:
                          "is what dInfer ships; the checkpoint's own generate "
                          "uses 0.95, and the proxy measurement was robust to "
                          "the choice, so this should be too")
-    ap.add_argument("--bits", type=int, nargs="+", default=[16, 4, 3])
+    ap.add_argument("--bits", type=int, nargs="+", default=[16, 4, 3],
+                    help="cache widths; the weights are a separate axis, see "
+                         "--w-bits")
+    ap.add_argument("--w-bits", type=int, default=16,
+                    help="weight width, RTN, no calibration. The staleness "
+                         "penalty this script measures was taken at full "
+                         "precision, while the accuracy half of the same claim "
+                         "was checked at four bits too (section 5) -- so the "
+                         "two halves stood on different ground. Four bits here "
+                         "puts them on the same footing: if the penalty holds, "
+                         "the currency argument survives weight quantization "
+                         "whole")
+    ap.add_argument("--w-group-size", type=int, default=-1,
+                    help="weight group size; -1 is per output channel")
     ap.add_argument("--policies", nargs="+",
                     default=["every_n:1", "every_n:2", "every_n:4",
                              "every_n:8", "block"])
     args = ap.parse_args()
 
-    cfg = DLLMQuantConfig(model_path=args.model, model_type=args.model_type,
-                          dtype=args.dtype, device=args.device,
-                          weight=QuantConfig(n_bits=16),
-                          activation=QuantConfig(n_bits=16))
+    cfg = DLLMQuantConfig(
+        model_path=args.model, model_type=args.model_type,
+        dtype=args.dtype, device=args.device,
+        weight=QuantConfig(
+            n_bits=args.w_bits,
+            granularity="per_group" if args.w_group_size > 0 else "per_channel",
+            group_size=args.w_group_size,
+            mse_search=True,
+        ),
+        # Activations stay at 16. They are the expensive axis on their own
+        # (85 points from the wrong slicing, section 6.1) and mixing them in
+        # would measure that instead of the cache.
+        activation=QuantConfig(n_bits=16))
     adapter = build_adapter(cfg)
     adapter.load()
     print(adapter.describe())
+
+    if args.w_bits < 16:
+        from evaluate import apply_rtn
+        n = apply_rtn(adapter, cfg)
+        print(f"  weights: {args.w_bits} bits, RTN, {n} layers quantized")
 
     dense = args.model_type == "llada"
     cached_generate = (llada_local if dense else llada2_local).cached_generate
