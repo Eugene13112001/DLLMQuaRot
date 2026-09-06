@@ -838,9 +838,17 @@ class BlockKVCache:
             return True  # nothing cached yet
 
         p = self.cfg.policy
-        if p == "never":
-            return block_boundary
-        if p == "block":
+        # `never` and `block` are one behaviour under two names, and the first
+        # name is a lie: it does refresh, at every block boundary, because the
+        # prefix grows there and an entry for a position that did not exist
+        # cannot be reused. What it never does is refresh *inside* a block,
+        # which is what `block` says accurately.
+        #
+        # Kept rather than removed because run configurations recorded on the
+        # pod may carry the string, and a config that no longer loads is a
+        # reproducibility hole. Anyone counting the policies should count
+        # three, not four -- every grid that ran `block` ran `never` too.
+        if p in ("never", "block"):
             return block_boundary
         if p == "every_n":
             return block_boundary or (step - self._written_at[layer]) >= self.cfg.refresh_every

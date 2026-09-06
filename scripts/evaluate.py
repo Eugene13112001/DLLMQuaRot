@@ -91,7 +91,11 @@ def main() -> int:
                    choices=["never", "every_n", "block", "mask_ratio"],
                    help="when the cache is allowed to go stale. 'block' never "
                         "refreshes inside a block, which is the regime "
-                        "Fast-dLLM ships")
+                        "Fast-dLLM ships. **'never' is the same behaviour under "
+                        "another name** -- it too refreshes at block "
+                        "boundaries, because the prefix grows there. Four "
+                        "choices, three behaviours; prefer 'block', which says "
+                        "what it does")
     g.add_argument("--kv-refresh-every", type=int, default=4,
                    help="steps between refreshes under 'every_n'. 1 is the "
                         "exact variant and is the control this axis needs: at "
