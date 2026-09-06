@@ -119,14 +119,22 @@ def main() -> int:
 
         for li in idx:
             probe = adapter.make_probe(blocks[li])
+            # Inside the `with`, not after it: AttentionProbe.__exit__ clears
+            # `parts` so a stale capture cannot be read as a fresh one, and
+            # reading after the block gets None every time.
             with probe, torch.no_grad():
                 adapter.model(x, **adapter.forward_kwargs(x))
-            k = probe.parts.key_states
-            if k is None:
-                raise SystemExit(
-                    "the probe returned no key_states -- this adapter's hook "
-                    "predates the field; nothing below would be measuring K")
-            k = k.detach().float()
+                if probe.parts is None:
+                    raise SystemExit(
+                        f"the hook on block {li} never fired -- the forward "
+                        "did not reach it, so there is nothing to measure")
+                k = probe.parts.key_states
+                if k is None:
+                    raise SystemExit(
+                        "the probe captured no key_states -- this adapter's "
+                        "hook predates the field; nothing below would be "
+                        "measuring K")
+                k = k.detach().float()
             crests.append(crest(k))
             for bits in args.bits:
                 for axis in ("token", "channel"):
