@@ -146,6 +146,16 @@ def main() -> int:
                          "128 tokens and 4 prompts it is 512 trials.")
     ap.add_argument("--group-size", type=int, default=128)
     ap.add_argument("--key-axis", default="token", choices=["channel", "token"])
+    ap.add_argument("--value-axis", default="channel",
+                    choices=["channel", "token"],
+                    help="the same knob for V, and the reason it is here is "
+                         "that 2.6's «the V axis is indifferent» was measured "
+                         "on the MoE alone. The two families differ exactly "
+                         "where that claim could break: V's top-8 channel "
+                         "agreement is 0.34-0.42 on LLaDA-1.5 against "
+                         "0.19-0.27 on LLaDA2.0, so V is the more structured "
+                         "tensor on the dense model and its axis may not be "
+                         "indifferent there")
     ap.add_argument("--pin-routes", action="store_true",
                     help="hold every router to the choice it made on the "
                          "all-masked canvas, for the whole sweep. On tensors "
@@ -352,7 +362,7 @@ def main() -> int:
             enabled=True, decoded_bits=bits, masked_bits=bits,
             key_bits=key_bits, value_bits=value_bits,
             group_size=args.group_size, key_axis=args.key_axis,
-            value_axis="channel", policy=policy, refresh_every=every,
+            value_axis=args.value_axis, policy=policy, refresh_every=every,
         )
 
     def run(bits: int, policy: str, every: int, reuse: bool,
