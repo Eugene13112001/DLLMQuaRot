@@ -51,6 +51,11 @@ class AttentionParts:
 
     value_states: torch.Tensor  # [B, heads, K, head_dim] or [B, K, D]
     attn_probs: torch.Tensor  # [B, heads, Q, K], rows sum to 1
+    # K after RoPE, the tensor the cache actually stores. Optional because
+    # IA-AQ never asked for it and every existing caller builds this without
+    # one; check_key_error needs it to compare the two families' K at the
+    # tensor level, before anything downstream can confound the comparison.
+    key_states: Optional[torch.Tensor] = None
 
 
 def preflight_memory(

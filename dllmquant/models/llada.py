@@ -147,7 +147,8 @@ class LLaDAAttentionProbe(AttentionProbe):
         with torch.no_grad():
             q, k, v = self._project(hidden)
             probs = self._attention_probs(q, k)
-        self.parts = AttentionParts(value_states=v, attn_probs=probs)
+        self.parts = AttentionParts(
+            value_states=v, attn_probs=probs, key_states=k)
 
     def _project(self, hidden: torch.Tensor):
         b, t, _ = hidden.shape
