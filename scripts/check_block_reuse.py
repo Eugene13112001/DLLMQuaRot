@@ -251,7 +251,7 @@ def main() -> int:
     sampler = llada_local if dense else llada2_local
     cached_generate = sampler.cached_generate
 
-    gen_kwargs = {}
+    probe_attention = None
     if args.head_sharing != "off":
         if dense:
             raise SystemExit(
@@ -259,11 +259,26 @@ def main() -> int:
                 "so there is no fan-out to decorrelate. Run it on LLaDA2.0.")
         from dllmquant.head_sharing import make_head_sharing_attention
         _, default_attention = llada2_local._default_kernels()
-        gen_kwargs["attention_fn"] = make_head_sharing_attention(
+        probe_attention = make_head_sharing_attention(
             default_attention, args.head_sharing, args.bits[0],
             group_size=args.group_size)
         print(f"  head sharing: K rounded stochastically at {args.bits[0]} "
               f"bits, {args.head_sharing} across the query heads that read it")
+
+    def probe_kwargs(bits: int) -> dict:
+        """The probe's rounding is a store, so 16 bits has to switch it off.
+
+        Same guard, same reason, as the one on `--key-bits` in `kv_config`
+        below, and it was missing here first: the reference comes from
+        `run(16, ...)` through the same path, so an unguarded probe rounded
+        the reference's K too and every row was measured against a baseline
+        damaged the same way. The tell was the same as last time -- the
+        reference's own decision margins and chance floor moving between runs
+        that must share them (27.54% against 14.06%).
+        """
+        if probe_attention is None or bits >= 16:
+            return {}
+        return {"attention_fn": probe_attention}
 
     def hit_and_age(cache):
         if dense:
@@ -350,7 +365,7 @@ def main() -> int:
             try:
                 out = cached_generate(adapter, prompt, gen_cfg, cache,
                                       reuse_window=reuse, on_step=on_step,
-                                      **gen_kwargs)
+                                      **probe_kwargs(bits))
             finally:
                 if undo is not None:
                     undo()
@@ -509,7 +524,8 @@ def main() -> int:
             undo = pin_for(prompt)
             try:
                 cached_generate(adapter, prompt, gen_cfg, cache,
-                                reuse_window=True, on_step=force, **gen_kwargs)
+                                reuse_window=True, on_step=force,
+                                **probe_kwargs(bits))
             finally:
                 if undo is not None:
                     undo()
