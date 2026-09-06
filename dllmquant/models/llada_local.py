@@ -160,8 +160,37 @@ class WindowState:
         self.orig: Optional[Callable] = None
 
 
+# R4 for the dense path. The MoE side patches the checkpoint's module-level
+# apply_rotary_pos_emb, but LLaDA-1.5's remote code has no such function, so
+# there is no single call to wrap. This hook is the better place anyway: it
+# sits after the block applied RoPE and *before* the window store writes K, so
+# the store holds rotated keys, which is the whole point. A module-level holder
+# rather than a field on WindowState because the states are built inside
+# cached_generate, long after the caller asks for the rotation.
+_QK_ROT: Optional[torch.Tensor] = None
+
+
+def enable_qk_rotation(head_dim: int, seed: int = 0, device=None) -> None:
+    """Turn R4 on for every block's attention on the dense path."""
+    from ..algos.quarot import random_hadamard_matrix
+
+    global _QK_ROT
+    _QK_ROT = random_hadamard_matrix(head_dim, device=device, seed=seed)
+
+
+def disable_qk_rotation() -> None:
+    global _QK_ROT
+    _QK_ROT = None
+
+
 def _make_sdpa(state: "WindowState"):
     def sdpa(self, q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False):
+        global _QK_ROT
+        if _QK_ROT is not None:
+            if _QK_ROT.device != q.device:
+                _QK_ROT = _QK_ROT.to(q.device)
+            h = _QK_ROT.to(q.dtype)
+            q, k = q @ h, k @ h.to(k.dtype)
         if state.mode != "off" and state.width > 0:
             a, b = state.start, state.start + state.width
             if state.mode == "record":

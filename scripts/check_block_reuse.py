@@ -212,8 +212,16 @@ def main() -> int:
     print(adapter.describe())
 
     if args.rotate_qk:
-        from dllmquant.algos.quarot import install_qk_rotation
-        install_qk_rotation(adapter)
+        if args.model_type == "llada":
+            # The dense checkpoint exposes no module-level rotary function, so
+            # R4 rides the window store's own attention hook -- which runs
+            # after RoPE and before the store writes K, the same place.
+            # adapter.head_dim is read from the config where declared and
+            # only derived as a fallback -- do not recompute it here.
+            llada_local.enable_qk_rotation(adapter.head_dim)
+        else:
+            from dllmquant.algos.quarot import install_qk_rotation
+            install_qk_rotation(adapter)
         print("R4 installed: Q and K rotated head-wise after RoPE, so the "
               "store holds rotated keys")
 
