@@ -118,9 +118,12 @@ class KVCacheConfig:
     # fully decoded -> refresh rarely.
     min_interval: int = 1
     max_interval: int = 16
-    # Entries at masked positions are wrong the moment their token changes.
-    # Refreshing only those costs a fraction of a full refresh.
-    refresh_masked_only: bool = False
+    # A `refresh_masked_only` flag stood here, declared and never read by
+    # anything. Selective refresh is a real direction and it is not this
+    # field's to hold: Polestar (2607.14107) already ranks positions by
+    # representation drift, and 2.7.7 says what the right criterion would be --
+    # an entry's contribution to the deficit, which the law makes additive.
+    # A field that does nothing is a trap for whoever reads the config next.
 
     def __post_init__(self) -> None:
         valid = {"never", "every_n", "block", "mask_ratio"}
