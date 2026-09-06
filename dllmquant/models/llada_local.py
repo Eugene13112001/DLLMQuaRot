@@ -370,6 +370,8 @@ def cached_generate(
     *,
     reuse_window: bool = True,
     stale_prefix: bool = False,
+    threshold: Optional[float] = None,
+    max_steps_per_block: int = 0,
     on_step: Optional[Callable] = None,
 ):
     """The semi-autoregressive sampler with a quantized, ageing prefix cache.
@@ -413,8 +415,19 @@ def cached_generate(
             block_mask = x[:, lo:hi] == adapter.mask_id
             budget = get_num_transfer_tokens(block_mask, schedule[block_idx])
 
-            for step in range(schedule[block_idx]):
+            # Two samplers, and the difference is the point -- the same
+            # split as on the MoE path. Under the schedule the committed
+            # count per step is an input, so parallelism cannot depend on
+            # the cache. Under a threshold it is an observation, and a cache
+            # that flattens confidence buys fewer commits per step.
+            cap = max_steps_per_block or (hi - lo)
+            n_steps = cap if threshold is not None else schedule[block_idx]
+            used = 0
+            for step in range(n_steps):
                 still_masked = x[:, lo:hi] == adapter.mask_id
+                if threshold is not None and not still_masked.any():
+                    break
+                used = step + 1
                 ratio = float(still_masked.to(torch.float32).mean())
 
                 # Two stores on two clocks, as on the MoE path. The prefix is
@@ -451,19 +464,31 @@ def cached_generate(
                 probs = torch.softmax(logits.to(torch.float32), dim=-1)
                 confidence, proposal = probs.max(dim=-1)
 
-                k = int(budget[0, step])
-                if k <= 0 or not still_masked.any():
+                if threshold is None and (int(budget[0, step]) <= 0
+                                          or not still_masked.any()):
                     continue
 
                 score = torch.where(
                     still_masked, confidence, torch.full_like(confidence, -torch.inf)
                 )
-                take = min(k, int(still_masked.sum()))
-                chosen = torch.topk(score[0], k=take).indices
+                if threshold is None:
+                    k = int(budget[0, step])
+                    take = min(k, int(still_masked.sum()))
+                    chosen = torch.topk(score[0], k=take).indices
+                else:
+                    # Everything the model is sure enough about, and never
+                    # nothing: a step committing no token cannot end, and the
+                    # sampler would spin to the cap.
+                    chosen = (score[0] >= threshold).nonzero(as_tuple=True)[0]
+                    if chosen.numel() == 0:
+                        chosen = score[0].argmax().reshape(1)
                 x[0, lo + chosen] = proposal[0, chosen]
 
                 if on_step is not None:
                     on_step(block_idx, step, lo, hi, logits, x)
+
+            if threshold is not None:
+                cache.stats.steps_used.append(used)
     finally:
         if states is not None:
             remove_window_store(adapter.model)

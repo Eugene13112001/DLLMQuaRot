@@ -41,7 +41,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from dllmquant.cache import BlockKVCache, KVCacheConfig  # noqa: E402
 from dllmquant.config import DLLMQuantConfig, QuantConfig, TMASConfig  # noqa: E402
 from dllmquant.models import build_adapter  # noqa: E402
-from dllmquant.models.llada2_local import cached_generate  # noqa: E402
+from dllmquant.models import llada2_local, llada_local  # noqa: E402
 
 from check_block_cache import text_ids  # noqa: E402
 
@@ -51,7 +51,14 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True)
-    ap.add_argument("--model-type", default="llada2_moe", choices=["llada2_moe"])
+    ap.add_argument("--model-type", default="llada2_moe",
+                    choices=["llada2_moe", "llada"],
+                    help="the two families price staleness differently and "
+                         "that is the comparison: on LLaDA2.0 a block-causal "
+                         "prefix is exact so only the current block can age, "
+                         "on LLaDA-1.5 attention is bidirectional and the "
+                         "prefix ages too. The 1.75x measured on the MoE says "
+                         "nothing about the dense model until this runs")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--samples", type=int, default=8)
@@ -76,6 +83,9 @@ def main() -> int:
     adapter = build_adapter(cfg)
     adapter.load()
     print(adapter.describe())
+
+    dense = args.model_type == "llada"
+    cached_generate = (llada_local if dense else llada2_local).cached_generate
 
     n_layers = len(adapter.blocks)
     n_blocks = args.gen_length // args.block_length
