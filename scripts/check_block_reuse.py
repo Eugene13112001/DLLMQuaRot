@@ -189,6 +189,22 @@ def main() -> int:
                          "move. Run the 16-bit row first: attention is exactly "
                          "invariant under R4, so any change there is a bug, "
                          "not a finding.")
+    ap.add_argument("--head-sharing", default="off",
+                    choices=["off", "shared", "independent"],
+                    help="probe for whether GQA's fan-out matters because the "
+                         "readers of one stored head see the *same* rounding "
+                         "error. Both settings quantize K stochastically at "
+                         "--bits and replicate explicitly; 'shared' rounds the "
+                         "four stored heads and then replicates, "
+                         "'independent' replicates to sixteen and rounds each "
+                         "on its own. Same width, same grouping, same head "
+                         "count reaching attention -- the rows differ in the "
+                         "order of two operations and nothing else, so a gap "
+                         "between them is the price of correlation at fixed "
+                         "magnitude. Set --bits to the width being probed and "
+                         "leave the cache at 16 so it quantizes nothing twice. "
+                         "MoE only: with one query head per stored head there "
+                         "is no fan-out and the wrapper stands aside.")
     ap.add_argument("--dump-margins", default=None,
                     help="write per-position decision margins to this JSON. "
                          "The teacher-forced canvas makes a position the same "
@@ -234,6 +250,20 @@ def main() -> int:
     dense = args.model_type == "llada"
     sampler = llada_local if dense else llada2_local
     cached_generate = sampler.cached_generate
+
+    gen_kwargs = {}
+    if args.head_sharing != "off":
+        if dense:
+            raise SystemExit(
+                "--head-sharing probes GQA and LLaDA-1.5 is 32 heads on 32, "
+                "so there is no fan-out to decorrelate. Run it on LLaDA2.0.")
+        from dllmquant.head_sharing import make_head_sharing_attention
+        _, default_attention = llada2_local._default_kernels()
+        gen_kwargs["attention_fn"] = make_head_sharing_attention(
+            default_attention, args.head_sharing, args.bits[0],
+            group_size=args.group_size)
+        print(f"  head sharing: K rounded stochastically at {args.bits[0]} "
+              f"bits, {args.head_sharing} across the query heads that read it")
 
     def hit_and_age(cache):
         if dense:
@@ -319,7 +349,8 @@ def main() -> int:
             undo = pin_for(prompt)
             try:
                 out = cached_generate(adapter, prompt, gen_cfg, cache,
-                                      reuse_window=reuse, on_step=on_step)
+                                      reuse_window=reuse, on_step=on_step,
+                                      **gen_kwargs)
             finally:
                 if undo is not None:
                     undo()
@@ -478,7 +509,7 @@ def main() -> int:
             undo = pin_for(prompt)
             try:
                 cached_generate(adapter, prompt, gen_cfg, cache,
-                                reuse_window=True, on_step=force)
+                                reuse_window=True, on_step=force, **gen_kwargs)
             finally:
                 if undo is not None:
                     undo()
