@@ -215,6 +215,22 @@ def main() -> int:
                          "leave the cache at 16 so it quantizes nothing twice. "
                          "MoE only: with one query head per stored head there "
                          "is no fan-out and the wrapper stands aside.")
+    ap.add_argument("--verify-uncached", action="store_true",
+                    help="compare the cached path at 16 bits against the "
+                         "adapter's own uncached sampler on the same prompts, "
+                         "and print how many committed tokens differ. Every "
+                         "table here measures damage against a *cached* "
+                         "reference -- the current block recomputed each step, "
+                         "the prefix written once per block boundary. On the "
+                         "MoE that reference is exact by construction, so the "
+                         "check is a formality. On the dense path attention is "
+                         "bidirectional and the held prefix is an "
+                         "approximation, so the baseline itself carries "
+                         "staleness and every level measured from it is "
+                         "understated by however much this prints. The unit "
+                         "test proves the mechanism on a stub with a freshly "
+                         "refreshed prefix; this is the same question asked of "
+                         "the real checkpoint across a whole trajectory.")
     ap.add_argument("--cache-scope", default="prefix",
                     choices=["prefix", "dual", "prompt"],
                     help="how much of the sequence the store may hold -- "
@@ -452,6 +468,23 @@ def main() -> int:
         margin_state["prev"] = x.clone()
 
     reference, _, _ = run(16, "block", 4, reuse=False, on_step=watch_margin)
+
+    if args.verify_uncached:
+        # The adapter's sampler, no cache anywhere, on the same prompts.
+        drift = []
+        for prompt, ref in zip(prompts, reference):
+            plain = adapter.generate(prompt, gen_cfg)
+            n = min(plain.shape[-1], ref.shape[-1])
+            differ = int((plain[0, :n] != ref[0, :n]).sum())
+            drift.append((differ, n))
+        tot_d = sum(d for d, _ in drift)
+        tot_n = sum(n for _, n in drift)
+        print()
+        print(f"uncached check: {tot_d} of {tot_n} tokens differ "
+              f"({100 * tot_d / max(tot_n, 1):.2f}%) between the cached "
+              f"reference and the adapter's own sampler")
+        print("  zero means the reference is the model; anything else is the "
+              "amount every level below is measured short by")
 
     # Taken from the adapter rather than recomputed: it decides where the
     # blocks fall when the prompt does not divide evenly.
