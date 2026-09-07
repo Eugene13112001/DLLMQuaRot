@@ -362,6 +362,8 @@ def cached_generate(
     reuse_window: bool = False,
     threshold: Optional[float] = None,
     max_steps_per_block: int = 0,
+    cache_scope: str = "prefix",
+    prompt_len: int = 0,
     on_step: Optional[Callable] = None,
     rotary_fn: Optional[Callable] = None,
     attention_fn: Optional[Callable] = None,
@@ -422,9 +424,39 @@ def cached_generate(
     )
     try:
         for block_idx, (lo, hi) in enumerate(bounds):
+            # How much of the sequence the store is allowed to hold. dInfer
+            # calls this `cache_type` and offers three settings; two of them
+            # are distinguishable here.
+            #
+            #   "prefix"  everything before the current block, which is what
+            #             every earlier number in this project used
+            #   "prompt"  only the prompt, so completed blocks are recomputed
+            #             at every step instead of read back
+            #
+            # dInfer's third, "dual", differs from "prefix" only in what
+            # happens to positions *after* the current block, and this sampler
+            # never computes those -- under a block-causal mask they cannot
+            # reach the block being decoded. So it is accepted and treated as
+            # "prefix", which is a prediction rather than a shortcut: on a
+            # bidirectional model the two would separate.
+            store_end = lo if cache_scope != "prompt" else min(prompt_len, lo)
+            if store_end != lo and reuse_window:
+                # `logits_for_window` passes one boundary to `_set_mode`, and
+                # it serves as both the cache-read edge and the start of the
+                # window store. Shrinking the store without splitting those two
+                # would put completed blocks inside the window, which is a
+                # different measurement wearing the same flag's name. The split
+                # is a change to `_make_forward` and `CacheState`; until it
+                # exists, refuse the combination rather than mismeasure it.
+                raise ValueError(
+                    "cache_scope='prompt' with reuse_window=True needs the "
+                    "cache-read edge and the window start to be separate "
+                    "boundaries, and they are one argument today")
+
             # One full forward per block, not per step: this is the saving.
             refresh_prefix(
-                adapter.model, states, x, lo, block_length, mask_id=adapter.mask_id
+                adapter.model, states, x, store_end, block_length,
+                mask_id=adapter.mask_id,
             )
 
             # The store is indexed by layer, not by position, so last block's
@@ -463,11 +495,16 @@ def cached_generate(
                               if cache.should_refresh_window(0, cache.step, ratio)
                               else "reuse")
 
+                # The window starts where the store ends: whatever the
+                # cache does not hold has to be computed, so a smaller store
+                # means a wider forward. That is the cost side of the scope,
+                # and it is why "prompt" is the slower setting rather than a
+                # free one.
                 logits = logits_for_window(
-                    adapter.model, states, x, lo, hi, block_length,
+                    adapter.model, states, x, store_end, hi, block_length,
                     window=window,
                     window_mask=still_masked if window == "record" else None,
-                )
+                )[:, lo - store_end:]
                 cache.advance()
                 probs = torch.softmax(logits.to(torch.float32), dim=-1)
                 confidence, proposal = probs.max(dim=-1)

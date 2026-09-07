@@ -215,6 +215,23 @@ def main() -> int:
                          "leave the cache at 16 so it quantizes nothing twice. "
                          "MoE only: with one query head per stored head there "
                          "is no fan-out and the wrapper stands aside.")
+    ap.add_argument("--cache-scope", default="prefix",
+                    choices=["prefix", "dual", "prompt"],
+                    help="how much of the sequence the store may hold -- "
+                         "dInfer's `cache_type`, which is a different axis "
+                         "from the refresh interval and one this project had "
+                         "never varied. 'prefix' keeps everything before the "
+                         "current block, which every earlier number used. "
+                         "'prompt' keeps only the prompt, so completed blocks "
+                         "are recomputed at every step: a smaller store and a "
+                         "wider forward, which separates what caching the "
+                         "prompt costs from what caching completed blocks "
+                         "costs. 'dual' differs from 'prefix' only in what "
+                         "happens after the current block, and a block-causal "
+                         "mask makes those positions unreachable, so it is "
+                         "accepted and treated as 'prefix' -- a prediction "
+                         "worth stating, since on a bidirectional model the "
+                         "two would separate. MoE path only.")
     ap.add_argument("--dump-margins", default=None,
                     help="write per-position decision margins to this JSON. "
                          "The teacher-forced canvas makes a position the same "
@@ -274,6 +291,21 @@ def main() -> int:
             group_size=args.group_size)
         print(f"  head sharing: K rounded stochastically at {args.bits[0]} "
               f"bits, {args.head_sharing} across the query heads that read it")
+
+    scope_kwargs = {}
+    if args.cache_scope != "prefix":
+        if dense:
+            raise SystemExit(
+                "--cache-scope is dInfer's knob on a block-causal prefix and "
+                "the dense sampler has no equivalent boundary. Run it on "
+                "LLaDA2.0.")
+        scope_kwargs = {"cache_scope": args.cache_scope,
+                        "prompt_len": args.prompt_tokens}
+        print(f"  cache scope: {args.cache_scope}"
+              + (f", store holds the first {args.prompt_tokens} positions"
+                 if args.cache_scope == "prompt" else
+                 ", treated as prefix under a block-causal mask"))
+
 
     def probe_kwargs(bits: int) -> dict:
         """The probe's rounding is a store, so 16 bits has to switch it off.
@@ -375,7 +407,7 @@ def main() -> int:
             try:
                 out = cached_generate(adapter, prompt, gen_cfg, cache,
                                       reuse_window=reuse, on_step=on_step,
-                                      **probe_kwargs(bits))
+                                      **scope_kwargs, **probe_kwargs(bits))
             finally:
                 if undo is not None:
                     undo()
@@ -535,7 +567,7 @@ def main() -> int:
             try:
                 cached_generate(adapter, prompt, gen_cfg, cache,
                                 reuse_window=True, on_step=force,
-                                **probe_kwargs(bits))
+                                **scope_kwargs, **probe_kwargs(bits))
             finally:
                 if undo is not None:
                     undo()
