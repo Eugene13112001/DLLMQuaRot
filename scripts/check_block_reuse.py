@@ -296,9 +296,12 @@ def main() -> int:
     if args.cache_scope != "prefix":
         if dense:
             raise SystemExit(
-                "--cache-scope is dInfer's knob on a block-causal prefix and "
-                "the dense sampler has no equivalent boundary. Run it on "
-                "LLaDA2.0.")
+                "--cache-scope is not implemented on the dense path yet. The "
+                "boundary exists there and matters more, not less: attention "
+                "is bidirectional, so the current block reaches the tail and "
+                "'dual' against 'prefix' is a real difference rather than the "
+                "no-op a block-causal mask makes of it. What is missing is "
+                "the plumbing, not the axis.")
         scope_kwargs = {"cache_scope": args.cache_scope,
                         "prompt_len": args.prompt_tokens}
         print(f"  cache scope: {args.cache_scope}"
