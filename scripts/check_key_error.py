@@ -28,6 +28,15 @@ the relative error and the ratio between axes.
     was. If its ratio is much smaller, K on the MoE really is the harder
     tensor and the gap has an explanation at last.
 
+V and a group-size sweep were added afterwards, to answer a claim that had
+been standing on one measured cell. The reading that came out of the first
+run -- where the two models see the same perturbation they agree, where they
+see different ones the MoE amplifies the difference -- rests on four cases,
+and only the K axis was measured on both. The group-size case came from 2.3,
+which is MoE-only and taken on decisions; the V case was not measured at all,
+only inferred from V having no channel concentration. Both are cheap here:
+AttentionParts already carries value_states, and the group size is a loop.
+
     python scripts/check_key_error.py --model GSAI-ML/LLaDA-1.5 --model-type llada
     bash scripts/llada2.sh scripts/check_key_error.py \\
         --model inclusionAI/LLaDA2.0-mini --model-type llada2_moe
@@ -75,7 +84,11 @@ def main() -> int:
     ap.add_argument("--seq-len", type=int, default=256)
     ap.add_argument("--samples", type=int, default=4)
     ap.add_argument("--bits", type=int, nargs="+", default=[4, 3])
-    ap.add_argument("--group-size", type=int, default=128)
+    ap.add_argument("--group-size", type=int, nargs="+", default=[128],
+                    help="group sizes to sweep. 2.3 found 32 and 128 "
+                         "indistinguishable on the right axis, but only on the "
+                         "MoE and only at the decision level -- the tensor side "
+                         "of that claim has never been taken on either model")
     ap.add_argument("--layers", type=int, nargs="+", default=None,
                     help="which blocks to probe; default is an even spread of "
                          "six, because the two families differ in depth (20 "
@@ -109,6 +122,7 @@ def main() -> int:
     # rel_err[(bits, axis)] -> list over (layer, canvas)
     acc: Dict[tuple, List[float]] = {}
     crests: List[float] = []
+    vcrests: List[float] = []
 
     for s in range(args.samples):
         ids = text_ids(adapter, args.seq_len, seed=s).unsqueeze(0)
@@ -135,28 +149,44 @@ def main() -> int:
                         "hook predates the field; nothing below would be "
                         "measuring K")
                 k = k.detach().float()
+                v = probe.parts.value_states.detach().float()
             crests.append(crest(k))
+            vcrests.append(crest(v))
             for bits in args.bits:
                 for axis in ("token", "channel"):
-                    q = quantize_kv(k, bits, args.group_size, axis=axis)
-                    acc.setdefault((bits, axis), []).append(rel_err(q, k))
+                    for g in args.group_size:
+                        for side, t in (("K", k), ("V", v)):
+                            q = quantize_kv(t, bits, g, axis=axis)
+                            acc.setdefault((side, bits, axis, g), []).append(
+                                rel_err(q, t))
 
     def mean(key) -> float:
         v = acc[key]
         return sum(v) / len(v)
 
     print()
-    print("=== relative error of K, one scale per group of "
-          f"{args.group_size} ===")
-    print(f"{'bits':>5} {'along tokens':>14} {'along channels':>15} "
-          f"{'channel/token':>14}")
-    print("-" * 52)
-    for bits in args.bits:
-        t, c = mean((bits, "token")), mean((bits, "channel"))
-        print(f"{bits:>5} {t:>14.3e} {c:>15.3e} {c / t:>13.2f}x")
+    print("=== relative error, tensor level ===")
+    print(f"{'side':>5} {'bits':>5} {'group':>6} {'along tokens':>14} "
+          f"{'along channels':>15} {'channel/token':>14}")
+    print("-" * 64)
+    for side in ("K", "V"):
+        for bits in args.bits:
+            for g in args.group_size:
+                t = mean((side, bits, "token", g))
+                c = mean((side, bits, "channel", g))
+                print(f"{side:>5} {bits:>5} {g:>6} {t:>14.3e} {c:>15.3e} "
+                      f"{c / t:>13.2f}x")
 
     print()
-    print(f"  crest factor of K, peak over RMS per head: {sum(crests) / len(crests):.2f}")
+    print(f"  crest factor, peak over RMS per head: "
+          f"K {sum(crests) / len(crests):.2f}, V {sum(vcrests) / len(vcrests):.2f}")
+    print()
+    print("  Two questions this answers that the decision tables cannot. Does")
+    print("  the axis change the *tensor* error for V the way it does for K --")
+    print("  2.6 says V's axis is indifferent on decisions, and if the tensor")
+    print("  error is indifferent too there is simply nothing to amplify. And")
+    print("  does the group size change it at all: 2.3 found 32 and 128 alike")
+    print("  on decisions, on the MoE, and the tensor side was never taken.")
     print()
     print("  Read the ratio, not the level: the level moves with width and")
     print("  with where on the trajectory the canvas sits, the ratio is what")
