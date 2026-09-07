@@ -234,7 +234,15 @@ def residual_geometry(
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True)
-    ap.add_argument("--model-type", default="llada2_moe", choices=["llada2_moe"])
+    ap.add_argument("--model-type", default="llada2_moe",
+                    choices=["llada2_moe", "llada"],
+                    help="the dense family is here because 2.6a and 2.6c were "
+                         "measured on the MoE alone, and 2.5a has since shown "
+                         "that what a cache correction buys is architectural "
+                         "rather than tensor-level: K quantizes identically on "
+                         "the two, and the same error does thirteen times the "
+                         "damage on one of them. A correction that pays on the "
+                         "MoE has no claim to paying here until it is run here")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--device-map", default=None)
@@ -296,7 +304,45 @@ def main() -> int:
     total = args.blocks * args.block_length
     prefix_len = total - args.block_length
     texts = [text_ids(adapter, total, seed=i) for i in range(args.samples)]
-    states = install_block_cache(model, BlockKVCache(KVCacheConfig(), n_layers))
+    # The two families reach the same tensors by different routes -- the same
+    # dispatch check_static_scales carries, and for the same reason: routing
+    # the dense model through `install_block_cache` drags in the vendored
+    # LLaDA2 module, which does not import under the transformers version
+    # LLaDA-1.5 needs. The failure is at call time, so the branch belongs here.
+    dense = args.model_type == "llada"
+    states = (None if dense
+              else install_block_cache(model,
+                                       BlockKVCache(KVCacheConfig(), n_layers)))
+
+    if dense:
+        from dllmquant.models.llada_local import (  # noqa: E402
+            logits_from_lo as _dense_window,
+            refresh_prefix as _dense_refresh,
+            run_blocks as _dense_run,
+        )
+
+        def full_logits_for(x):
+            return _dense_run(model, x, None)[0]
+
+        def fill_prefix(cache, x):
+            _dense_refresh(model, cache, x, prefix_len, adapter.mask_id)
+
+        def window_logits(cache, x):
+            return _dense_window(model, cache, x, prefix_len)[:, :total - prefix_len]
+    else:
+        def full_logits_for(x):
+            return full_logits(model, x, args.block_length)
+
+        def fill_prefix(cache, x):
+            # The store lives on the states, so attaching the cache is part of
+            # filling it -- on the dense path the cache is passed directly.
+            for state in states:
+                state.cache = cache
+            refresh_prefix(model, states, x, prefix_len, args.block_length)
+
+        def window_logits(cache, x):
+            return logits_for_window(model, states, x, prefix_len, total,
+                                     args.block_length)
 
     def canvas_for(i, mask_ratio):
         return masked_canvas(adapter, texts[i], args.block_length, prefix_len,
@@ -416,7 +462,7 @@ def main() -> int:
             batch = []
             for i in range(args.samples):
                 x = canvas_for(i, mask_ratio)
-                reference = full_logits(model, x, args.block_length)[:, prefix_len:]
+                reference = full_logits_for(x)[:, prefix_len:]
                 batch.append((x, reference, x[:, prefix_len:total] == adapter.mask_id))
             canvas_cache[mask_ratio] = batch
         return canvas_cache[mask_ratio]
@@ -426,14 +472,10 @@ def main() -> int:
         for x, reference, committable in batch:
             cache = make_cache()
             cache.mask_ratio = mask_ratio
-            for state in states:
-                state.cache = cache
-            refresh_prefix(model, states, x, prefix_len, args.block_length)
+            fill_prefix(cache, x)
             if scramble:
                 cache.scramble(torch.Generator().manual_seed(0))
-            windowed = logits_for_window(
-                model, states, x, prefix_len, total, args.block_length
-            )
+            windowed = window_logits(cache, x)
             pooled = pooled + compare(reference, windowed,
                                       committable=committable,
                                       top_k=args.commit_k)
