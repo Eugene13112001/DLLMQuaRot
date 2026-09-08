@@ -134,6 +134,24 @@ def main() -> int:
                         "dense path and not on the MoE one, which made the two "
                         "families' task numbers incomparable without anything "
                         "in either record saying so")
+    g.add_argument("--stale-prefix", action="store_true",
+                   help="let --kv-policy govern the PREFIX as well (dense "
+                        "family only). Without it the dense sampler writes the "
+                        "prefix at the block boundary and holds it for that "
+                        "block whatever the policy says, so --kv-policy reaches "
+                        "nothing on this path unless --reuse-window is also on: "
+                        "'every_n:1' and 'block' produce the same run. With it, "
+                        "'every_n:1' refreshes the prefix at every step and is "
+                        "the exact variant a lossless width must reproduce. The "
+                        "MoE sampler has no equivalent -- there refresh_prefix "
+                        "runs once per block unconditionally, which under a "
+                        "block-causal mask is exact rather than a choice")
+    g.add_argument("--rotate-qk", action="store_true",
+                   help="R4: rotate Q and K head-wise after RoPE, so the store "
+                        "holds rotated keys. Distinct from --rotate, which is "
+                        "R1/R2/R3 and leaves the cache's keys alone -- on the "
+                        "task the two have never been measured together, and "
+                        "every R4 result so far is decision-level")
     g.add_argument("--kv-key-bits", type=int, default=0,
                    help="override the width for K only (0 = same as --kv-bits)")
     g.add_argument("--kv-value-bits", type=int, default=0,
@@ -150,6 +168,15 @@ def main() -> int:
     ap.add_argument("--eval-steps", type=int, default=256)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
+
+    # Before the checkpoint is fetched: a combination that cannot mean anything
+    # should not cost a download and a load first.
+    if args.stale_prefix and args.model_type != "llada":
+        raise SystemExit(
+            "--stale-prefix is dense-only: the MoE sampler refreshes the prefix "
+            "once per block unconditionally, which a block-causal mask makes "
+            "exact rather than a policy choice."
+        )
 
     cgq = CGQConfig()
     if args.no_cgq_weights:
@@ -187,6 +214,20 @@ def main() -> int:
     adapter = build_adapter(cfg)
     adapter.load()
     print(adapter.describe())
+
+    if args.rotate_qk:
+        # Installed before quantization, as in check_block_reuse: R4 changes
+        # the tensors a calibration pass would see, so calibrating first would
+        # fit scales to keys the run never uses.
+        if args.model_type == "llada":
+            # The dense checkpoint exposes no module-level rotary function, so
+            # R4 rides the window store's own attention hook.
+            from dllmquant.models import llada_local
+            llada_local.enable_qk_rotation(adapter.head_dim)
+        else:
+            from dllmquant.algos.quarot import install_qk_rotation
+            install_qk_rotation(adapter)
+        print("R4 installed: Q and K rotated head-wise after RoPE")
 
     if args.quantize:
         if args.rtn:
@@ -247,9 +288,11 @@ def main() -> int:
             # on the dense one -- so the same command line measured a
             # different regime on each family, and nothing in the record said
             # which.
+            kw = {"reuse_window": args.reuse_window}
+            if args.model_type == "llada":
+                kw["stale_prefix"] = args.stale_prefix
             return cached_generate(adapter, prompt, cfg_,
-                                   BlockKVCache(kv_cfg, n_layers),
-                                   reuse_window=args.reuse_window)
+                                   BlockKVCache(kv_cfg, n_layers), **kw)
 
     result = evaluate_gsm8k(
         adapter, n_samples=args.n_eval, gen_cfg=gen_cfg, generate=generate
@@ -288,6 +331,8 @@ def main() -> int:
                                              if args.kv_cache else None),
                         "kv_group_size": args.kv_group_size if args.kv_cache else None,
                         "reuse_window": args.reuse_window if args.kv_cache else None,
+                        "stale_prefix": args.stale_prefix if args.kv_cache else None,
+                        "rotate_qk": args.rotate_qk,
                         "kv_key_axis": args.kv_key_axis if args.kv_cache else None,
                         "kv_value_axis": args.kv_value_axis if args.kv_cache else None,
                         "kv_key_bits": args.kv_key_bits or None,
