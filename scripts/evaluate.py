@@ -120,6 +120,20 @@ def main() -> int:
     g.add_argument("--kv-group-size", type=int, default=128,
                    help="channels sharing one scale along head_dim; 128 is "
                         "the whole head on LLaDA2.0-mini")
+    g.add_argument("--reuse-window", action="store_true",
+                   help="also reuse the CURRENT block's own K/V instead of "
+                        "recomputing it at every step. Off by default because "
+                        "off is what both reference implementations ship: "
+                        "dInfer recomputes the block being decoded on every "
+                        "iteration and Fast-dLLM writes its cache only after "
+                        "the block is finished, so the prefix is the only "
+                        "store either one holds. Turning this on freezes the "
+                        "window too, which is a strictly more aggressive "
+                        "regime than anything published -- an upper bound, not "
+                        "an operating point. It was the silent default on the "
+                        "dense path and not on the MoE one, which made the two "
+                        "families' task numbers incomparable without anything "
+                        "in either record saying so")
     g.add_argument("--kv-key-bits", type=int, default=0,
                    help="override the width for K only (0 = same as --kv-bits)")
     g.add_argument("--kv-value-bits", type=int, default=0,
@@ -227,8 +241,15 @@ def main() -> int:
         def generate(prompt, cfg_):
             # A cache per question: entries are about this sequence and
             # carrying them across would be measuring a different thing.
+            #
+            # reuse_window is passed explicitly because the two sampler
+            # modules disagreed on its default -- False on the MoE path, True
+            # on the dense one -- so the same command line measured a
+            # different regime on each family, and nothing in the record said
+            # which.
             return cached_generate(adapter, prompt, cfg_,
-                                   BlockKVCache(kv_cfg, n_layers))
+                                   BlockKVCache(kv_cfg, n_layers),
+                                   reuse_window=args.reuse_window)
 
     result = evaluate_gsm8k(
         adapter, n_samples=args.n_eval, gen_cfg=gen_cfg, generate=generate
@@ -266,6 +287,7 @@ def main() -> int:
                         "kv_refresh_every": (args.kv_refresh_every
                                              if args.kv_cache else None),
                         "kv_group_size": args.kv_group_size if args.kv_cache else None,
+                        "reuse_window": args.reuse_window if args.kv_cache else None,
                         "kv_key_axis": args.kv_key_axis if args.kv_cache else None,
                         "kv_value_axis": args.kv_value_axis if args.kv_cache else None,
                         "kv_key_bits": args.kv_key_bits or None,
