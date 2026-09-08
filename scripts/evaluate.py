@@ -64,6 +64,16 @@ def main() -> int:
     ap.add_argument("--a-group-size", type=int, default=-1,
                     help="activation group size: one scale per N channels "
                          "instead of one per token; -1 = per token")
+    ap.add_argument("--checkpoint-dir", default="",
+                    help="save each calibrated block here and resume from it. "
+                         "The cache policy is a decode-time knob -- it touches "
+                         "neither the weights nor the activation scales -- so "
+                         "every run sharing a quantization config can reuse one "
+                         "calibration, and calibration is the expensive half "
+                         "(~80 min on LLaDA-1.5 before a single token). The "
+                         "directory is fingerprinted against the config, so a "
+                         "run with different widths refuses to reuse it rather "
+                         "than silently loading the wrong weights")
     ap.add_argument("--nsamples", type=int, default=128)
     ap.add_argument("--max-group-layers", type=int, default=64,
                     help="layers of one group calibrated at a time; each holds "
@@ -209,6 +219,7 @@ def main() -> int:
         ia_aq=IAAQConfig(enabled=not args.no_ia_aq, n_bits=args.a_bits),
         rotation=RotationConfig(enabled=args.rotate, online_mlp=args.online_mlp),
         max_group_layers=args.max_group_layers,
+        checkpoint_dir=args.checkpoint_dir,
     )
 
     adapter = build_adapter(cfg)
