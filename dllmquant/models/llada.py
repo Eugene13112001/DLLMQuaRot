@@ -46,6 +46,11 @@ _FF_NORM_NAMES = ("ff_norm", "post_attention_layernorm", "ln_2", "norm2", "ln_ml
 # the one it meant.  LLaDA2.0's is the bare `norm`, which is why it is here at
 # all -- and why it is last.
 _FINAL_NORM_NAMES = ("ln_f", "final_layernorm", "norm_f", "final_norm", "norm")
+# Per-head QK-Norm. LLaDA2.0 inherits it from Ling 2.0 (use_qk_norm=True) and
+# applies it between the projection and rotary; LLaDA-1.5 has none. A probe
+# that skips it reads Q/K the model never attends with and never caches.
+_Q_NORM_NAMES = ("query_layernorm", "q_norm", "q_layernorm")
+_K_NORM_NAMES = ("key_layernorm", "k_norm", "k_layernorm")
 _EMBED_NAMES = ("wte", "embed_tokens", "embed_in", "word_embeddings")
 _LM_HEAD_NAMES = ("ff_out", "lm_head", "embed_out")
 
@@ -119,6 +124,14 @@ class LLaDAAttentionProbe(AttentionProbe):
         self.q = find_submodule(block, _Q_NAMES)
         self.k = find_submodule(block, _K_NAMES)
         self.v = find_submodule(block, _V_NAMES)
+        self.q_norm = find_submodule(block, _Q_NORM_NAMES)
+        self.k_norm = find_submodule(block, _K_NORM_NAMES)
+        if (self.q_norm is None) != (self.k_norm is None):
+            raise ArchitectureMismatch(
+                "block has a norm on only one of Q and K "
+                f"(q: {self.q_norm is not None}, k: {self.k_norm is not None}); "
+                "the probe would reproduce half of QK-Norm"
+            )
         self.attn_norm = find_submodule(block, _ATTN_NORM_NAMES)
         if self.attn_norm is None:
             warnings.warn(
@@ -173,6 +186,14 @@ class LLaDAAttentionProbe(AttentionProbe):
         q = q.view(b, t, self.n_heads, self.head_dim).transpose(1, 2)
         k = k.view(b, t, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(b, t, self.n_kv_heads, self.head_dim).transpose(1, 2)
+
+        # QK-Norm before rotary, in the model's own order (modeling_llada2_moe
+        # lines 496-503). Missing until 11 September: every LLaDA2.0 probe --
+        # the K statistics in check_key_error and the attention map IA-AQ
+        # weights its calibration by -- was computed on un-normed Q/K.
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         if self.rotary is not None:
             q, k = self._apply_rotary(q, k, t)

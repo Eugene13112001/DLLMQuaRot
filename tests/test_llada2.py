@@ -532,6 +532,56 @@ def test_partial_rotary_leaves_the_unrotated_half_alone():
     assert probe.rope_applied
 
 
+class _NormedBlock(_Block):
+    """A block with LLaDA2.0's per-head QK-Norm, nested like the real one."""
+
+    def __init__(self, d: int = 8):
+        super().__init__(d)
+        self.self_attn = nn.Module()
+        self.self_attn.query_layernorm = nn.LayerNorm(d)
+        self.self_attn.key_layernorm = nn.LayerNorm(d)
+        with torch.no_grad():
+            # Non-trivial gains, so a skipped norm cannot pass by accident.
+            self.self_attn.query_layernorm.weight.uniform_(0.5, 2.0)
+            self.self_attn.key_layernorm.weight.uniform_(0.5, 2.0)
+
+
+def test_probe_applies_qk_norm_before_rotary():
+    """The cached K on LLaDA2.0 is normed; the probe must read that tensor."""
+    from dllmquant.models.llada import LLaDAAttentionProbe
+
+    torch.manual_seed(0)
+    block = _NormedBlock(8)
+    probe = LLaDAAttentionProbe(block, n_heads=1, n_kv_heads=1, head_dim=8,
+                                rotary=None, rope_theta=0.0)
+    hidden = torch.randn(1, 5, 8) * 3.0
+    q, k, _ = probe._project(hidden)
+
+    qkv = block.query_key_value(block.attn_norm(hidden))
+    q_raw, k_raw, _ = qkv.split([8, 8, 8], dim=-1)
+    q_raw = q_raw.view(1, 5, 1, 8).transpose(1, 2)
+    k_raw = k_raw.view(1, 5, 1, 8).transpose(1, 2)
+    torch.testing.assert_close(k, block.self_attn.key_layernorm(k_raw))
+    torch.testing.assert_close(q, block.self_attn.query_layernorm(q_raw))
+    assert not torch.allclose(k, k_raw)
+
+
+def test_probe_without_qk_norm_is_unchanged():
+    probe = _probe(head_dim=8)
+    assert probe.q_norm is None and probe.k_norm is None
+
+
+def test_half_a_qk_norm_is_refused():
+    from dllmquant.models.base import ArchitectureMismatch
+    from dllmquant.models.llada import LLaDAAttentionProbe
+
+    block = _Block(8)
+    block.key_layernorm = nn.LayerNorm(8)
+    with pytest.raises(ArchitectureMismatch):
+        LLaDAAttentionProbe(block, n_heads=1, n_kv_heads=1, head_dim=8,
+                            rotary=None, rope_theta=0.0)
+
+
 def test_full_rotary_is_untouched_for_llada15():
     probe = _probe(head_dim=8, rotary_dim=None)
     q = torch.randn(1, 1, 3, 8)
