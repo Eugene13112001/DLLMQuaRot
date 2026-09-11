@@ -144,7 +144,8 @@ class WindowState:
     checkpoint's own.
     """
 
-    __slots__ = ("mode", "cache", "layer", "start", "width", "mask", "orig")
+    __slots__ = ("mode", "cache", "layer", "start", "width", "mask", "orig",
+                 "harvest_lo", "harvest_mask", "prefix_kv")
 
     def __init__(self) -> None:
         self.mode = "off"  # off | record | reuse
@@ -158,6 +159,13 @@ class WindowState:
         self.width = 0
         self.mask: Optional[torch.Tensor] = None
         self.orig: Optional[Callable] = None
+        # The post-RoPE prefix store (kv_rope="post"). The checkpoint puts K
+        # into `present` before rotary, so a post-RoPE key only exists here,
+        # inside the kernel: a refresh harvests [0, harvest_lo) from it, and a
+        # windowed forward swaps the stored prefix in for the placeholder past.
+        self.harvest_lo = 0
+        self.harvest_mask: Optional[torch.Tensor] = None
+        self.prefix_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
 
 # R4 for the dense path. The MoE side patches the checkpoint's module-level
@@ -191,6 +199,29 @@ def _make_sdpa(state: "WindowState"):
                 _QK_ROT = _QK_ROT.to(q.device)
             h = _QK_ROT.to(q.dtype)
             q, k = q @ h, k @ h.to(k.dtype)
+        # Post-RoPE prefix. Both happen after R4, so what is stored is the
+        # rotated key and what is swapped in was rotated when it was stored --
+        # the placeholder zeros in [0, lo) are rotated too, and stay zeros.
+        if state.harvest_lo > 0:
+            lo = state.harvest_lo
+            state.cache.write(
+                state.layer,
+                k[..., :lo, :].contiguous(),
+                v[..., :lo, :].contiguous(),
+                mask=state.harvest_mask,
+            )
+        if state.prefix_kv is not None:
+            pk, pv = state.prefix_kv
+            lo = pk.shape[-2]
+            if k.shape[:-2] != pk.shape[:-2] or k.shape[-1] != pk.shape[-1]:
+                # A GQA checkpoint repeats kv heads between rotary and the
+                # kernel; the stored prefix would then carry the repeated
+                # heads and the placeholder the unrepeated ones.
+                raise RuntimeError(
+                    f"post-RoPE prefix of shape {tuple(pk.shape)} does not fit "
+                    f"the kernel's keys {tuple(k.shape)}")
+            k = torch.cat([pk.to(k.dtype), k[..., lo:, :]], dim=-2)
+            v = torch.cat([pv.to(v.dtype), v[..., lo:, :]], dim=-2)
         if state.mode != "off" and state.width > 0:
             a, b = state.start, state.start + state.width
             if state.mode == "record":
@@ -261,10 +292,13 @@ def run_blocks(
     """Embedding, blocks, head -- the model's own forward minus the assert.
 
     ``past_kv`` holds one (K, V) pair per block for positions ``0..lo-1``,
-    already carrying their rotary phase from when they were computed. Each
-    block concatenates them ahead of the fresh keys, and its rotary sees a key
-    length of ``lo + window`` against a query length of ``window``, which is
-    exactly the offset the window's positions need.
+    **before** rotary. The checkpoint's order is ``k = cat(past_key, k)``, then
+    ``present = (k, v)``, then ``q, k = self.rotary_emb(q, k)`` (lines 689, 692
+    and 697 of ``modeling_llada.py`` at 84346fd), and its rotary phases the
+    whole key axis from position 0 and the queries from ``key_len - query_len``.
+    So a past of length ``lo`` lands the window at positions ``lo..`` -- and
+    the store holds pre-RoPE keys, which is a different tensor from the one
+    LLaDA2.0 caches. ``kv_rope="post"`` on the callers stores the other one.
 
     With ``collect`` the fresh K/V of every block are returned, which is how
     the store is filled.
@@ -292,6 +326,9 @@ def refresh_prefix(
     x: torch.Tensor,
     lo: int,
     mask_id: int,
+    *,
+    states: Optional[List["WindowState"]] = None,
+    rope: str = "pre",
 ) -> None:
     """Recompute the whole sequence and store the prefix K/V, quantized.
 
@@ -299,7 +336,30 @@ def refresh_prefix(
     only when the policy says the prefix has aged out. What is stored is the
     slice ``0..lo``: the window is recomputed every step regardless, and
     keeping its keys would only let them be read at the wrong positions later.
+
+    ``rope`` picks which side of rotary the stored key is taken from. ``pre``
+    is the checkpoint's own ``present``. ``post`` harvests inside the attention
+    kernel, after rotary and after R4 -- the only place a post-RoPE key exists
+    on this checkpoint -- and needs the hooks from ``install_window_store``.
     """
+    if rope not in ("pre", "post"):
+        raise ValueError(f"rope must be 'pre' or 'post', got {rope!r}")
+    if rope == "post":
+        if states is None:
+            raise ValueError("a post-RoPE refresh needs the attention hooks")
+        mask = (x[:, :lo] == mask_id) if lo > 0 else None
+        before = cache.stats.refreshes
+        for s in states:
+            s.harvest_lo, s.harvest_mask = max(lo, 0), mask
+        try:
+            run_blocks(model, x, None)
+        finally:
+            for s in states:
+                s.harvest_lo, s.harvest_mask = 0, None
+        if lo > 0:
+            cache.stats.refreshes = before + 1
+        return
+
     _, harvested = run_blocks(model, x, None, collect=True)
     if lo <= 0:
         return
@@ -332,6 +392,7 @@ def logits_from_lo(
     window: str = "off",
     width: int = 0,
     window_mask: Optional[torch.Tensor] = None,
+    rope: str = "pre",
 ) -> torch.Tensor:
     """Logits for positions ``lo..``, prefix from the store, block optional.
 
@@ -339,7 +400,16 @@ def logits_from_lo(
     every step, ``record`` recomputes and stores it, ``reuse`` reads the stored
     one back. Its offset inside the key axis is the prefix length, because the
     forward covers ``[lo, total)`` and the past covers ``[0, lo)``.
+
+    With ``rope="post"`` the stored prefix already carries its phase, so it
+    cannot go through ``layer_past`` -- the block would rotate it a second
+    time. A zero placeholder of the same shape goes through instead, which
+    keeps the key length, the rotary offset and the bias exactly as a real past
+    would (rotary of zero is zero), and the kernel hook swaps the stored keys
+    in for it.
     """
+    if rope not in ("pre", "post"):
+        raise ValueError(f"rope must be 'pre' or 'post', got {rope!r}")
     n_layers = len(blocks(model))
     if lo <= 0 or not cache.has(0):
         if states is not None:
@@ -351,13 +421,23 @@ def logits_from_lo(
                 set_window(states, "off")
         return logits[:, lo:, :]
     past = [cache.read(i) for i in range(n_layers)]
+    feed = past
+    if rope == "post":
+        if states is None:
+            raise ValueError("a post-RoPE prefix needs the attention hooks")
+        for s, pair in zip(states, past):
+            s.prefix_kv = pair
+        zk, zv = torch.zeros_like(past[0][0]), torch.zeros_like(past[0][1])
+        feed = [(zk, zv)] * n_layers
     if states is not None:
         set_window(states, window, lo, width, window_mask)
     try:
-        logits, _ = run_blocks(model, x[:, lo:], past)
+        logits, _ = run_blocks(model, x[:, lo:], feed)
     finally:
         if states is not None:
             set_window(states, "off")
+            for s in states:
+                s.prefix_kv = None
     return logits
 
 
@@ -373,8 +453,15 @@ def cached_generate(
     threshold: Optional[float] = None,
     max_steps_per_block: int = 0,
     on_step: Optional[Callable] = None,
+    kv_rope: str = "pre",
 ):
     """The semi-autoregressive sampler with a quantized, ageing prefix cache.
+
+    ``kv_rope`` picks the tensor the prefix store holds. ``pre`` is the
+    checkpoint's ``present``, taken before rotary; ``post`` is the key after
+    rotary and after R4, which is what LLaDA2.0 caches and the only side on
+    which R4 can change what is rounded. Everything else is identical, so the
+    two differ in exactly one thing.
 
     Deliberately mirrors ``llada2_local.cached_generate`` in shape and in the
     meaning of its arguments so the same measurement scripts drive both, but
@@ -407,8 +494,14 @@ def cached_generate(
         )
     schedule = _split_evenly(cfg.steps, len(bounds))
 
+    if kv_rope not in ("pre", "post"):
+        raise ValueError(f"kv_rope must be 'pre' or 'post', got {kv_rope!r}")
+
     cache.reset()
-    states = install_window_store(adapter.model, cache) if reuse_window else None
+    # The hooks carry both the window store and the post-RoPE prefix, so
+    # either one needs them installed.
+    need_hooks = reuse_window or kv_rope == "post"
+    states = install_window_store(adapter.model, cache) if need_hooks else None
     try:
         for block_idx, (lo, hi) in enumerate(bounds):
             cache.reset_window()
@@ -444,7 +537,8 @@ def cached_generate(
                     cache.stats.reuses += 1
                     cache.stats.ages.append(cache.age(0))
                 elif step == 0 or stale_prefix:
-                    refresh_prefix(adapter.model, cache, x, lo, adapter.mask_id)
+                    refresh_prefix(adapter.model, cache, x, lo, adapter.mask_id,
+                                   states=states, rope=kv_rope)
 
                 # One decision for every layer: the policies are uniform, so layer
                 # 0 speaks for all of them.
@@ -458,6 +552,7 @@ def cached_generate(
                     adapter.model, cache, x, lo,
                     states=states, window=window, width=hi - lo,
                     window_mask=still_masked if window == "record" else None,
+                    rope=kv_rope,
                 )[:, : hi - lo, :]
                 cache.advance()
 

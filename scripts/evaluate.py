@@ -162,6 +162,19 @@ def main() -> int:
                         "R1/R2/R3 and leaves the cache's keys alone -- on the "
                         "task the two have never been measured together, and "
                         "every R4 result so far is decision-level")
+    g.add_argument("--kv-rope", default=None, choices=["pre", "post"],
+                   help="which side of rotary the prefix store takes K from. "
+                        "The two families cache different tensors by default: "
+                        "LLaDA-1.5 builds `present` before rotary_emb (lines "
+                        "692 and 697 of its modelling file), so its store holds "
+                        "pre-RoPE keys, while LLaDA2.0 stores them after RoPE. "
+                        "KVQuant's central finding is that the two quantize "
+                        "differently along channels, so a cross-family gap on "
+                        "the grouping axis can be about this rather than about "
+                        "the architecture. 'post' on the dense family stores the "
+                        "same tensor LLaDA2.0 does, and is also the only side "
+                        "on which R4 can change what is rounded. Defaults to "
+                        "each family's own side")
     g.add_argument("--kv-key-bits", type=int, default=0,
                    help="override the width for K only (0 = same as --kv-bits)")
     g.add_argument("--kv-value-bits", type=int, default=0,
@@ -186,6 +199,25 @@ def main() -> int:
             "--stale-prefix is dense-only: the MoE sampler refreshes the prefix "
             "once per block unconditionally, which a block-causal mask makes "
             "exact rather than a policy choice."
+        )
+    if args.kv_rope is None:
+        args.kv_rope = "pre" if args.model_type == "llada" else "post"
+    if args.model_type != "llada" and args.kv_rope == "pre":
+        raise SystemExit(
+            "--kv-rope pre is dense-only: LLaDA2.0's store is written after "
+            "RoPE, and that is the only side it has."
+        )
+    if (args.model_type == "llada" and args.rotate_qk
+            and not (args.kv_cache and args.kv_rope == "post")):
+        # Both halves were silently true before this guard existed: the hook
+        # R4 lives in is only installed with a store to feed, and a pre-RoPE
+        # store is rounded before the rotation is ever applied. Every dense
+        # run with --rotate-qk measured the unrotated model.
+        raise SystemExit(
+            "--rotate-qk on LLaDA-1.5 needs --kv-cache --kv-rope post. R4 is "
+            "applied after RoPE, and the dense store otherwise holds pre-RoPE "
+            "keys, so the rotation would reach attention -- where it cancels "
+            "in q.k -- and never the rounded tensor."
         )
 
     cgq = CGQConfig()
@@ -302,6 +334,7 @@ def main() -> int:
             kw = {"reuse_window": args.reuse_window}
             if args.model_type == "llada":
                 kw["stale_prefix"] = args.stale_prefix
+                kw["kv_rope"] = args.kv_rope
             return cached_generate(adapter, prompt, cfg_,
                                    BlockKVCache(kv_cfg, n_layers), **kw)
 
@@ -343,6 +376,7 @@ def main() -> int:
                         "kv_group_size": args.kv_group_size if args.kv_cache else None,
                         "reuse_window": args.reuse_window if args.kv_cache else None,
                         "stale_prefix": args.stale_prefix if args.kv_cache else None,
+                        "kv_rope": args.kv_rope if args.kv_cache else None,
                         "rotate_qk": args.rotate_qk,
                         "kv_key_axis": args.kv_key_axis if args.kv_cache else None,
                         "kv_value_axis": args.kv_value_axis if args.kv_cache else None,
