@@ -199,6 +199,16 @@ def main() -> int:
                          "move. Run the 16-bit row first: attention is exactly "
                          "invariant under R4, so any change there is a bug, "
                          "not a finding.")
+    ap.add_argument("--kv-rope", default=None, choices=["pre", "post"],
+                    help="which side of rotary the dense prefix store holds. "
+                         "The two families cache different tensors by default: "
+                         "LLaDA-1.5 takes `present` before rotary_emb, LLaDA2.0 "
+                         "stores K after QK-Norm and RoPE. Every cross-family "
+                         "row on this axis therefore compared two tensors as "
+                         "well as two models; 'post' on the dense path removes "
+                         "that confound. It is also the only side on which R4 "
+                         "can change what the prefix rounds. Defaults to each "
+                         "family's own side, so earlier numbers reproduce.")
     ap.add_argument("--head-sharing", default="off",
                     choices=["off", "shared", "independent"],
                     help="probe for whether GQA's fan-out matters because the "
@@ -262,6 +272,15 @@ def main() -> int:
                          "achievable parallelism falls with it.")
     args = ap.parse_args()
 
+    # Before the checkpoint is fetched: a side the model does not have should
+    # not cost a download and a load first.
+    if args.kv_rope is None:
+        args.kv_rope = "pre" if args.model_type == "llada" else "post"
+    if args.model_type != "llada" and args.kv_rope == "pre":
+        raise SystemExit(
+            "--kv-rope pre is dense-only: LLaDA2.0's store is written after "
+            "RoPE, and that is the only side it has.")
+
     cfg = DLLMQuantConfig(
         model_path=args.model, model_type=args.model_type,
         dtype=args.dtype, device=args.device, device_map=args.device_map,
@@ -293,6 +312,19 @@ def main() -> int:
     dense = args.model_type == "llada"
     sampler = llada_local if dense else llada2_local
     cached_generate = sampler.cached_generate
+
+    # Only the dense sampler has a side to choose: the MoE store is written
+    # after RoPE and has no other.
+    rope_kwargs = {"kv_rope": args.kv_rope} if dense else {}
+    if dense:
+        print(f"  dense prefix store holds K {args.kv_rope}-RoPE"
+              + ("" if args.kv_rope == "post" else
+                 " (the checkpoint's own side; pass --kv-rope post to compare "
+                 "against LLaDA2.0 on the same tensor)"))
+        if args.rotate_qk and args.kv_rope == "pre":
+            print("  note: R4 reaches the window store only. A pre-RoPE prefix "
+                  "is rounded before the rotation is applied, and the rotation "
+                  "then cancels in q.k, so the prefix rows are unrotated.")
 
     probe_attention = None
     if args.head_sharing != "off":
@@ -426,7 +458,8 @@ def main() -> int:
             try:
                 out = cached_generate(adapter, prompt, gen_cfg, cache,
                                       reuse_window=reuse, on_step=on_step,
-                                      **scope_kwargs, **probe_kwargs(bits))
+                                      **rope_kwargs, **scope_kwargs,
+                                      **probe_kwargs(bits))
             finally:
                 if undo is not None:
                     undo()
@@ -603,7 +636,8 @@ def main() -> int:
             try:
                 cached_generate(adapter, prompt, gen_cfg, cache,
                                 reuse_window=True, on_step=force,
-                                **scope_kwargs, **probe_kwargs(bits))
+                                **rope_kwargs, **scope_kwargs,
+                                **probe_kwargs(bits))
             finally:
                 if undo is not None:
                     undo()
