@@ -21,12 +21,12 @@ without anything that could confound it: take K after RoPE from the same
 layers on both models, quantize it both ways at the same width, and compare
 the relative error and the ratio between axes.
 
-    2.0 already has these numbers from 2.1: 8.03e-02 along tokens against
-    1.68e-01 along channels, a ratio of 2.14. If LLaDA-1.5's ratio is the
-    same, the tensor behaves identically and the whole difference lives
-    downstream -- which is a sharper finding than the capacity story ever
-    was. If its ratio is much smaller, K on the MoE really is the harder
-    tensor and the gap has an explanation at last.
+    Compare only against another run of *this* script. §2.1's 8.03e-02
+    against 1.68e-01 is a ratio of **logit** error, which is a different
+    quantity from the tensor error here; reading one against the other once
+    made a broken probe look verified. Measured with QK-Norm applied, the
+    MoE's K sits near 4.1-4.8x and LLaDA-1.5's near 2.0x, so the tensors do
+    not behave alike and the norm is what separates them.
 
 V and a group-size sweep were added afterwards, to answer a claim that had
 been standing on one measured cell. The reading that came out of the first
@@ -191,10 +191,12 @@ def main() -> int:
     print("  Read the ratio, not the level: the level moves with width and")
     print("  with where on the trajectory the canvas sits, the ratio is what")
     print("  says whether K's outliers are concentrated enough for the axis")
-    print("  to matter. LLaDA2.0-mini reports 2.14 at four bits on a decoded")
-    print("  prefix (2.1). A dense model landing near it says the tensors")
-    print("  behave alike and the whole difference is downstream of them --")
-    print("  which would leave 2.5a's gap unexplained and say so precisely.")
+    print("  to matter. Compare it only with another run of this script:")
+    print("  2.1's 2.14 is a ratio of *logit* error, a different quantity,")
+    print("  and reading one against the other once made a probe that")
+    print("  skipped QK-Norm look verified. Measured with the norm applied,")
+    print("  LLaDA2.0-mini sits at 4.09x (mask 0.00) to 4.78x (0.50) and")
+    print("  LLaDA-1.5 at 1.99x -- the norm is what separates the tensors.")
     return 0
 
 
