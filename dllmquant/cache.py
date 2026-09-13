@@ -1181,9 +1181,57 @@ class BlockKVCache:
         }
 
 
+class ScaleBookRecorder(BlockKVCache):
+    """A cache that feeds everything it stores into a :class:`StaticScaleBook`.
+
+    Static scales are only as good as the tensors they were calibrated on, and
+    the tensors that matter are the ones the evaluated run will store: after
+    QK-Norm and RoPE on LLaDA2.0, on whichever side ``kv_rope`` picks on
+    LLaDA-1.5, along real sampler trajectories at the mask ratios those
+    trajectories actually pass through. The write is the one place where all
+    of that is already true, so the recorder observes there and then stores as
+    an ordinary cache would -- which keeps the calibration run on exactly the
+    path the evaluation takes.
+    """
+
+    def __init__(
+        self,
+        cfg: KVCacheConfig,
+        n_layers: int,
+        book: StaticScaleBook,
+        kinds: Tuple[str, ...] = ("key", "value"),
+    ):
+        super().__init__(cfg, n_layers)
+        self.book = book
+        self.kinds = tuple(kinds)
+
+    def _observe(self, layer: int, k: torch.Tensor, v: torch.Tensor,
+                 mask: Optional[torch.Tensor]) -> None:
+        ratio = self.mask_ratio
+        if mask is not None:
+            ratio = float(mask.to(torch.float32).mean())
+        if ratio is None:
+            raise ValueError(
+                "static scales are bucketed by mask ratio, and this write "
+                "carried neither a mask nor cache.mask_ratio"
+            )
+        for kind, t in (("key", k), ("value", v)):
+            if kind in self.kinds:
+                self.book.observe(layer, kind, t, ratio)
+
+    def write(self, layer, k, v, mask=None):
+        self._observe(layer, k, v, mask)
+        return super().write(layer, k, v, mask)
+
+    def write_window(self, layer, k, v, mask=None):
+        self._observe(layer, k, v, mask)
+        return super().write_window(layer, k, v, mask)
+
+
 __all__ = [
     "KVCacheConfig",
     "BlockKVCache",
+    "ScaleBookRecorder",
     "CacheStats",
     "quantize_kv",
     "quantize_kv_static",

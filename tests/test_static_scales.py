@@ -28,6 +28,7 @@ import test_block_cache as tbc  # noqa: E402  the stand-in model lives there
 from dllmquant.cache import (  # noqa: E402
     BlockKVCache,
     KVCacheConfig,
+    ScaleBookRecorder,
     StaticScaleBook,
 )
 from dllmquant.models.llada2_local import (  # noqa: E402
@@ -291,6 +292,72 @@ def test_the_bucket_follows_the_mask_ratio_through_the_model():
 
     assert err(1.0) > 5 * err(0.0)
     assert book.fallbacks == 0
+
+
+# ---------------------------------------------------- recording at the write
+
+
+def test_a_book_recorded_at_the_write_is_the_book_built_from_a_tap():
+    """evaluate.py calibrates by recording what the cache stores.
+
+    The probe calibrated by tapping the same tensors on their way in. If the
+    two books differ, the task-level static rows would be measuring the
+    calibration route instead of static scaling -- so they must coincide, down
+    to the logits.
+    """
+    model, _, states = tbc._setup(bits=16)
+    torch.manual_seed(0)
+    x = torch.randint(0, tbc.VOCAB, (1, 12))
+    prefix_len = 8
+    n_layers = len(model.model.layers)
+
+    tapped = _calibrated_book(model, states, x, prefix_len, bits=4)
+
+    recorded = StaticScaleBook(bits=4, buckets=(0.0,))
+    recorder = ScaleBookRecorder(
+        KVCacheConfig(enabled=True, decoded_bits=16, masked_bits=16),
+        n_layers, recorded,
+    )
+    _window(model, states, recorder, x, prefix_len)
+    recorded.freeze()
+
+    def logits(book):
+        cache = BlockKVCache(
+            KVCacheConfig(enabled=True, decoded_bits=4, masked_bits=4,
+                          scale_book=book),
+            n_layers,
+        )
+        return _window(model, states, cache, x, prefix_len)
+
+    assert torch.equal(logits(recorded), logits(tapped))
+
+
+def test_the_recorder_calibrates_only_the_sides_it_was_given():
+    """--kv-static key must leave V to the dynamic quantizer."""
+    book = StaticScaleBook(bits=4, buckets=(0.0, 1.0))
+    rec = ScaleBookRecorder(
+        KVCacheConfig(enabled=True, decoded_bits=16, masked_bits=16),
+        1, book, kinds=("key",),
+    )
+    k, v = torch.randn(1, 2, 6, 8), torch.randn(1, 2, 6, 8)
+    rec.write(0, k, v, mask=torch.ones(1, 6, dtype=torch.bool))
+    rec.write(0, k, v, mask=torch.zeros(1, 6, dtype=torch.bool))
+    book.freeze()
+
+    book.get(0, "key", 1.0)
+    book.get(0, "key", 0.0)
+    assert book.fallbacks == 0          # both buckets were filled by the mask
+    with pytest.raises(KeyError):
+        book.get(0, "value", 0.5)
+
+
+def test_a_write_the_recorder_cannot_bucket_is_refused():
+    rec = ScaleBookRecorder(
+        KVCacheConfig(enabled=True, decoded_bits=16, masked_bits=16),
+        1, StaticScaleBook(bits=4, buckets=(0.0,)),
+    )
+    with pytest.raises(ValueError):
+        rec.write(0, torch.randn(1, 2, 6, 8), torch.randn(1, 2, 6, 8))
 
 
 

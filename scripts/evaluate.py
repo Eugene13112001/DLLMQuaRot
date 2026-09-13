@@ -175,6 +175,30 @@ def main() -> int:
                         "same tensor LLaDA2.0 does, and is also the only side "
                         "on which R4 can change what is rounded. Defaults to "
                         "each family's own side")
+    g.add_argument("--kv-static", default="off", choices=["off", "key", "kv"],
+                   help="static cache scales: calibrate one scale per channel "
+                        "(bucketed by mask ratio) before the evaluation and "
+                        "store every entry with it, instead of computing scales "
+                        "from each tensor as it is written. 'key' calibrates K "
+                        "and keeps V dynamic -- KVQuant's split, measured free "
+                        "on the tensor in 2.6b; 'kv' calibrates both, which the "
+                        "same measurement priced at +24%% error against a +17%% "
+                        "break-even. Calibration runs the same sampler, regime "
+                        "and prompt format on GSM8K *train* questions with a "
+                        "lossless cache and records exactly what it stores, so "
+                        "the scales are fitted to the tensors the evaluated run "
+                        "will write and nothing from the test split is seen")
+    g.add_argument("--kv-static-prompts", type=int, default=8,
+                   help="train questions generated to calibrate the static "
+                        "scales")
+    g.add_argument("--kv-static-reduce", default="max", choices=["max", "mean"],
+                   help="how a channel's range is pooled across calibration "
+                        "writes: 'max' takes the envelope and never clips, "
+                        "'mean' is finer and clips on the tails")
+    g.add_argument("--kv-static-buckets", type=float, nargs="+",
+                   default=[0.0, 0.25, 0.5, 0.75, 1.0],
+                   help="mask-ratio buckets the scales are kept per; one value "
+                        "is the ablation that says whether bucketing matters")
     g.add_argument("--kv-key-bits", type=int, default=0,
                    help="override the width for K only (0 = same as --kv-bits)")
     g.add_argument("--kv-value-bits", type=int, default=0,
@@ -219,6 +243,22 @@ def main() -> int:
             "keys, so the rotation would reach attention -- where it cancels "
             "in q.k -- and never the rounded tensor."
         )
+    if args.kv_static != "off":
+        key_bits = args.kv_key_bits or args.kv_bits
+        value_bits = args.kv_value_bits or args.kv_bits
+        if not args.kv_cache:
+            raise SystemExit("--kv-static needs --kv-cache: it changes how the "
+                             "cache is scaled, and there is no cache without it.")
+        if args.kv_masked_bits and args.kv_masked_bits != args.kv_bits:
+            raise SystemExit("--kv-static cannot carry two widths: a static "
+                             "scale spans a channel's masked and decoded "
+                             "positions together.")
+        if args.kv_static == "kv" and key_bits != value_bits:
+            raise SystemExit("--kv-static kv needs K and V at one width: one "
+                             "book is calibrated at one width.")
+        if key_bits >= 16:
+            raise SystemExit("--kv-static at 16 bits calibrates nothing: the "
+                             "store is lossless there.")
 
     cgq = CGQConfig()
     if args.no_cgq_weights:
@@ -288,6 +328,7 @@ def main() -> int:
     )
 
     generate = None
+    book = None
     if args.kv_cache:
         from dllmquant.cache import BlockKVCache, KVCacheConfig
         # The two families cache the same tensors for different reasons, and
@@ -304,6 +345,54 @@ def main() -> int:
         else:
             from dllmquant.models.llada2_local import cached_generate
 
+        n_layers = len(adapter.blocks)
+
+        def sampler_kwargs() -> dict:
+            # reuse_window is passed explicitly because the two sampler
+            # modules disagreed on its default -- False on the MoE path, True
+            # on the dense one -- so the same command line measured a
+            # different regime on each family, and nothing in the record said
+            # which.
+            kw = {"reuse_window": args.reuse_window}
+            if args.model_type == "llada":
+                kw["stale_prefix"] = args.stale_prefix
+                kw["kv_rope"] = args.kv_rope
+            return kw
+
+        book_kinds = ("key", "value")
+        if args.kv_static != "off":
+            from dllmquant.cache import ScaleBookRecorder, StaticScaleBook
+            book_kinds = ("key",) if args.kv_static == "key" else ("key", "value")
+            book = StaticScaleBook(bits=args.kv_key_bits or args.kv_bits,
+                                   buckets=tuple(args.kv_static_buckets),
+                                   reduce=args.kv_static_reduce)
+            # Same regime as the evaluation, lossless storage: the recorder
+            # sees the tensors the evaluated run will write, and nothing it
+            # stores is rounded before it is observed.
+            calib_cfg = KVCacheConfig(
+                enabled=True,
+                policy=args.kv_policy,
+                refresh_every=args.kv_refresh_every,
+                decoded_bits=16,
+                masked_bits=16,
+                group_size=args.kv_group_size,
+                key_axis=args.kv_key_axis,
+                value_axis=args.kv_value_axis,
+            )
+
+            def calib_generate(prompt, cfg_):
+                recorder = ScaleBookRecorder(calib_cfg, n_layers, book, book_kinds)
+                return cached_generate(adapter, prompt, cfg_, recorder,
+                                       **sampler_kwargs())
+
+            print(f"\ncalibrating static {'/'.join(book_kinds)} scales on "
+                  f"{args.kv_static_prompts} GSM8K train questions")
+            evaluate_gsm8k(adapter, n_samples=args.kv_static_prompts,
+                           gen_cfg=gen_cfg, split="train", verbose=False,
+                           generate=calib_generate)
+            book.freeze()
+            print("  " + book.describe())
+
         kv_cfg = KVCacheConfig(
             enabled=True,
             policy=args.kv_policy,
@@ -315,8 +404,9 @@ def main() -> int:
             group_size=args.kv_group_size,
             key_axis=args.kv_key_axis,
             value_axis=args.kv_value_axis,
+            scale_book=book,
+            scale_book_kinds=book_kinds,
         )
-        n_layers = len(adapter.blocks)
         print(f"\nKV cache on: {args.kv_bits} bits, group {args.kv_group_size}, {args.kv_policy}"
               + (f":{args.kv_refresh_every}" if args.kv_policy == "every_n" else "")
               + (f", K at {args.kv_key_bits}" if args.kv_key_bits else "")
@@ -324,19 +414,11 @@ def main() -> int:
 
         def generate(prompt, cfg_):
             # A cache per question: entries are about this sequence and
-            # carrying them across would be measuring a different thing.
-            #
-            # reuse_window is passed explicitly because the two sampler
-            # modules disagreed on its default -- False on the MoE path, True
-            # on the dense one -- so the same command line measured a
-            # different regime on each family, and nothing in the record said
-            # which.
-            kw = {"reuse_window": args.reuse_window}
-            if args.model_type == "llada":
-                kw["stale_prefix"] = args.stale_prefix
-                kw["kv_rope"] = args.kv_rope
+            # carrying them across would be measuring a different thing. The
+            # scale book, when there is one, is frozen and shared.
             return cached_generate(adapter, prompt, cfg_,
-                                   BlockKVCache(kv_cfg, n_layers), **kw)
+                                   BlockKVCache(kv_cfg, n_layers),
+                                   **sampler_kwargs())
 
     result = evaluate_gsm8k(
         adapter, n_samples=args.n_eval, gen_cfg=gen_cfg, generate=generate
@@ -383,6 +465,15 @@ def main() -> int:
                         "kv_key_bits": args.kv_key_bits or None,
                         "kv_value_bits": args.kv_value_bits or None,
                         "kv_masked_bits": args.kv_masked_bits or None,
+                        "kv_static": args.kv_static if args.kv_cache else None,
+                        "kv_static_prompts": (args.kv_static_prompts
+                                              if book is not None else None),
+                        "kv_static_reduce": (args.kv_static_reduce
+                                             if book is not None else None),
+                        "kv_static_buckets": (list(args.kv_static_buckets)
+                                              if book is not None else None),
+                        "kv_static_fallbacks": (book.fallbacks
+                                                if book is not None else None),
                     },
                     "accuracy": result.accuracy,
                     "correct": result.correct,
