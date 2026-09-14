@@ -45,6 +45,7 @@ AttentionParts already carries value_states, and the group size is a loop.
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import sys
 from typing import Dict, List
@@ -98,6 +99,17 @@ def main() -> int:
                     help="share of the canvas held masked. K's statistics move "
                          "along the trajectory (2.4), so the two models have "
                          "to be read at the same point on it")
+    ap.add_argument("--skip-qk-norm", action="store_true",
+                    help="read K and Q before QK-Norm, the tensor the model "
+                         "never caches. It is here for one row only: the "
+                         "within-model leg of the QK-Norm finding, same "
+                         "checkpoint, same canvases, one variable. Refused on a "
+                         "model that has no norm to skip")
+    ap.add_argument("--dump", default=None,
+                    help="write every (canvas, layer) error to this JSON. The "
+                         "table prints ratios of means and nothing about their "
+                         "spread; scripts/stats_theses.py resamples canvases "
+                         "from the dump for the intervals")
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(model_path=args.model, model_type=args.model_type,
@@ -117,7 +129,9 @@ def main() -> int:
 
     print(f"\n{args.samples} canvases of {args.seq_len} tokens, mask ratio "
           f"{args.mask_ratio:.2f}, layers {idx} of {depth}")
-    print("K taken after RoPE -- the tensor the cache stores")
+    print("K taken after RoPE -- the tensor the cache stores"
+          + (" -- except QK-Norm is SKIPPED, so not what it stores"
+             if args.skip_qk_norm else ""))
 
     # rel_err[(bits, axis)] -> list over (layer, canvas)
     acc: Dict[tuple, List[float]] = {}
@@ -133,6 +147,12 @@ def main() -> int:
 
         for li in idx:
             probe = adapter.make_probe(blocks[li])
+            if args.skip_qk_norm:
+                if getattr(probe, "k_norm", None) is None:
+                    raise SystemExit(
+                        "--skip-qk-norm on a model with no QK-Norm: the row "
+                        "would be the normal one under a misleading label")
+                probe.q_norm = probe.k_norm = None
             # Inside the `with`, not after it: AttentionProbe.__exit__ clears
             # `parts` so a stale capture cannot be read as a fresh one, and
             # reading after the block gets None every time.
@@ -197,6 +217,32 @@ def main() -> int:
     print("  skipped QK-Norm look verified. Measured with the norm applied,")
     print("  LLaDA2.0-mini sits at 4.09x (mask 0.00) to 4.78x (0.50) and")
     print("  LLaDA-1.5 at 1.99x -- the norm is what separates the tensors.")
+
+    if args.dump:
+        # Cells are appended canvas by canvas, layer by layer, so the flat
+        # lists reshape into [canvas][layer] -- the unit a bootstrap resamples
+        # is the canvas, and layers stay inside it as a fixed design.
+        n_l = len(idx)
+
+        def grid(v: List[float]) -> List[List[float]]:
+            return [v[s * n_l:(s + 1) * n_l] for s in range(args.samples)]
+
+        payload = {
+            "config": {
+                "model": args.model, "model_type": args.model_type,
+                "seq_len": args.seq_len, "samples": args.samples,
+                "mask_ratio": args.mask_ratio, "layers": idx,
+                "bits": args.bits, "group_size": args.group_size,
+                "skip_qk_norm": args.skip_qk_norm,
+            },
+            "shape": "canvas x layer",
+            "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)
+                       for (side, bits, axis, g), v in acc.items()},
+            "crest": {"K": grid(crests), "V": grid(vcrests)},
+        }
+        with open(args.dump, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        print(f"\nwrote {args.samples} x {n_l} cells per quantity to {args.dump}")
     return 0
 
 
