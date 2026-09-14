@@ -31,7 +31,7 @@ run() {
   if [ -s "$out" ]; then echo "skip $n (есть $out)"; return 0; fi
   if pgrep -f -- "$out" >/dev/null; then echo "skip $n (уже идёт)"; return 0; fi
   local try c pid
-  for try in 1 2 3; do
+  for try in 1 2 3 4 5 6; do
     exec 9>"$LOCK"; flock 9
     while c=$(free_card "$need"); [ -z "$c" ]; do
       echo "$(date +%H:%M) $n: нет карты с $need MiB, жду"; sleep 120
@@ -48,7 +48,7 @@ run() {
     fi
     echo "$(date +%H:%M) $n: OOM, повтор через 5 минут"; sleep 300
   done
-  echo "!!! $n: три OOM подряд, пропускаю"; return 1
+  echo "!!! $n: шесть OOM подряд, пропускаю"; return 1
 }
 
 EVAL15="env PYTHONPATH=$HOME/tf446 python scripts/evaluate.py --model GSAI-ML/LLaDA-1.5 --model-type llada"

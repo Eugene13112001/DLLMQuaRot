@@ -377,8 +377,49 @@ def load_pretrained(
 
     model = auto_class.from_pretrained(cfg.model_path, **kwargs)
     if wants_gpu:
+        reserve_device_memory(model, cfg.device)
         model = model.to(cfg.device)
     return model
+
+
+def reserve_device_memory(model: nn.Module, device, extra_gb: Optional[float] = None) -> int:
+    """Claim the whole model's worth of VRAM in one allocation, then move it.
+
+    ``.to(device)`` copies parameter by parameter, a few hundred tensors over
+    tens of seconds. On a shared card that is a race: other jobs keep growing
+    while the copy runs, and the move dies at 17 GB of 32 with "tried to
+    allocate 20 MiB" -- which is what the pod did, twice, on a card that had
+    had the room when the job was started.
+
+    One ``torch.empty`` of the total size either fails at once, before any
+    time is spent, or succeeds, and freeing it leaves the block in PyTorch's
+    caching allocator: reserved for this process and invisible to everyone
+    else, so the parameters are then carved out of it. ``extra_gb`` keeps a
+    margin for the first activations on top (env ``DLLMQ_RESERVE_EXTRA_GB``,
+    default 8). Returns the bytes reserved; 0 when the device is not CUDA.
+    """
+    import os
+    import torch as _torch
+
+    dev = _torch.device(device)
+    if dev.type != "cuda":
+        return 0
+    if extra_gb is None:
+        extra_gb = float(os.environ.get("DLLMQ_RESERVE_EXTRA_GB", "8"))
+    need = sum(t.numel() * t.element_size()
+               for t in list(model.parameters()) + list(model.buffers()))
+    need += int(extra_gb * (1 << 30))
+    try:
+        block = _torch.empty(need, dtype=_torch.uint8, device=dev)
+    except _torch.OutOfMemoryError as exc:
+        free, _ = _torch.cuda.mem_get_info(dev)
+        raise _torch.OutOfMemoryError(
+            f"could not reserve {need / (1 << 30):.1f} GiB on {dev} for the model "
+            f"(free now {free / (1 << 30):.1f} GiB); nothing was moved"
+        ) from exc
+    del block   # back to the caching allocator, still held by this process
+    print(f"[load] reserved {need / (1 << 30):.1f} GiB on {dev} before moving the model")
+    return need
 
 
 def _contains_attention(module: nn.Module) -> bool:
