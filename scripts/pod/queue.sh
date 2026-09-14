@@ -10,7 +10,6 @@ M="${1:?model: 15|20}"
 
 C="--n-eval 200 --gen-length 512 --eval-steps 256 --kv-cache"
 BL="--kv-policy block"
-N1="--stale-prefix --kv-policy every_n --kv-refresh-every 1"
 
 if [ "$M" = 15 ]; then
   e() { n=$1; shift; run "$n" $NEED15 "out/$n.json" $EVAL15 "$@" --out "out/$n.json"; }
@@ -28,14 +27,8 @@ if [ "$M" = 15 ]; then
   # onegroup.sh
   e l15_G1_4 $C $BL --kv-group-size 4096 --kv-bits 4
   e l15_G1_3 $C $BL --kv-group-size 4096 --kv-bits 3
-  # axis3.sh
-  for pol in n1 block; do
-    P=$([ $pol = n1 ] && echo "$N1" || echo "$BL")
-    e l15_A3_${pol}_tok    $C --kv-bits 3 --kv-rope post $P --kv-key-axis channel
-    e l15_A3_${pol}_tok_r4 $C --kv-bits 3 --kv-rope post $P --kv-key-axis channel --rotate-qk
-    e l15_A3_${pol}_ch     $C --kv-bits 3 --kv-rope post $P --kv-key-axis token
-    e l15_A3_${pol}_ch_r4  $C --kv-bits 3 --kv-rope post $P --kv-key-axis token --rotate-qk
-  done
+  # The axis and R4 grid at three bits was dropped on 14 September; it is in
+  # git history (f2adf18) if it comes back.
 else
   e() { n=$1; shift; run "$n" $NEED20 "out/$n.json" $EVAL20 "$@" --out "out/$n.json"; }
   e l20_S_k4   $C $BL --kv-bits 4 --kv-static key
@@ -50,8 +43,5 @@ else
   run br_l20 $NEED20 out/br_l20.json $PY20 scripts/check_block_reuse.py $M20 --samples 16 --bits 16 4 3 --policies every_n:1 --dump-margins out/br_l20.json
   e l20_G1_4 $C $BL --kv-group-size 4096 --kv-bits 4
   e l20_G1_3 $C $BL --kv-group-size 4096 --kv-bits 3
-  e l20_A3_tok    $C --kv-bits 3 $BL --kv-key-axis channel
-  e l20_A3_tok_r4 $C --kv-bits 3 $BL --kv-key-axis channel --rotate-qk
-  e l20_A3_ch_r4  $C --kv-bits 3 $BL --kv-key-axis token --rotate-qk
 fi
 echo "$(date +%H:%M) очередь $M прошла"
