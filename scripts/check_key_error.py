@@ -110,6 +110,16 @@ def main() -> int:
                          "table prints ratios of means and nothing about their "
                          "spread; scripts/stats_theses.py resamples canvases "
                          "from the dump for the intervals")
+    ap.add_argument("--rotate", action="store_true",
+                    help="also quantize K and V after R4 -- the head-wise "
+                         "random Hadamard QuaRot puts on Q/K after RoPE, same "
+                         "seed as --rotate-qk -- on both axes. This is the "
+                         "question the per-channel scale and QuaRot answer "
+                         "differently: catch fixed-channel outliers with a "
+                         "scale per channel, or smear them with a rotation and "
+                         "then group per token the way V is grouped. The "
+                         "rotation is orthogonal, so the error measured in the "
+                         "rotated frame is the error of the attention input")
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(model_path=args.model, model_type=args.model_type,
@@ -132,6 +142,14 @@ def main() -> int:
     print("K taken after RoPE -- the tensor the cache stores"
           + (" -- except QK-Norm is SKIPPED, so not what it stores"
              if args.skip_qk_norm else ""))
+
+    rot = None
+    if args.rotate:
+        from dllmquant.algos.quarot import random_hadamard_matrix
+        rot = random_hadamard_matrix(adapter.head_dim, seed=0)
+        print("R4 variants on: K and V also quantized after a head-wise "
+              "random Hadamard (seed 0, the matrix --rotate-qk installs)")
+    axes = ("token", "channel") + (("token+rot", "channel+rot") if rot is not None else ())
 
     # rel_err[(bits, axis)] -> list over (layer, canvas)
     acc: Dict[tuple, List[float]] = {}
@@ -172,11 +190,18 @@ def main() -> int:
                 v = probe.parts.value_states.detach().float()
             crests.append(crest(k))
             vcrests.append(crest(v))
+            rotated = {}
+            if rot is not None:
+                h = rot.to(k.device)
+                rotated = {"K": k @ h, "V": v @ h}
             for bits in args.bits:
-                for axis in ("token", "channel"):
+                for axis in axes:
+                    base, _, turned = axis.partition("+")
                     for g in args.group_size:
                         for side, t in (("K", k), ("V", v)):
-                            q = quantize_kv(t, bits, g, axis=axis)
+                            if turned:
+                                t = rotated[side]
+                            q = quantize_kv(t, bits, g, axis=base)
                             acc.setdefault((side, bits, axis, g), []).append(
                                 rel_err(q, t))
 
@@ -196,6 +221,25 @@ def main() -> int:
                 c = mean((side, bits, "channel", g))
                 print(f"{side:>5} {bits:>5} {g:>6} {t:>14.3e} {c:>15.3e} "
                       f"{c / t:>13.2f}x")
+
+    if rot is not None:
+        print()
+        print("=== R4 against the per-channel scale (\"along tokens\" = one scale "
+              "per channel) ===")
+        print(f"{'side':>5} {'bits':>5} {'group':>6} {'ch scale':>10} {'tok scale':>10} "
+              f"{'tok+R4':>10} {'ch+R4':>10} {'tok+R4 / ch':>12}")
+        print("-" * 76)
+        for side in ("K", "V"):
+            for bits in args.bits:
+                for g in args.group_size:
+                    ch = mean((side, bits, "token", g))
+                    tok = mean((side, bits, "channel", g))
+                    tokr = mean((side, bits, "channel+rot", g))
+                    chr_ = mean((side, bits, "token+rot", g))
+                    print(f"{side:>5} {bits:>5} {g:>6} {ch:>10.3e} {tok:>10.3e} "
+                          f"{tokr:>10.3e} {chr_:>10.3e} {tokr / ch:>11.2f}x")
+        print("  tok+R4 / ch above one: the per-channel scale beats QuaRot's "
+              "rotate-then-group-per-token on this tensor.")
 
     print()
     print(f"  crest factor, peak over RMS per head: "
@@ -233,7 +277,7 @@ def main() -> int:
                 "seq_len": args.seq_len, "samples": args.samples,
                 "mask_ratio": args.mask_ratio, "layers": idx,
                 "bits": args.bits, "group_size": args.group_size,
-                "skip_qk_norm": args.skip_qk_norm,
+                "skip_qk_norm": args.skip_qk_norm, "rotate": args.rotate,
             },
             "shape": "canvas x layer",
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)

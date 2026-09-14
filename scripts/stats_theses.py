@@ -303,10 +303,64 @@ def cmd_floor(args) -> int:
     return 0
 
 
+# -------------------------------------------------------------- R4 vs axis
+
+# Dump keys use the quantizer's axis name: "token" groups along tokens, i.e.
+# one scale per channel; "channel" groups along channels, one scale per token.
+ROT_CELLS = (
+    ("token", "scale per channel (KIVI/KVQuant)"),
+    ("channel", "scale per token"),
+    ("channel+rot", "R4, then scale per token (QuaRot)"),
+    ("token+rot", "R4, then scale per channel"),
+)
+
+
+def cmd_rotate(args) -> int:
+    dumps = [load_key(p) for p in args.dumps]
+    rng = random.Random(args.seed)
+    res = []
+    for d in dumps:
+        key = f"K/{args.bits}/channel+rot/{args.group}"
+        if key not in d["errors"]:
+            raise SystemExit(f"{label(d)}: no R4 cells -- rerun check_key_error with --rotate")
+        n = len(d["errors"][key])
+        idx = [resample(n, rng) for _ in range(args.boot)]
+        print(f"{label(d)} -- {args.bits} bits, group {args.group}")
+        for side in ("K", "V"):
+            grids = {a: d["errors"][f"{side}/{args.bits}/{a}/{args.group}"] for a in dict(ROT_CELLS)}
+            n_l = len(grids["token"][0])
+            for a, name in ROT_CELLS:
+                g = grids[a]
+                est = sum(map(sum, g)) / (n * n_l)
+                dr = [sum(sum(g[i]) for i in c) / (n * n_l) for c in idx]
+                print(f"  {side} {name:<36} {est:.3e}  [{percentile(dr, .025):.3e}, {percentile(dr, .975):.3e}]")
+            q_est = ratio_of_means(grids["channel+rot"], grids["token"], range(n))
+            q_dr = [ratio_of_means(grids["channel+rot"], grids["token"], c) for c in idx]
+            gain = ratio_of_means(grids["channel"], grids["channel+rot"], range(n))
+            print(f"  {side} QuaRot / per-channel scale  {q_est:.2f}x  95% CI {ci(q_dr)}  "
+                  f"p(<= 1) = {bootstrap_p_le_one(q_dr):.2g}   (R4 improves the per-token scale {gain:.2f}x)")
+            if side == "K":
+                res.append((label(d), q_est, q_dr))
+        print()
+    if len(res) == 2:
+        (la, qa, da), (lb, qb, db) = res
+        quot = [x / y for x, y in zip(da, db)]
+        print(f"K: how much more the per-channel scale beats QuaRot on A than on B")
+        print(f"  {qa / qb:.2f}  95% CI {ci(quot)}  p(A <= B) = {bootstrap_p_le_one(quot):.2g}")
+    print("\n  Read: above one, catching fixed-channel outliers with a scale beats "
+          "smearing them with a rotation. If К3's mechanism is right, the margin "
+          "should be widest on the model with QK-Norm.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    rt = sub.add_parser("rotate", help="R4 then per-token scale, against a per-channel scale")
+    rt.add_argument("dumps", nargs="+")
+    rt.add_argument("--bits", type=int, default=4)
+    rt.add_argument("--group", type=int, default=128)
     ax = sub.add_parser("axis", help="К3: intervals on the axis ratio")
     ax.add_argument("a")
     ax.add_argument("b")
@@ -317,11 +371,11 @@ def main() -> int:
     fl.add_argument("a")
     fl.add_argument("b")
     fl.add_argument("--cell", default="3/every_n:1")
-    for p in (ax, fl):
+    for p in (ax, fl, rt):
         p.add_argument("--boot", type=int, default=10_000)
         p.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
-    return cmd_axis(args) if args.cmd == "axis" else cmd_floor(args)
+    return {"axis": cmd_axis, "floor": cmd_floor, "rotate": cmd_rotate}[args.cmd](args)
 
 
 if __name__ == "__main__":

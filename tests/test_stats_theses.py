@@ -130,3 +130,65 @@ def test_unsigned_margins_are_refused(tmp_path):
     (tmp_path / "old.json").write_text(json.dumps({"cells": {}, "config": {}}))
     with pytest.raises(SystemExit, match="signed"):
         st.load_margins(str(tmp_path / "old.json"))
+
+
+def test_rotate_reads_all_four_cells_and_compares_models(tmp_path, capsys):
+    def dump(path, quarot_over_channel, model):
+        levels = [[1.0 + 0.1 * c + 0.01 * l for l in range(3)] for c in range(10)]
+        errors = {}
+        for side in ("K", "V"):
+            errors[f"{side}/4/token/128"] = levels
+            errors[f"{side}/4/channel/128"] = [[3 * x for x in r] for r in levels]
+            errors[f"{side}/4/channel+rot/128"] = [[quarot_over_channel * x for x in r] for r in levels]
+            errors[f"{side}/4/token+rot/128"] = [[1.5 * x for x in r] for r in levels]
+        path.write_text(json.dumps({
+            "config": {"model": model, "samples": 10, "mask_ratio": 0.5, "layers": [0, 1, 2],
+                       "bits": [4], "group_size": [128], "skip_qk_norm": False, "rotate": True,
+                       "seq_len": 256, "model_type": "x"},
+            "shape": "canvas x layer", "errors": errors, "crest": {}}))
+
+    dump(tmp_path / "a.json", 2.0, "m/qknorm")
+    dump(tmp_path / "b.json", 1.25, "m/plain")
+    ns = type("A", (), dict(dumps=[str(tmp_path / "a.json"), str(tmp_path / "b.json")],
+                            bits=4, group=128, boot=200, seed=0))
+    assert st.cmd_rotate(ns) == 0
+    out = capsys.readouterr().out
+    assert "K QuaRot / per-channel scale  2.00x" in out
+    assert "K QuaRot / per-channel scale  1.25x" in out
+    assert "R4 improves the per-token scale 1.50x" in out
+    assert "\n  1.60  95% CI" in out
+
+
+def test_rotate_refuses_dump_without_r4(tmp_path):
+    key_dump(tmp_path / "a.json", 4.5, 1.2)
+    ns = type("A", (), dict(dumps=[str(tmp_path / "a.json")], bits=4, group=128, boot=10, seed=0))
+    with pytest.raises(SystemExit, match="--rotate"):
+        st.cmd_rotate(ns)
+
+
+def test_rotation_rescues_the_per_token_scale_on_fixed_channel_outliers():
+    """What R4 is for, on a stand-in: fixed-channel outliers ruin a per-token
+    scale, and a Hadamard spreads them so the per-token scale recovers.
+
+    Deliberately no claim about R4 against a per-channel scale. On Gaussian
+    keys with three loud channels the rotation actually wins (0.068 against
+    0.097), so which of the two is better is an empirical property of real
+    keys -- the thing the --rotate dumps measure -- and not something a toy
+    tensor can settle either way.
+    """
+    import torch
+    from dllmquant.algos.quarot import random_hadamard_matrix
+    from dllmquant.cache import quantize_kv
+
+    g = torch.Generator().manual_seed(0)
+    k = torch.randn(1, 4, 256, 64, generator=g)
+    k[..., :3] *= 20.0
+    h = random_hadamard_matrix(64, seed=0)
+    err = lambda q, t: float((q - t).norm() / t.norm())
+    kr = k @ h
+    quarot = err(quantize_kv(kr, 4, 128, axis="channel"), kr)
+    per_token = err(quantize_kv(k, 4, 128, axis="channel"), k)
+    assert quarot < 0.6 * per_token
+    # orthogonal: the error in the rotated frame is the error after undoing it
+    back = quantize_kv(kr, 4, 128, axis="channel") @ h.T
+    assert err(back, k) == pytest.approx(quarot, rel=1e-4)
