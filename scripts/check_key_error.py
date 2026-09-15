@@ -120,6 +120,17 @@ def main() -> int:
                          "then group per token the way V is grouped. The "
                          "rotation is orthogonal, so the error measured in the "
                          "rotated frame is the error of the attention input")
+    ap.add_argument("--all-layers", action="store_true",
+                    help="probe every block instead of six. The weight-law check "
+                         "correlates a per-layer statistic of the K-norm gain with "
+                         "the per-layer axis cost, and six points cannot carry that")
+    ap.add_argument("--split-rope", action="store_true",
+                    help="also report the error restricted to the head channels RoPE "
+                         "rotates and to the ones it leaves alone. The whole tensor is "
+                         "still quantized as the cache would quantize it; only the "
+                         "error is read on each part. On a partially rotated head this "
+                         "separates what the norm gain does from what rotary does: "
+                         "outliers in the unrotated part cannot come from RoPE")
     args = ap.parse_args()
 
     cfg = DLLMQuantConfig(model_path=args.model, model_type=args.model_type,
@@ -133,6 +144,8 @@ def main() -> int:
     blocks = adapter.blocks
     depth = len(blocks)
     idx = args.layers
+    if args.all_layers:
+        idx = list(range(depth))
     if idx is None:
         idx = [round(i * (depth - 1) / 5) for i in range(6)]
     idx = [i for i in idx if 0 <= i < depth]
@@ -155,6 +168,13 @@ def main() -> int:
     acc: Dict[tuple, List[float]] = {}
     crests: List[float] = []
     vcrests: List[float] = []
+    # Weights of the Q/K norms per probed layer, and what the probe actually
+    # did with rotary -- recorded so the weight-law analysis reads the gains
+    # from the same modules that produced the tensor, and a probe that silently
+    # skipped RoPE cannot pass for one that applied it.
+    gammas: Dict[str, Dict[int, List[float]]] = {"k": {}, "q": {}}
+    rotary_dims: Dict[int, int] = {}
+    rope_applied: Dict[int, bool] = {}
 
     for s in range(args.samples):
         ids = text_ids(adapter, args.seq_len, seed=s).unsqueeze(0)
@@ -165,6 +185,13 @@ def main() -> int:
 
         for li in idx:
             probe = adapter.make_probe(blocks[li])
+            if s == 0:
+                for name, mod in (("k", getattr(probe, "k_norm", None)),
+                                  ("q", getattr(probe, "q_norm", None))):
+                    w = getattr(mod, "weight", None)
+                    if w is not None:
+                        gammas[name][li] = [float(x) for x in w.detach().float().cpu()]
+                rotary_dims[li] = int(getattr(probe, "rotary_dim", adapter.head_dim))
             if args.skip_qk_norm:
                 if getattr(probe, "k_norm", None) is None:
                     raise SystemExit(
@@ -188,22 +215,37 @@ def main() -> int:
                         "measuring K")
                 k = k.detach().float()
                 v = probe.parts.value_states.detach().float()
+            rope_applied[li] = bool(getattr(probe, "rope_applied", False))
             crests.append(crest(k))
             vcrests.append(crest(v))
             rotated = {}
             if rot is not None:
                 h = rot.to(k.device)
                 rotated = {"K": k @ h, "V": v @ h}
+            parts = {}
+            if args.split_rope:
+                rd = rotary_dims[li]
+                d = k.shape[-1]
+                parts["rot"] = list(range(min(rd, d)))
+                if rd < d:
+                    parts["pass"] = list(range(rd, d))
             for bits in args.bits:
                 for axis in axes:
                     base, _, turned = axis.partition("+")
                     for g in args.group_size:
-                        for side, t in (("K", k), ("V", v)):
-                            if turned:
-                                t = rotated[side]
+                        for side, t0 in (("K", k), ("V", v)):
+                            t = rotated[side] if turned else t0
                             q = quantize_kv(t, bits, g, axis=base)
                             acc.setdefault((side, bits, axis, g), []).append(
                                 rel_err(q, t))
+                            if parts:
+                                # Read the error in the model's own frame, so a
+                                # channel subset means the same channels whether
+                                # or not the quantizer rotated first.
+                                back = q @ h.T if turned else q
+                                for part, sel in parts.items():
+                                    acc.setdefault((side, bits, f"{axis}@{part}", g), []).append(
+                                        rel_err(back[..., sel], t0[..., sel]))
 
     def mean(key) -> float:
         v = acc[key]
@@ -278,11 +320,16 @@ def main() -> int:
                 "mask_ratio": args.mask_ratio, "layers": idx,
                 "bits": args.bits, "group_size": args.group_size,
                 "skip_qk_norm": args.skip_qk_norm, "rotate": args.rotate,
+                "split_rope": args.split_rope,
             },
             "shape": "canvas x layer",
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)
                        for (side, bits, axis, g), v in acc.items()},
             "crest": {"K": grid(crests), "V": grid(vcrests)},
+            # Per probed layer, in the order of config.layers.
+            "gamma": {name: [per.get(li) for li in idx] for name, per in gammas.items()},
+            "rotary_dim": [rotary_dims.get(li) for li in idx],
+            "rope_applied": [rope_applied.get(li) for li in idx],
         }
         with open(args.dump, "w", encoding="utf-8") as fh:
             json.dump(payload, fh)
