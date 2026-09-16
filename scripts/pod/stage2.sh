@@ -17,12 +17,14 @@ fi
 C="--n-eval 200 --gen-length 512 --eval-steps 256 --kv-cache --kv-policy block"
 e() { n=$1; shift; run "$n" $NEED20 "out/$n.json" $EVAL20 $C "$@" --out "out/$n.json"; }
 
-# control: the migration must not move the model on its own
-e l20_M_16      --kv-bits 16 --migrate-qk 1.0
 # the collapse cells, repeated with the gain moved out of the keys
 e l20_M2_tok    --kv-bits 2 --kv-key-axis channel --migrate-qk 1.0
 e l20_M2_quarot --kv-bits 2 --kv-key-axis channel --rotate-qk --migrate-qk 1.0
 e l20_M2_ch     --kv-bits 2 --migrate-qk 1.0
+# control: the migration must not move the model on its own. The gate already measured the
+# attention drift as exactly zero on every layer, so this is the end-to-end confirmation and goes
+# after the cells that answer the question.
+e l20_M_16      --kv-bits 16 --migrate-qk 1.0
 # half migration, to see whether the effect moves with alpha
 e l20_M2_tok_a5 --kv-bits 2 --kv-key-axis channel --migrate-qk 0.5
 
