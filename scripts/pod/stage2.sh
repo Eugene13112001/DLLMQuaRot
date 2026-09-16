@@ -8,9 +8,9 @@
 
 # Gate: one forward pass says whether the migration is the identity it claims to be. If the
 # attention probabilities move by more than rounding, nothing below is worth a card.
-run mig_check $NEED20 out/mig_check.done $PY20 scripts/check_migration.py $M20 --alpha 1.0 --done out/mig_check.done
-if [ ! -s out/mig_check.done ]; then
-  echo "$(date +%H:%M) !!! перенос множителей не прошёл проверку, см. out/mig_check.log"
+run mig_shrink $NEED20 out/mig_shrink.done $PY20 scripts/check_migration.py $M20 --alpha 1.0 --done out/mig_shrink.done
+if [ ! -s out/mig_shrink.done ]; then
+  echo "$(date +%H:%M) !!! перенос множителей не прошёл проверку, см. out/mig_shrink.log"
   exit 1
 fi
 

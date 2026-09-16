@@ -18,9 +18,9 @@ The transform is the one QServe calls SmoothAttention and HiFA4 calls Smooth-QK.
 there to make quantization cheaper; here it is used as a control: if the model still answers
 exactly as before and the two-bit collapse disappears, the gain was the cause.
 
-``alpha`` interpolates: 0 leaves the model alone, 1 flattens the key gains completely (every
-channel ends at the geometric mean of the pair-constrained gains), 0.5 splits the difference the
-way SmoothQuant does.
+``alpha`` interpolates: 0 leaves the model alone, 1 brings every loud pair down to the head's
+median gain, 0.5 goes half the way (in log scale). See ``gain_scales`` for why the factor only
+shrinks and never balances.
 """
 
 from __future__ import annotations
@@ -36,11 +36,18 @@ from ..models.base import find_submodule
 
 
 def gain_scales(gamma_k: torch.Tensor, rotary_dim: int, alpha: float = 0.5,
-                pow2: bool = True) -> torch.Tensor:
+                pow2: bool = True, mode: str = "shrink") -> torch.Tensor:
     """Per-channel factor to divide the key gains by (and multiply the query gains by).
 
-    Constant on every rotary pair, geometric-mean-normalised so the overall scale of the
-    logits' two factors does not drift, and raised to ``alpha`` to interpolate.
+    Constant on every rotary pair, and raised to ``alpha`` to interpolate.
+
+    ``mode="shrink"`` (the default) only ever brings loud channels down: a pair's factor is its
+    louder gain over the median gain of the head, clamped at one, so no channel of the stored key
+    gets louder. ``mode="geomean"`` is the textbook balance -- the pair's geometric mean over the
+    head's geometric mean -- and on LLaDA2.0-mini it backfires: a loud channel whose RoPE partner
+    is quiet keeps sqrt(loud/quiet) of its peak, and every pair below the mean gets a factor under
+    one and is *amplified*. On the checkpoint that raised |K| max on the last layer from 24 to 48
+    and the crest from 9.1 to 10.4 -- the opposite of the intervention.
 
     ``pow2`` rounds the factor to a power of two, and that is what makes the transform exact
     rather than nearly exact: the gains live in bfloat16, which keeps eight mantissa bits, so an
@@ -50,6 +57,8 @@ def gain_scales(gamma_k: torch.Tensor, rotary_dim: int, alpha: float = 0.5,
     """
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+    if mode not in ("shrink", "geomean"):
+        raise ValueError(f"mode must be 'shrink' or 'geomean', got {mode!r}")
     g = gamma_k.detach().abs().double().clamp_min(1e-8)
     d = g.numel()
     rd = max(0, min(int(rotary_dim), d))
@@ -58,12 +67,15 @@ def gain_scales(gamma_k: torch.Tensor, rotary_dim: int, alpha: float = 0.5,
     paired = g.clone()
     if rd:
         half = rd // 2
-        # Both channels of a pair must share the factor; their geometric mean keeps the
-        # pair's product -- and so its energy -- where it was.
-        pair = torch.sqrt(g[:half] * g[half:rd])
+        # Both channels of a pair must share the factor.
+        a, b = g[:half], g[half:rd]
+        pair = torch.maximum(a, b) if mode == "shrink" else torch.sqrt(a * b)
         paired[:half] = pair
         paired[half:rd] = pair
-    s = (paired / torch.exp(torch.log(paired).mean())) ** alpha
+    if mode == "shrink":
+        s = (paired / g.median()).clamp_min(1.0) ** alpha
+    else:
+        s = (paired / torch.exp(torch.log(paired).mean())) ** alpha
     if pow2:
         s = torch.pow(2.0, torch.round(torch.log2(s)))
     return s.to(gamma_k.dtype)
@@ -73,7 +85,8 @@ def _norms(block: nn.Module) -> Tuple[Optional[nn.Module], Optional[nn.Module]]:
     return find_submodule(block, _Q_NORM_NAMES), find_submodule(block, _K_NORM_NAMES)
 
 
-def migrate_qk_gains(adapter, alpha: float = 0.5, pow2: bool = True) -> Callable[[], None]:
+def migrate_qk_gains(adapter, alpha: float = 0.5, pow2: bool = True,
+                     mode: str = "shrink") -> Callable[[], None]:
     """Apply the migration to every block of a loaded adapter. Returns the undo."""
     rotary_dim = adapter._probe_rotary_dim() or adapter.head_dim
     saved: List[Tuple[nn.Parameter, torch.Tensor, nn.Parameter, torch.Tensor]] = []
@@ -89,7 +102,7 @@ def migrate_qk_gains(adapter, alpha: float = 0.5, pow2: bool = True) -> Callable
             raise RuntimeError(
                 f"expected per-head gains of width {adapter.head_dim}, got {tuple(wk.shape)} "
                 "-- a norm over the whole projection would need a different pairing")
-        s = gain_scales(wk.data, rotary_dim, alpha, pow2).to(wk.device)
+        s = gain_scales(wk.data, rotary_dim, alpha, pow2, mode).to(wk.device)
         saved.append((wq, wq.data.clone(), wk, wk.data.clone()))
         with torch.no_grad():
             wk.data = wk.data / s
@@ -102,7 +115,7 @@ def migrate_qk_gains(adapter, alpha: float = 0.5, pow2: bool = True) -> Callable
                 wq.data = oq
                 wk.data = ok
 
-    print(f"QK gains migrated on {touched} blocks (alpha={alpha}, rotary pairs held equal, "
+    print(f"QK gains migrated on {touched} blocks (alpha={alpha}, {mode}, rotary pairs held equal, "
           f"{'powers of two' if pow2 else 'exact factors'}): "
           "keys lose the fixed-channel peaks, queries take them, logits unchanged")
     return undo

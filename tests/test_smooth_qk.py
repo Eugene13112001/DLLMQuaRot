@@ -108,9 +108,39 @@ def test_pairs_must_share_the_factor_or_the_logits_move(toy):
     assert float(diff.max() - diff.min()) > 1e-3
 
 
+def test_shrink_never_makes_a_key_channel_louder(toy):
+    _, _, _, gk, rd = toy
+    s = sq.gain_scales(gk, rd, alpha=1.0)
+    assert bool((s >= 1.0).all())
+    # the loud rotary channel comes down even though its partner is quiet
+    assert float(gk[3] / s[3]) <= float(gk.median()) * 2 ** 0.5 + 1e-9
+    assert float(gk[13] / s[13]) <= float(gk.median()) * 2 ** 0.5 + 1e-9
+
+
+def test_geomean_amplifies_quiet_channels_and_keeps_half_the_peak(toy):
+    # the balance that failed on the checkpoint: factors below one, and a loud channel with a
+    # quiet partner keeps sqrt(loud/quiet) of its peak
+    _, _, _, gk, rd = toy
+    s = sq.gain_scales(gk, rd, alpha=1.0, pow2=False, mode="geomean")
+    assert bool((s < 1.0).any())
+    geo = torch.exp(torch.log(gk.abs()).mean())
+    kept = float(gk[3] / s[3] / geo)
+    assert kept == pytest.approx(float(torch.sqrt(gk[3] / gk[3 + rd // 2])), rel=1e-9)
+
+
+def test_both_modes_are_exact(toy):
+    q, k, gq, gk, rd = toy
+    before = logits(q, k, gq, gk, rd)
+    for mode in ("shrink", "geomean"):
+        s = sq.gain_scales(gk, rd, alpha=1.0, mode=mode).double()
+        assert torch.allclose(before, logits(q, k, gq * s, gk / s, rd), atol=1e-10)
+
+
 def test_odd_rotary_width_is_refused(toy):
     _, _, _, gk, _ = toy
     with pytest.raises(ValueError, match="odd"):
         sq.gain_scales(gk, rotary_dim=7, alpha=1.0)
     with pytest.raises(ValueError, match="alpha"):
         sq.gain_scales(gk, rotary_dim=8, alpha=1.5)
+    with pytest.raises(ValueError, match="mode"):
+        sq.gain_scales(gk, rotary_dim=8, alpha=1.0, mode="balance")
