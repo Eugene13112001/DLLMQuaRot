@@ -61,8 +61,10 @@ def test_migration_leaves_every_logit_where_it_was(toy):
 def test_alpha_interpolates_and_zero_is_a_no_op(toy):
     _, _, _, gk, rd = toy
     assert torch.allclose(sq.gain_scales(gk, rd, alpha=0.0), torch.ones_like(gk))
-    half = sq.gain_scales(gk, rd, alpha=0.5)
-    full = sq.gain_scales(gk, rd, alpha=1.0)
+    # the interpolation is exact before the power-of-two rounding; with it, half a step is
+    # whatever the nearest exponent allows, so the property is checked where it is defined
+    half = sq.gain_scales(gk, rd, alpha=0.5, pow2=False)
+    full = sq.gain_scales(gk, rd, alpha=1.0, pow2=False)
     assert torch.allclose(half ** 2, full, atol=1e-10)
 
 
@@ -70,10 +72,28 @@ def test_full_migration_flattens_the_key_gains(toy):
     _, _, _, gk, rd = toy
     flat = gk / sq.gain_scales(gk, rd, alpha=1.0)
     spread = lambda g: float(g.abs().max() / g.abs().median())
-    # The rotary pair can only be flattened to its own geometric mean, so the peak drops
-    # a long way but not to one; the unrotated loud channel is flattened outright.
+    # A rotary pair can only be flattened to its own geometric mean, and the factor is rounded
+    # to a power of two, so this is a coarse flattening by construction -- but the peak has to
+    # come down a long way.
     assert spread(flat) < spread(gk) / 2
-    assert flat[13] == pytest.approx(flat[12], rel=0.5)
+
+
+def test_power_of_two_factor_keeps_the_product_bit_exact_in_bfloat16(toy):
+    _, _, gq, gk, rd = toy
+    gq16, gk16 = gq.to(torch.bfloat16), gk.to(torch.bfloat16)
+    s = sq.gain_scales(gk, rd, alpha=1.0).to(torch.bfloat16)
+    moved = (gk16 / s).float() * (gq16 * s).float()
+    assert torch.equal(moved, gk16.float() * gq16.float())
+    # without the rounding the same migration loses the last mantissa bits
+    s_raw = sq.gain_scales(gk, rd, alpha=1.0, pow2=False).to(torch.bfloat16)
+    sloppy = (gk16 / s_raw).float() * (gq16 * s_raw).float()
+    assert not torch.equal(sloppy, gk16.float() * gq16.float())
+
+
+def test_every_factor_is_a_power_of_two(toy):
+    _, _, _, gk, rd = toy
+    s = sq.gain_scales(gk, rd, alpha=1.0).double()
+    assert torch.allclose(torch.log2(s), torch.round(torch.log2(s)), atol=1e-12)
 
 
 def test_pairs_must_share_the_factor_or_the_logits_move(toy):

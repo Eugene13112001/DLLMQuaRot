@@ -6,6 +6,14 @@
 
 . "$(dirname "$0")/lib.sh"
 
+# Gate: one forward pass says whether the migration is the identity it claims to be. If the
+# attention probabilities move by more than rounding, nothing below is worth a card.
+run mig_check $NEED20 out/mig_check.done $PY20 scripts/check_migration.py $M20 --alpha 1.0 --done out/mig_check.done
+if [ ! -s out/mig_check.done ]; then
+  echo "$(date +%H:%M) !!! перенос множителей не прошёл проверку, см. out/mig_check.log"
+  exit 1
+fi
+
 C="--n-eval 200 --gen-length 512 --eval-steps 256 --kv-cache --kv-policy block"
 e() { n=$1; shift; run "$n" $NEED20 "out/$n.json" $EVAL20 $C "$@" --out "out/$n.json"; }
 
