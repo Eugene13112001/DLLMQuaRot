@@ -112,6 +112,15 @@ def main() -> int:
                         "a lossless width it must reproduce the uncached run, "
                         "so any gap at a longer interval is staleness and "
                         "nothing else")
+    g.add_argument("--migrate-qk", type=float, default=0.0, metavar="ALPHA",
+                   help="move the K-norm gain into the Q-norm before anything else "
+                        "(QServe's SmoothAttention, HiFA4's Smooth-QK). Attention is "
+                        "unchanged -- the factor is held constant on each rotary pair, so "
+                        "it commutes with RoPE -- but the keys the cache stores lose their "
+                        "fixed-channel peaks. 0 = off, 1 = flatten the key gains, 0.5 = "
+                        "split. This is the control for the QK-Norm claim: if the two-bit "
+                        "collapse goes away while the answers of the unquantized model do "
+                        "not move, the gain was the cause")
     g.add_argument("--kv-bits", type=int, default=4)
     g.add_argument("--kv-key-axis", default="token",
                    choices=["channel", "token"],
@@ -298,6 +307,10 @@ def main() -> int:
     adapter.load()
     print(adapter.describe())
 
+    if args.migrate_qk:
+        from dllmquant.algos.smooth_qk import migrate_qk_gains
+        migrate_qk_gains(adapter, args.migrate_qk)
+
     if args.rotate_qk:
         # Installed before quantization, as in check_block_reuse: R4 changes
         # the tensors a calibration pass would see, so calibrating first would
@@ -460,6 +473,7 @@ def main() -> int:
                         "stale_prefix": args.stale_prefix if args.kv_cache else None,
                         "kv_rope": args.kv_rope if args.kv_cache else None,
                         "rotate_qk": args.rotate_qk,
+                        "migrate_qk": args.migrate_qk,
                         "kv_key_axis": args.kv_key_axis if args.kv_cache else None,
                         "kv_value_axis": args.kv_value_axis if args.kv_cache else None,
                         "kv_key_bits": args.kv_key_bits or None,

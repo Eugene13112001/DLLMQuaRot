@@ -120,6 +120,11 @@ def main() -> int:
                          "then group per token the way V is grouped. The "
                          "rotation is orthogonal, so the error measured in the "
                          "rotated frame is the error of the attention input")
+    ap.add_argument("--migrate-qk", type=float, default=0.0, metavar="ALPHA",
+                    help="move the K-norm gain into the Q-norm first (see "
+                         "dllmquant/algos/smooth_qk.py). Attention is unchanged; the keys "
+                         "this script measures are the ones the cache would store after the "
+                         "migration. The control for the QK-Norm claim, on the tensor")
     ap.add_argument("--all-layers", action="store_true",
                     help="probe every block instead of six. The weight-law check "
                          "correlates a per-layer statistic of the K-norm gain with "
@@ -155,6 +160,10 @@ def main() -> int:
     print("K taken after RoPE -- the tensor the cache stores"
           + (" -- except QK-Norm is SKIPPED, so not what it stores"
              if args.skip_qk_norm else ""))
+
+    if args.migrate_qk:
+        from dllmquant.algos.smooth_qk import migrate_qk_gains
+        migrate_qk_gains(adapter, args.migrate_qk)
 
     rot = None
     if args.rotate:
@@ -320,7 +329,7 @@ def main() -> int:
                 "mask_ratio": args.mask_ratio, "layers": idx,
                 "bits": args.bits, "group_size": args.group_size,
                 "skip_qk_norm": args.skip_qk_norm, "rotate": args.rotate,
-                "split_rope": args.split_rope,
+                "split_rope": args.split_rope, "migrate_qk": args.migrate_qk,
             },
             "shape": "canvas x layer",
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)
