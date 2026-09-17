@@ -28,9 +28,13 @@ e l20_M_16      --kv-bits 16 --migrate-qk 1.0
 # half migration, to see whether the effect moves with alpha
 e l20_M2_tok_a5 --kv-bits 2 --kv-key-axis channel --migrate-qk 0.5
 
-# the same on the tensor: the axis ratio should fall towards LLaDA-1.5's
-run ke_l20_mig $NEED20 out/ke_l20_mig.json $PY20 scripts/check_key_error.py $M20 \
-    --samples 32 --bits 4 3 2 --mask-ratio 0.5 --all-layers --split-rope --rotate \
-    --migrate-qk 1.0 --dump out/ke_l20_mig.json
+# the same on the tensor, read as attention reads it. The error in K space is not
+# comparable across the migration (the loud channels move into Q and multiply
+# whatever error K carries there); the logit error q (K - Q(K))^T is, because the
+# migration leaves q K^T bit-identical. Both runs carry it, so the pair is one
+# variable apart.
+T="--samples 32 --bits 4 3 2 --mask-ratio 0.5 --all-layers --rotate --logit-error"
+run ke_l20_base_L $NEED20 out/ke_l20_base_L.json $PY20 scripts/check_key_error.py $M20 $T     --dump out/ke_l20_base_L.json
+run ke_l20_mig_L  $NEED20 out/ke_l20_mig_L.json  $PY20 scripts/check_key_error.py $M20 $T     --migrate-qk 1.0 --dump out/ke_l20_mig_L.json
 
 echo "$(date +%H:%M) этап 2 прошёл"

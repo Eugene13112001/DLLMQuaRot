@@ -161,7 +161,7 @@ class LLaDAAttentionProbe(AttentionProbe):
             q, k, v = self._project(hidden)
             probs = self._attention_probs(q, k)
         self.parts = AttentionParts(
-            value_states=v, attn_probs=probs, key_states=k)
+            value_states=v, attn_probs=probs, key_states=k, query_states=q)
 
     def _project(self, hidden: torch.Tensor):
         b, t, _ = hidden.shape

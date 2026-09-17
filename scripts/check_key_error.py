@@ -67,6 +67,27 @@ def rel_err(q: torch.Tensor, x: torch.Tensor) -> float:
     return float((q - x).norm() / x.norm().clamp_min(1e-12))
 
 
+def logit_rel_err(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
+                  allowed) -> float:
+    """||q . err^T|| / ||q . k^T|| over the positions attention may read.
+
+    The quantity attention actually receives. After the K-norm gain is moved into
+    the Q-norm the denominator is bit-identical, so this number is comparable
+    before and after the migration -- the error in K space is not, because the
+    loud channels now sit in Q and multiply whatever error K carries there.
+    """
+    rep = q.shape[1] // err.shape[1]
+    if rep > 1:
+        err = err.repeat_interleave(rep, dim=1)
+        k = k.repeat_interleave(rep, dim=1)
+    de = q @ err.transpose(-1, -2)
+    sc = q @ k.transpose(-1, -2)
+    if allowed is not None:
+        de = de * allowed
+        sc = sc * allowed
+    return float(de.norm() / sc.norm().clamp_min(1e-12))
+
+
 def crest(x: torch.Tensor) -> float:
     """Peak over RMS, per head, averaged. How outlier-ridden the tensor is."""
     flat = x.reshape(x.shape[1], -1).float()
@@ -125,6 +146,14 @@ def main() -> int:
                          "dllmquant/algos/smooth_qk.py). Attention is unchanged; the keys "
                          "this script measures are the ones the cache would store after the "
                          "migration. The control for the QK-Norm claim, on the tensor")
+    ap.add_argument("--logit-error", action="store_true",
+                    help="also report the relative error of the attention logits, "
+                         "||q (K - Q(K))^T|| / ||q K^T|| on the positions the mask "
+                         "lets attention read, for every K scheme (cells 'L/...'). "
+                         "This is the number to compare across --migrate-qk: the "
+                         "migration leaves q K^T bit-identical but moves the loud "
+                         "channels into q, so the K-space error stops meaning what "
+                         "attention sees")
     ap.add_argument("--all-layers", action="store_true",
                     help="probe every block instead of six. The weight-law check "
                          "correlates a per-layer statistic of the K-norm gain with "
@@ -224,6 +253,13 @@ def main() -> int:
                         "measuring K")
                 k = k.detach().float()
                 v = probe.parts.value_states.detach().float()
+                qs = None
+                if args.logit_error:
+                    qs = probe.parts.query_states
+                    if qs is None:
+                        raise SystemExit("the probe captured no query_states; "
+                                         "--logit-error has nothing to multiply by")
+                    qs = qs.detach().float()
             rope_applied[li] = bool(getattr(probe, "rope_applied", False))
             crests.append(crest(k))
             vcrests.append(crest(v))
@@ -231,6 +267,13 @@ def main() -> int:
             if rot is not None:
                 h = rot.to(k.device)
                 rotated = {"K": k @ h, "V": v @ h}
+            allowed = None
+            if qs is not None:
+                mask_fn = getattr(probe, "attn_mask_fn", None)
+                if mask_fn is not None:
+                    m = mask_fn(qs.shape[-2], qs.device, torch.float32)
+                    if m is not None:
+                        allowed = (m > -1e4).float()
             parts = {}
             if args.split_rope:
                 rd = rotary_dims[li]
@@ -247,6 +290,10 @@ def main() -> int:
                             q = quantize_kv(t, bits, g, axis=base)
                             acc.setdefault((side, bits, axis, g), []).append(
                                 rel_err(q, t))
+                            if qs is not None and side == "K":
+                                model_frame = q @ h.T if turned else q
+                                acc.setdefault(("L", bits, axis, g), []).append(
+                                    logit_rel_err(qs, model_frame - t0, t0, allowed))
                             if parts:
                                 # Read the error in the model's own frame, so a
                                 # channel subset means the same channels whether
@@ -292,6 +339,25 @@ def main() -> int:
         print("  tok+R4 / ch above one: the per-channel scale beats QuaRot's "
               "rotate-then-group-per-token on this tensor.")
 
+    if args.logit_error:
+        print()
+        print("=== relative error of the attention logits, q (K - Q(K))^T / q K^T ===")
+        cols = [a for a in axes]
+        print(f"{'bits':>5} {'group':>6} " + " ".join(f"{a:>13}" for a in cols)
+              + f" {'tok/ch':>8}" + (f" {'quarot/ch':>10}" if rot is not None else ""))
+        print("-" * (16 + 14 * len(cols) + 20))
+        for bits in args.bits:
+            for g in args.group_size:
+                vals = {a: mean(("L", bits, a, g)) for a in cols}
+                line = f"{bits:>5} {g:>6} " + " ".join(f"{vals[a]:>13.3e}" for a in cols)
+                line += f" {vals['channel'] / vals['token']:>7.2f}x"
+                if rot is not None:
+                    line += f" {vals['channel+rot'] / vals['token']:>9.2f}x"
+                print(line)
+        print("  'token' = one scale per channel, 'channel' = one per token (the "
+              "axis names are the grouping direction). Compare these rows across "
+              "--migrate-qk runs: the denominator is the same model.")
+
     print()
     print(f"  crest factor, peak over RMS per head: "
           f"K {sum(crests) / len(crests):.2f}, V {sum(vcrests) / len(vcrests):.2f}")
@@ -330,6 +396,7 @@ def main() -> int:
                 "bits": args.bits, "group_size": args.group_size,
                 "skip_qk_norm": args.skip_qk_norm, "rotate": args.rotate,
                 "split_rope": args.split_rope, "migrate_qk": args.migrate_qk,
+                "logit_error": args.logit_error,
             },
             "shape": "canvas x layer",
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)

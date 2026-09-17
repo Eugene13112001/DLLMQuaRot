@@ -56,6 +56,10 @@ class AttentionParts:
     # one; check_key_error needs it to compare the two families' K at the
     # tensor level, before anything downstream can confound the comparison.
     key_states: Optional[torch.Tensor] = None
+    # Q after RoPE, with the same norm treatment as K. Only check_key_error's
+    # logit error reads it: once the K-norm gain has been moved into the Q-norm,
+    # an error measured in K space no longer says what attention sees.
+    query_states: Optional[torch.Tensor] = None
 
 
 def preflight_memory(
