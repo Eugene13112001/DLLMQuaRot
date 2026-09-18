@@ -171,6 +171,15 @@ def main() -> int:
                         "R1/R2/R3 and leaves the cache's keys alone -- on the "
                         "task the two have never been measured together, and "
                         "every R4 result so far is decision-level")
+    g.add_argument("--threshold", type=float, default=None, metavar="P",
+                   help="commit every masked position whose confidence is at least P "
+                        "(at least one per step) instead of the fixed schedule, up to "
+                        "one step per token of the block. This is how Fast-dLLM-v2 and "
+                        "BitSieve decode (P = 0.95), and it changes what a refresh "
+                        "interval means: a step can commit one token or many, so a "
+                        "block one step stale can be many tokens stale. --eval-steps is "
+                        "ignored under it. Cached path only; the record carries the "
+                        "mean steps per block so the age can be read in tokens")
     g.add_argument("--kv-rope", default=None, choices=["pre", "post"],
                    help="which side of rotary the prefix store takes K from. "
                         "The two families cache different tensors by default: "
@@ -252,6 +261,13 @@ def main() -> int:
             "keys, so the rotation would reach attention -- where it cancels "
             "in q.k -- and never the rounded tensor."
         )
+    if args.threshold is not None:
+        if not args.kv_cache:
+            raise SystemExit("--threshold needs --kv-cache: the uncached sampler has "
+                             "only the fixed schedule, and a run that silently ignored "
+                             "the flag would be labelled as thresholded")
+        if not 0.0 < args.threshold <= 1.0:
+            raise SystemExit("--threshold is a confidence in (0, 1]")
     if args.kv_static != "off":
         key_bits = args.kv_key_bits or args.kv_bits
         value_bits = args.kv_value_bits or args.kv_bits
@@ -367,6 +383,8 @@ def main() -> int:
             # different regime on each family, and nothing in the record said
             # which.
             kw = {"reuse_window": args.reuse_window}
+            if args.threshold is not None:
+                kw["threshold"] = args.threshold
             if args.model_type == "llada":
                 kw["stale_prefix"] = args.stale_prefix
                 kw["kv_rope"] = args.kv_rope
@@ -425,13 +443,18 @@ def main() -> int:
               + (f", K at {args.kv_key_bits}" if args.kv_key_bits else "")
               + (f", V at {args.kv_value_bits}" if args.kv_value_bits else ""))
 
+        steps_per_block: list = []
+
         def generate(prompt, cfg_):
             # A cache per question: entries are about this sequence and
             # carrying them across would be measuring a different thing. The
             # scale book, when there is one, is frozen and shared.
-            return cached_generate(adapter, prompt, cfg_,
-                                   BlockKVCache(kv_cfg, n_layers),
-                                   **sampler_kwargs())
+            cache = BlockKVCache(kv_cfg, n_layers)
+            out = cached_generate(adapter, prompt, cfg_, cache, **sampler_kwargs())
+            # Only the thresholded sampler records these; under the fixed
+            # schedule the count is an input, not an observation.
+            steps_per_block.extend(cache.stats.steps_used)
+            return out
 
     result = evaluate_gsm8k(
         adapter, n_samples=args.n_eval, gen_cfg=gen_cfg, generate=generate
@@ -476,6 +499,10 @@ def main() -> int:
                         "migrate_qk": args.migrate_qk,
                         "kv_key_axis": args.kv_key_axis if args.kv_cache else None,
                         "kv_value_axis": args.kv_value_axis if args.kv_cache else None,
+                        "threshold": args.threshold,
+                        "mean_steps_per_block": (
+                            sum(steps_per_block) / len(steps_per_block)
+                            if args.kv_cache and steps_per_block else None),
                         "kv_key_bits": args.kv_key_bits or None,
                         "kv_value_bits": args.kv_value_bits or None,
                         "kv_masked_bits": args.kv_masked_bits or None,
