@@ -88,6 +88,57 @@ def logit_rel_err(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
     return float(de.norm() / sc.norm().clamp_min(1e-12))
 
 
+def qk_geometry(q: torch.Tensor, k: torch.Tensor, allowed) -> tuple:
+    """Two numbers about how the logits are built, over the allowed positions.
+
+    mean |cos(q_i, k_j)|, and the isotropic-noise factor
+        sqrt(sum_ij ||q_i||^2 ||k_j||^2) / sqrt(sum_ij (q_i . k_j)^2).
+    If a quantizer's error in key j is isotropic with a size proportional to
+    ||k_j|| -- what a rotation followed by a per-token scale produces -- its
+    relative logit error is this factor times a constant of the grid. So the
+    factor is the prediction for QuaRot, and it moves when the migration moves
+    loudness from K into Q while leaving every q . k where it was.
+    """
+    rep = q.shape[1] // k.shape[1]
+    if rep > 1:
+        k = k.repeat_interleave(rep, dim=1)
+    dots = q @ k.transpose(-1, -2)
+    qn = q.norm(dim=-1, keepdim=True)
+    kn = k.norm(dim=-1, keepdim=True)
+    norms = qn @ kn.transpose(-1, -2)
+    w = allowed if allowed is not None else torch.ones_like(dots)
+    w = w.expand_as(dots)
+    cos = (dots.abs() / norms.clamp_min(1e-12) * w).sum() / w.sum().clamp_min(1)
+    iso = ((norms ** 2 * w).sum() / ((dots ** 2) * w).sum().clamp_min(1e-24)).sqrt()
+    return float(cos), float(iso)
+
+
+def split_logit_err(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
+                    allowed, loud: torch.Tensor) -> tuple:
+    """The logit error carried by the loud channels and by the rest, each over ||q K^T||.
+
+    ``loud`` marks the channels where the K-norm gain is above the head median --
+    the ones the migration shrinks in K and grows in Q. If the error left after
+    the migration sits there, it is the moved loudness in Q multiplying K's
+    noise; if it sits in the rest, it is outliers the gain did not make.
+    """
+    rep = q.shape[1] // err.shape[1]
+    if rep > 1:
+        err = err.repeat_interleave(rep, dim=1)
+        k = k.repeat_interleave(rep, dim=1)
+    den = q @ k.transpose(-1, -2)
+    if allowed is not None:
+        den = den * allowed
+    den = den.norm().clamp_min(1e-12)
+    out = []
+    for sel in (loud, ~loud):
+        de = q[..., sel] @ err[..., sel].transpose(-1, -2)
+        if allowed is not None:
+            de = de * allowed
+        out.append(float(de.norm() / den))
+    return tuple(out)
+
+
 def crest(x: torch.Tensor) -> float:
     """Peak over RMS, per head, averaged. How outlier-ridden the tensor is."""
     flat = x.reshape(x.shape[1], -1).float()
@@ -154,6 +205,8 @@ def main() -> int:
                          "migration leaves q K^T bit-identical but moves the loud "
                          "channels into q, so the K-space error stops meaning what "
                          "attention sees")
+    ap.add_argument("--migrate-mode", default="shrink", choices=["shrink", "geomean"],
+                    help="how --migrate-qk picks its factor (dllmquant/algos/smooth_qk.py)")
     ap.add_argument("--all-layers", action="store_true",
                     help="probe every block instead of six. The weight-law check "
                          "correlates a per-layer statistic of the K-norm gain with "
@@ -190,9 +243,21 @@ def main() -> int:
           + (" -- except QK-Norm is SKIPPED, so not what it stores"
              if args.skip_qk_norm else ""))
 
+    # Which channels the K-norm gain makes loud, read from the ORIGINAL gains so
+    # that the split means the same channels with and without the migration.
+    loud_masks: Dict[int, torch.Tensor] = {}
+    if args.logit_error:
+        from dllmquant.algos.smooth_qk import _norms, gain_scales
+        rd0 = adapter._probe_rotary_dim() or adapter.head_dim
+        for li in idx:
+            _, k_norm = _norms(blocks[li])
+            if k_norm is not None:
+                s0 = gain_scales(k_norm.weight.detach().float().cpu(), rd0, alpha=1.0)
+                loud_masks[li] = s0 > 1.0
+
     if args.migrate_qk:
         from dllmquant.algos.smooth_qk import migrate_qk_gains
-        migrate_qk_gains(adapter, args.migrate_qk)
+        migrate_qk_gains(adapter, args.migrate_qk, mode=args.migrate_mode)
 
     rot = None
     if args.rotate:
@@ -206,6 +271,8 @@ def main() -> int:
     acc: Dict[tuple, List[float]] = {}
     crests: List[float] = []
     vcrests: List[float] = []
+    qk_cos: List[float] = []
+    qk_iso: List[float] = []
     # Weights of the Q/K norms per probed layer, and what the probe actually
     # did with rotary -- recorded so the weight-law analysis reads the gains
     # from the same modules that produced the tensor, and a probe that silently
@@ -274,6 +341,13 @@ def main() -> int:
                     m = mask_fn(qs.shape[-2], qs.device, torch.float32)
                     if m is not None:
                         allowed = (m > -1e4).float()
+            loud = None
+            if qs is not None:
+                c, iso = qk_geometry(qs, k, allowed)
+                qk_cos.append(c)
+                qk_iso.append(iso)
+                if li in loud_masks:
+                    loud = loud_masks[li].to(k.device)
             parts = {}
             if args.split_rope:
                 rd = rotary_dims[li]
@@ -294,6 +368,11 @@ def main() -> int:
                                 model_frame = q @ h.T if turned else q
                                 acc.setdefault(("L", bits, axis, g), []).append(
                                     logit_rel_err(qs, model_frame - t0, t0, allowed))
+                                if loud is not None and bool(loud.any()) and bool((~loud).any()):
+                                    l_loud, l_rest = split_logit_err(
+                                        qs, model_frame - t0, t0, allowed, loud)
+                                    acc.setdefault(("Lloud", bits, axis, g), []).append(l_loud)
+                                    acc.setdefault(("Lrest", bits, axis, g), []).append(l_rest)
                             if parts:
                                 # Read the error in the model's own frame, so a
                                 # channel subset means the same channels whether
@@ -396,12 +475,14 @@ def main() -> int:
                 "bits": args.bits, "group_size": args.group_size,
                 "skip_qk_norm": args.skip_qk_norm, "rotate": args.rotate,
                 "split_rope": args.split_rope, "migrate_qk": args.migrate_qk,
-                "logit_error": args.logit_error,
+                "logit_error": args.logit_error, "migrate_mode": args.migrate_mode,
             },
             "shape": "canvas x layer",
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)
                        for (side, bits, axis, g), v in acc.items()},
             "crest": {"K": grid(crests), "V": grid(vcrests)},
+            "qk_cos": grid(qk_cos) if qk_cos else None,
+            "qk_iso": grid(qk_iso) if qk_iso else None,
             # Per probed layer, in the order of config.layers.
             "gamma": {name: [per.get(li) for li in idx] for name, per in gammas.items()},
             "rotary_dim": [rotary_dims.get(li) for li in idx],
