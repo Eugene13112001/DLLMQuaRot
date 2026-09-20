@@ -27,16 +27,39 @@ import torch
 from ..cache import quantize_kv
 
 
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    half = x.shape[-1] // 2
+    return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
+
+
+def rotated_key_bias(bias: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                     kv_heads: int) -> torch.Tensor:
+    """The k_proj bias as it appears in the stored key: constant per channel, then rotated.
+
+    RoPE is linear, so a key is ``RoPE(Wx) + RoPE(b)``. The second term is the same vector
+    at every position before the rotation, and it is where Qwen2.5-family key outliers come
+    from. Subtracting it before the quantizer and adding it back after is exact at any width
+    and removes the parameter-induced part of the outlier -- the counterpart of the gain
+    migration on a model that has no QK-Norm to migrate.
+    """
+    b = bias.view(1, kv_heads, 1, -1).to(cos.dtype)
+    c = cos.unsqueeze(1)
+    t = sin.unsqueeze(1)
+    return b * c + _rotate_half(b) * t
+
+
 @dataclass
 class FDv2CacheStats:
     writes: int = 0
     entries: int = 0
     key_axis: str = ""
     value_axis: str = ""
+    pre_bias: bool = False
 
     def describe(self) -> str:
+        bias = ", K stored before the k_proj bias" if self.pre_bias else ""
         return (f"prefix cache: {self.writes} writes, {self.entries} entries stored, "
-                f"K along {self.key_axis}, V along {self.value_axis}")
+                f"K along {self.key_axis}, V along {self.value_axis}{bias}")
 
 
 def make_quantized_cache_class(
@@ -48,6 +71,8 @@ def make_quantized_cache_class(
     key_axis: str,
     value_axis: str,
     stats: FDv2CacheStats,
+    key_biases: Optional[List[torch.Tensor]] = None,
+    kv_heads: int = 0,
 ):
     """A ``DynamicCache`` subclass that rounds what it stores.
 
@@ -58,7 +83,26 @@ def make_quantized_cache_class(
 
     class QuantizedPrefixCache(base):
         def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
-            k = quantize_kv(key_states.float(), key_bits, group_size, axis=key_axis)
+            k = key_states.float()
+            b_rot = None
+            if key_biases is not None:
+                # Per layer: every block has its own k_proj bias, and subtracting one
+                # block's bias from another's keys would be a different tensor, not an
+                # identity.
+                key_bias = key_biases[layer_idx]
+                cos, sin = (cache_kwargs or {}).get("cos"), (cache_kwargs or {}).get("sin")
+                if cos is None or sin is None:
+                    raise RuntimeError(
+                        "pre-bias quantization needs the rotary tables the attention passes "
+                        "in cache_kwargs; this revision does not provide them")
+                b_rot = rotated_key_bias(key_bias, cos, sin, kv_heads).float()
+                if b_rot.shape[-2] != k.shape[-2]:
+                    b_rot = b_rot[..., -k.shape[-2]:, :]
+                k = k - b_rot
+            k = quantize_kv(k, key_bits, group_size, axis=key_axis)
+            if b_rot is not None:
+                k = k + b_rot
+            stats.pre_bias = key_biases is not None
             v = quantize_kv(value_states.float(), value_bits, group_size, axis=value_axis)
             stats.writes += 1
             stats.entries += int(key_states.shape[-2])
@@ -79,8 +123,15 @@ def install_quantized_cache(
     group_size: int = 128,
     key_axis: str = "token",
     value_axis: str = "channel",
+    pre_bias: bool = False,
 ) -> Tuple[Callable[[], None], FDv2CacheStats]:
-    """Replace the cache class the vendored model constructs. Returns (remove, stats)."""
+    """Replace the cache class the vendored model constructs. Returns (remove, stats).
+
+    ``pre_bias`` stores ``K`` with the rotated k_proj bias removed and adds it back on the
+    way out: exact, and it takes the parameter-induced part of the key outlier out of the
+    quantizer's range. On a model with no such bias it is refused rather than silently
+    doing nothing.
+    """
     import sys
 
     mod = sys.modules[type(adapter.model).__module__]
@@ -90,6 +141,22 @@ def install_quantized_cache(
             f"{mod.__name__} does not build its cache from a module-level DynamicCache, "
             "so there is nothing to replace; check the vendored revision"
         )
+    key_biases = None
+    if pre_bias:
+        from .base import find_submodule
+        from .llada import _K_NAMES
+
+        key_biases = []
+        for i, block in enumerate(adapter.blocks):
+            k_proj = find_submodule(block, _K_NAMES)
+            bias = getattr(k_proj, "bias", None) if k_proj is not None else None
+            if bias is None:
+                raise RuntimeError(
+                    f"--pre-bias on a model whose k_proj has no bias (block {i}): there is "
+                    "nothing to take out of the quantizer's range, and a run labelled "
+                    "pre-bias that did nothing would be worse than no run")
+            key_biases.append(bias.detach())
+
     stats = FDv2CacheStats(key_axis=key_axis, value_axis=value_axis)
     mod.DynamicCache = make_quantized_cache_class(
         base,
@@ -99,6 +166,8 @@ def install_quantized_cache(
         key_axis=key_axis,
         value_axis=value_axis,
         stats=stats,
+        key_biases=key_biases,
+        kv_heads=adapter.n_kv_heads,
     )
 
     def remove() -> None:
@@ -142,4 +211,4 @@ def fdv2_generate(
 
 
 __all__ = ["install_quantized_cache", "make_quantized_cache_class", "fdv2_generate",
-           "FDv2CacheStats"]
+           "rotated_key_bias", "FDv2CacheStats"]

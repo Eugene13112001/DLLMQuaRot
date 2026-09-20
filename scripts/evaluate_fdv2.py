@@ -56,6 +56,11 @@ def main() -> int:
                          "per-channel, the axis this family's caches use), 'channel' is "
                          "one scale per token")
     ap.add_argument("--kv-value-axis", default="channel", choices=["token", "channel"])
+    ap.add_argument("--pre-bias", action="store_true",
+                    help="store K with the rotated k_proj bias removed and add it back on "
+                         "read. Exact at any width, and it takes the parameter-induced part "
+                         "of the key outlier out of the quantizer's range -- the counterpart "
+                         "of the QK-Norm gain migration on a model with no norm to migrate")
     ap.add_argument("--rotate-qk", action="store_true",
                     help="R4: rotate Q and K head-wise after RoPE, so the store holds "
                          "rotated keys -- QuaRot's arrangement, to be read together with "
@@ -83,6 +88,7 @@ def main() -> int:
         adapter, bits=args.kv_bits, key_bits=args.kv_key_bits,
         value_bits=args.kv_value_bits, group_size=args.kv_group_size,
         key_axis=args.kv_key_axis, value_axis=args.kv_value_axis,
+        pre_bias=args.pre_bias,
     )
     print(f"prefix cache at {args.kv_bits} bits, group {args.kv_group_size}, "
           f"K along {args.kv_key_axis}, V along {args.kv_value_axis}")
@@ -120,7 +126,7 @@ def main() -> int:
                     "kv_group_size": args.kv_group_size,
                     "kv_key_axis": args.kv_key_axis,
                     "kv_value_axis": args.kv_value_axis,
-                    "rotate_qk": args.rotate_qk,
+                    "rotate_qk": args.rotate_qk, "pre_bias": args.pre_bias,
                     "prefix_writes": stats.writes, "prefix_entries": stats.entries,
                 },
                 "accuracy": result.accuracy, "correct": result.correct,
