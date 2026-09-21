@@ -67,14 +67,31 @@ def rel_err(q: torch.Tensor, x: torch.Tensor) -> float:
     return float((q - x).norm() / x.norm().clamp_min(1e-12))
 
 
+def _center_rows(x: torch.Tensor, allowed) -> torch.Tensor:
+    """Subtract each query's mean logit over the keys it may read, and zero the rest."""
+    if allowed is None:
+        return x - x.mean(dim=-1, keepdim=True)
+    w = allowed.expand_as(x)
+    mean = (x * w).sum(dim=-1, keepdim=True) / w.sum(dim=-1, keepdim=True).clamp_min(1)
+    return (x - mean) * w
+
+
 def logit_rel_err(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
-                  allowed) -> float:
+                  allowed, center: bool = False) -> float:
     """||q . err^T|| / ||q . k^T|| over the positions attention may read.
 
     The quantity attention actually receives. After the K-norm gain is moved into
     the Q-norm the denominator is bit-identical, so this number is comparable
     before and after the migration -- the error in K space is not, because the
     loud channels now sit in Q and multiply whatever error K carries there.
+
+    ``center`` subtracts, for every query, the mean over the keys it may read, from
+    both the error and the logits. That is the part softmax is blind to. It matters
+    when a parameter adds the same vector to every key -- a k_proj bias does: then
+    q . b is one constant per query, it inflates ||q K^T|| without moving a single
+    attention weight, and the uncentered ratio reads a destructive error as a small
+    one. On Fast-dLLM-v2 that is the difference between a model the uncentered
+    number calls robust and one that collapses at four bits.
     """
     rep = q.shape[1] // err.shape[1]
     if rep > 1:
@@ -82,7 +99,10 @@ def logit_rel_err(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
         k = k.repeat_interleave(rep, dim=1)
     de = q @ err.transpose(-1, -2)
     sc = q @ k.transpose(-1, -2)
-    if allowed is not None:
+    if center:
+        de = _center_rows(de, allowed)
+        sc = _center_rows(sc, allowed)
+    elif allowed is not None:
         de = de * allowed
         sc = sc * allowed
     return float(de.norm() / sc.norm().clamp_min(1e-12))
@@ -368,6 +388,9 @@ def main() -> int:
                                 model_frame = q @ h.T if turned else q
                                 acc.setdefault(("L", bits, axis, g), []).append(
                                     logit_rel_err(qs, model_frame - t0, t0, allowed))
+                                acc.setdefault(("Lc", bits, axis, g), []).append(
+                                    logit_rel_err(qs, model_frame - t0, t0, allowed,
+                                                  center=True))
                                 if loud is not None and bool(loud.any()) and bool((~loud).any()):
                                     l_loud, l_rest = split_logit_err(
                                         qs, model_frame - t0, t0, allowed, loud)

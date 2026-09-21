@@ -66,3 +66,30 @@ def test_mask_restricts_the_positions():
     assert masked != full
     zero = torch.zeros(t, t, dtype=torch.float64)
     assert logit_rel_err(q, err, k, zero) == 0.0
+
+
+def test_centering_ignores_a_bias_every_key_shares():
+    # A k_proj bias adds the same vector to every key, so q . b is one constant per query:
+    # softmax cannot see it. The uncentered ratio counts it in the denominator and reads the
+    # same error as smaller; the centered one does not move.
+    q, k = toy()
+    err = 0.05 * torch.randn_like(k)
+    bias = torch.zeros(k.shape[-1], dtype=torch.float64)
+    bias[5] = 50.0
+    kb = k + bias
+    plain = logit_rel_err(q, err, k, None)
+    plain_b = logit_rel_err(q, err, kb, None)
+    cent = logit_rel_err(q, err, k, None, center=True)
+    cent_b = logit_rel_err(q, err, kb, None, center=True)
+    assert plain_b < plain / 2
+    assert abs(cent_b - cent) < 1e-9
+
+
+def test_centering_respects_the_mask():
+    q, k = toy()
+    err = 0.05 * torch.randn_like(k)
+    t = k.shape[-2]
+    allowed = torch.tril(torch.ones(t, t, dtype=torch.float64))
+    val = logit_rel_err(q, err, k, allowed, center=True)
+    assert 0.0 < val < float("inf")
+    assert logit_rel_err(q, err, k, torch.zeros(t, t, dtype=torch.float64), center=True) == 0.0

@@ -35,7 +35,7 @@ def per_layer(rows) -> List[float]:
     return [sum(r[l] for r in rows) / len(rows) for l in range(n)]
 
 
-def summarize(path: str, bits: int, group: int) -> Dict:
+def summarize(path: str, bits: int, group: int, centered: bool = False) -> Dict:
     with open(path, encoding="utf-8") as fh:
         d = json.load(fh)
     cfg = d["config"]
@@ -44,8 +44,9 @@ def summarize(path: str, bits: int, group: int) -> Dict:
     out = {"name": os.path.basename(path).replace(".json", ""),
            "model": cfg["model"].split("/")[-1],
            "alpha": cfg.get("migrate_qk") or 0.0, "mode": cfg.get("migrate_mode") or "-"}
+    prefix = "Lc" if centered else "L"
     for name, axis in SCHEMES:
-        key = f"L/{bits}/{axis}/{group}"
+        key = f"{prefix}/{bits}/{axis}/{group}"
         out[name] = mean(d["errors"][key]) if key in d["errors"] else None
         for part in ("Lloud", "Lrest"):
             pk = f"{part}/{bits}/{axis}/{group}"
@@ -66,10 +67,14 @@ def main() -> int:
     ap.add_argument("dumps", nargs="+")
     ap.add_argument("--bits", type=int, default=2)
     ap.add_argument("--group", type=int, default=128)
+    ap.add_argument("--centered", action="store_true",
+                    help="read the centered logit error (Lc): each query's mean over the keys "
+                         "removed, the part softmax ignores. Needs dumps taken after it existed")
     args = ap.parse_args()
-    runs = [summarize(p, args.bits, args.group) for p in args.dumps]
+    runs = [summarize(p, args.bits, args.group, args.centered) for p in args.dumps]
 
-    print(f"relative logit error at {args.bits} bits")
+    print(f"relative logit error at {args.bits} bits"
+          + (" (centered per query -- what softmax sees)" if args.centered else ""))
     print(f"{'run':<14}{'model':<16}{'alpha':>6}{'per-ch':>9}{'per-tok':>9}{'QuaRot':>9}"
           f"{'|cos|':>8}{'iso':>8}{'QuaRot/iso':>12}")
     for r in runs:
