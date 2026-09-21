@@ -151,7 +151,7 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True)
     ap.add_argument("--model-type", default="llada2_moe",
-                    choices=["llada2_moe", "llada"])
+                    choices=["llada2_moe", "llada", "fast_dllm_v2"])
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seq-len", type=int, default=256)

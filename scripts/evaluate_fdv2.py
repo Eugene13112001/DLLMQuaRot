@@ -56,6 +56,13 @@ def main() -> int:
                          "per-channel, the axis this family's caches use), 'channel' is "
                          "one scale per token")
     ap.add_argument("--kv-value-axis", default="channel", choices=["token", "channel"])
+    ap.add_argument("--kv-value-group-size", type=int, default=0,
+                    help="channels per V scale (0 = --kv-group-size). BitSieve uses 32: one "
+                         "scale per token per 32 channels, where this project's default is "
+                         "the whole 128-channel head")
+    ap.add_argument("--kv-clip", type=float, default=0.95,
+                    help="fraction of the min-max range kept (1.0 = plain min-max, as in "
+                         "BitSieve; 0.95 is this project's default)")
     ap.add_argument("--pre-bias", action="store_true",
                     help="store K with the rotated k_proj bias removed and add it back on "
                          "read. Exact at any width, and it takes the parameter-induced part "
@@ -88,7 +95,8 @@ def main() -> int:
         adapter, bits=args.kv_bits, key_bits=args.kv_key_bits,
         value_bits=args.kv_value_bits, group_size=args.kv_group_size,
         key_axis=args.kv_key_axis, value_axis=args.kv_value_axis,
-        pre_bias=args.pre_bias,
+        pre_bias=args.pre_bias, clip_ratio=args.kv_clip,
+        value_group_size=args.kv_value_group_size,
     )
     print(f"prefix cache at {args.kv_bits} bits, group {args.kv_group_size}, "
           f"K along {args.kv_key_axis}, V along {args.kv_value_axis}")
@@ -127,6 +135,8 @@ def main() -> int:
                     "kv_key_axis": args.kv_key_axis,
                     "kv_value_axis": args.kv_value_axis,
                     "rotate_qk": args.rotate_qk, "pre_bias": args.pre_bias,
+                    "kv_clip": args.kv_clip,
+                    "kv_value_group_size": args.kv_value_group_size or args.kv_group_size,
                     "prefix_writes": stats.writes, "prefix_entries": stats.entries,
                 },
                 "accuracy": result.accuracy, "correct": result.correct,

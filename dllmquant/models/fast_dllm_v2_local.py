@@ -73,6 +73,8 @@ def make_quantized_cache_class(
     stats: FDv2CacheStats,
     key_biases: Optional[List[torch.Tensor]] = None,
     kv_heads: int = 0,
+    clip_ratio: float = 0.95,
+    value_group: int = 0,
 ):
     """A ``DynamicCache`` subclass that rounds what it stores.
 
@@ -99,11 +101,12 @@ def make_quantized_cache_class(
                 if b_rot.shape[-2] != k.shape[-2]:
                     b_rot = b_rot[..., -k.shape[-2]:, :]
                 k = k - b_rot
-            k = quantize_kv(k, key_bits, group_size, axis=key_axis)
+            k = quantize_kv(k, key_bits, group_size, axis=key_axis, clip_ratio=clip_ratio)
             if b_rot is not None:
                 k = k + b_rot
             stats.pre_bias = key_biases is not None
-            v = quantize_kv(value_states.float(), value_bits, group_size, axis=value_axis)
+            v = quantize_kv(value_states.float(), value_bits, value_group or group_size,
+                            axis=value_axis, clip_ratio=clip_ratio)
             stats.writes += 1
             stats.entries += int(key_states.shape[-2])
             return super().update(
@@ -124,6 +127,8 @@ def install_quantized_cache(
     key_axis: str = "token",
     value_axis: str = "channel",
     pre_bias: bool = False,
+    clip_ratio: float = 0.95,
+    value_group_size: int = 0,
 ) -> Tuple[Callable[[], None], FDv2CacheStats]:
     """Replace the cache class the vendored model constructs. Returns (remove, stats).
 
@@ -168,6 +173,8 @@ def install_quantized_cache(
         stats=stats,
         key_biases=key_biases,
         kv_heads=adapter.n_kv_heads,
+        clip_ratio=clip_ratio,
+        value_group=value_group_size,
     )
 
     def remove() -> None:
