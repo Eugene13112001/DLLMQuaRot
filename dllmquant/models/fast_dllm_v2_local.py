@@ -75,6 +75,7 @@ def make_quantized_cache_class(
     kv_heads: int = 0,
     clip_ratio: float = 0.95,
     value_group: int = 0,
+    rotation=None,
 ):
     """A ``DynamicCache`` subclass that rounds what it stores.
 
@@ -100,6 +101,15 @@ def make_quantized_cache_class(
                 b_rot = rotated_key_bias(key_bias, cos, sin, kv_heads).float()
                 if b_rot.shape[-2] != k.shape[-2]:
                     b_rot = b_rot[..., -k.shape[-2]:, :]
+                # With R4 installed the keys reaching the store are RoPE(Wx + b) H, so
+                # the bias term to take out is RoPE(b) H, not RoPE(b). Subtracting the
+                # unrotated one and adding it back is still an identity, but it leaves
+                # the bias inside the quantizer's range -- a pre-bias label on a cell that
+                # did nothing. The rotation is read at write time, from the patched rotary
+                # function, so the two cannot disagree.
+                h = rotation() if rotation is not None else None
+                if h is not None:
+                    b_rot = b_rot @ h.to(b_rot.device, b_rot.dtype)
                 k = k - b_rot
             k = quantize_kv(k, key_bits, group_size, axis=key_axis, clip_ratio=clip_ratio)
             if b_rot is not None:
@@ -163,6 +173,11 @@ def install_quantized_cache(
             key_biases.append(bias.detach())
 
     stats = FDv2CacheStats(key_axis=key_axis, value_axis=value_axis)
+
+    def current_rotation():
+        state = getattr(getattr(mod, "apply_rotary_pos_emb", None), "rotation_state", None)
+        return None if not state else state.get("h")
+
     mod.DynamicCache = make_quantized_cache_class(
         base,
         key_bits=key_bits or bits,
@@ -175,6 +190,7 @@ def install_quantized_cache(
         kv_heads=adapter.n_kv_heads,
         clip_ratio=clip_ratio,
         value_group=value_group_size,
+        rotation=current_rotation,
     )
 
     def remove() -> None:

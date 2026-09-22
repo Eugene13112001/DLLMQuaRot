@@ -18,7 +18,7 @@ e() { n=$1; shift; run "$n" $NEEDFD "out/$n.json" $EVALFD $C "$@" --out "out/$n.
 
 e fd_3_ch_pb     --kv-bits 3 --pre-bias
 e fd_3_tok_pb    --kv-bits 3 --kv-key-axis channel --pre-bias
-e fd_3_quarot_pb --kv-bits 3 --kv-key-axis channel --rotate-qk --pre-bias
+# fd_3_quarot_pb removed: pre-bias under R4 subtracted the unrotated bias (see fd9.sh)
 e fd_2_ch_pb     --kv-bits 2 --pre-bias
 e fd_2_tok_pb    --kv-bits 2 --kv-key-axis channel --pre-bias
 

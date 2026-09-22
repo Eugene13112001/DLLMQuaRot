@@ -89,3 +89,30 @@ def test_a_missing_rotary_table_is_refused():
     cache, _ = build(4, [torch.zeros(HEADS * DIM)])
     with pytest.raises(RuntimeError, match="rotary tables"):
         cache.update(torch.randn(1, HEADS, T, DIM), torch.randn(1, HEADS, T, DIM), 0, {})
+
+
+def test_with_a_rotation_the_rotated_bias_is_what_leaves_the_store():
+    # Under R4 the store receives RoPE(Wx + b) H. Taking out RoPE(b) without H is an
+    # identity too, so it would pass an exactness test and still leave the bias in range.
+    # The quantizer must see (k - RoPE(b) H): with a key that is nothing but the rotated
+    # bias, that is zero, and a 2-bit store of zero plus the bias returns the key exactly.
+    cos, sin = tables()
+    bias = torch.zeros(HEADS * DIM)
+    bias[3] = 40.0
+    torch.manual_seed(3)
+    h, _ = torch.linalg.qr(torch.randn(DIM, DIM))
+    k = rotated_key_bias(bias, cos, sin, HEADS) @ h
+    v = torch.randn(1, HEADS, T, DIM)
+    stats = FDv2CacheStats(key_axis="channel", value_axis="channel")
+    cls = make_quantized_cache_class(
+        FakeCache, key_bits=2, value_bits=16, group_size=128, key_axis="channel",
+        value_axis="channel", stats=stats, key_biases=[bias], kv_heads=HEADS,
+        rotation=lambda: h)
+    out, _ = cls().update(k.clone(), v, 0, {"cos": cos, "sin": sin})
+    assert torch.allclose(out, k, atol=1e-4)
+    # and without telling the cache about H, the same key is not recovered
+    cls_wrong = make_quantized_cache_class(
+        FakeCache, key_bits=2, value_bits=16, group_size=128, key_axis="channel",
+        value_axis="channel", stats=FDv2CacheStats(), key_biases=[bias], kv_heads=HEADS)
+    wrong, _ = cls_wrong().update(k.clone(), v, 0, {"cos": cos, "sin": sin})
+    assert not torch.allclose(wrong, k, atol=1e-2)
