@@ -193,11 +193,21 @@ def fdv2_generate(
     small_block_size: int = 8,
     top_p: float = 0.95,
     temperature: float = 0.0,
+    use_block_cache: bool = False,
 ) -> torch.Tensor:
     """One question through the checkpoint's own sampler.
 
     The cache is whatever ``install_quantized_cache`` left in place, so this function has
     no quantization knobs of its own: the two must not be able to disagree.
+
+    ``use_block_cache`` is the checkpoint's own switch for reusing the current block: its
+    K/V are computed in full when a sub-block starts and, while that sub-block is decoded,
+    only the sub-block's own positions are recomputed -- the rest of the block is read back
+    stale. The block store is built from the same replaced ``DynamicCache`` class, so the
+    entries written at the start of a sub-block are rounded like the prefix; the sub-block's
+    own positions, written into that store by slice assignment inside attention, are the
+    freshly recomputed ones and stay in full precision. What is stale is therefore also
+    what is rounded, which is the combination the LLaDA2.0-mini staleness cells measured.
     """
     ids = prompt_ids if prompt_ids.dim() > 1 else prompt_ids.unsqueeze(0)
     ids = ids.to(adapter.model.device)
@@ -214,6 +224,7 @@ def fdv2_generate(
             stop_token=stop if isinstance(stop, int) else 151645,
             top_p=top_p,
             temperature=temperature,
+            use_block_cache=use_block_cache,
         )
 
 

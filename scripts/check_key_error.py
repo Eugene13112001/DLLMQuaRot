@@ -159,6 +159,14 @@ def split_logit_err(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
     return tuple(out)
 
 
+def _bias_of(block) -> "list | None":
+    from dllmquant.models.base import find_submodule
+    from dllmquant.models.llada import _K_NAMES
+    k_proj = find_submodule(block, _K_NAMES)
+    bias = getattr(k_proj, "bias", None) if k_proj is not None else None
+    return None if bias is None else [float(x) for x in bias.detach().float().cpu()]
+
+
 def crest(x: torch.Tensor) -> float:
     """Peak over RMS, per head, averaged. How outlier-ridden the tensor is."""
     flat = x.reshape(x.shape[1], -1).float()
@@ -225,6 +233,12 @@ def main() -> int:
                          "migration leaves q K^T bit-identical but moves the loud "
                          "channels into q, so the K-space error stops meaning what "
                          "attention sees")
+    ap.add_argument("--pre-bias", action="store_true",
+                    help="quantize K with the rotated k_proj bias removed and add it back "
+                         "after -- what evaluate_fdv2.py --pre-bias stores. Exact at any "
+                         "width; the crest and K-space errors are then of the stored tensor, "
+                         "the logit errors against the true keys. The tensor-side gate for "
+                         "the bias intervention, as check_migration.py is for the gain")
     ap.add_argument("--migrate-mode", default="shrink", choices=["shrink", "geomean"],
                     help="how --migrate-qk picks its factor (dllmquant/algos/smooth_qk.py)")
     ap.add_argument("--all-layers", action="store_true",
@@ -289,6 +303,17 @@ def main() -> int:
 
     # rel_err[(bits, axis)] -> list over (layer, canvas)
     acc: Dict[tuple, List[float]] = {}
+    key_biases: Dict[int, torch.Tensor] = {}
+    if args.pre_bias:
+        from dllmquant.models.base import find_submodule
+        from dllmquant.models.llada import _K_NAMES
+        for li in idx:
+            k_proj = find_submodule(blocks[li], _K_NAMES)
+            bias = getattr(k_proj, "bias", None) if k_proj is not None else None
+            if bias is None:
+                raise SystemExit(f"--pre-bias on a model whose k_proj has no bias (block {li})")
+            key_biases[li] = bias.detach().float()
+
     crests: List[float] = []
     vcrests: List[float] = []
     qk_cos: List[float] = []
@@ -348,12 +373,21 @@ def main() -> int:
                                          "--logit-error has nothing to multiply by")
                     qs = qs.detach().float()
             rope_applied[li] = bool(getattr(probe, "rope_applied", False))
-            crests.append(crest(k))
+            # What the cache stores. With --pre-bias the rotated bias is taken out before
+            # the quantizer and put back after, so the stored tensor is k - RoPE(b) and
+            # the error is measured against it; the logits are still the true q . k.
+            k_store = k
+            if li in key_biases:
+                b = key_biases[li].to(k.device).view(1, k.shape[1], 1, k.shape[-1])
+                b = b.expand(k.shape).contiguous()
+                _, b_rot = probe._apply_rotary(b.clone(), b.clone(), k.shape[2])
+                k_store = k - b_rot.float()
+            crests.append(crest(k_store))
             vcrests.append(crest(v))
             rotated = {}
             if rot is not None:
                 h = rot.to(k.device)
-                rotated = {"K": k @ h, "V": v @ h}
+                rotated = {"K": k_store @ h, "V": v @ h}
             allowed = None
             if qs is not None:
                 mask_fn = getattr(probe, "attn_mask_fn", None)
@@ -379,7 +413,7 @@ def main() -> int:
                 for axis in axes:
                     base, _, turned = axis.partition("+")
                     for g in args.group_size:
-                        for side, t0 in (("K", k), ("V", v)):
+                        for side, t0 in (("K", k_store), ("V", v)):
                             t = rotated[side] if turned else t0
                             q = quantize_kv(t, bits, g, axis=base)
                             acc.setdefault((side, bits, axis, g), []).append(
@@ -387,13 +421,13 @@ def main() -> int:
                             if qs is not None and side == "K":
                                 model_frame = q @ h.T if turned else q
                                 acc.setdefault(("L", bits, axis, g), []).append(
-                                    logit_rel_err(qs, model_frame - t0, t0, allowed))
+                                    logit_rel_err(qs, model_frame - t0, k, allowed))
                                 acc.setdefault(("Lc", bits, axis, g), []).append(
-                                    logit_rel_err(qs, model_frame - t0, t0, allowed,
+                                    logit_rel_err(qs, model_frame - t0, k, allowed,
                                                   center=True))
                                 if loud is not None and bool(loud.any()) and bool((~loud).any()):
                                     l_loud, l_rest = split_logit_err(
-                                        qs, model_frame - t0, t0, allowed, loud)
+                                        qs, model_frame - t0, k, allowed, loud)
                                     acc.setdefault(("Lloud", bits, axis, g), []).append(l_loud)
                                     acc.setdefault(("Lrest", bits, axis, g), []).append(l_rest)
                             if parts:
@@ -499,6 +533,7 @@ def main() -> int:
                 "skip_qk_norm": args.skip_qk_norm, "rotate": args.rotate,
                 "split_rope": args.split_rope, "migrate_qk": args.migrate_qk,
                 "logit_error": args.logit_error, "migrate_mode": args.migrate_mode,
+                "pre_bias": args.pre_bias,
             },
             "shape": "canvas x layer",
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)
@@ -508,6 +543,9 @@ def main() -> int:
             "qk_iso": grid(qk_iso) if qk_iso else None,
             # Per probed layer, in the order of config.layers.
             "gamma": {name: [per.get(li) for li in idx] for name, per in gammas.items()},
+            # The k_proj bias of each probed layer, when the model has one: the other
+            # parameter that writes a fixed vector into every key (Fast-dLLM-v2 / Qwen2.5).
+            "k_bias": [_bias_of(blocks[li]) for li in idx],
             "rotary_dim": [rotary_dims.get(li) for li in idx],
             "rope_applied": [rope_applied.get(li) for li in idx],
         }

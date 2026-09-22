@@ -72,6 +72,12 @@ def main() -> int:
                     help="R4: rotate Q and K head-wise after RoPE, so the store holds "
                          "rotated keys -- QuaRot's arrangement, to be read together with "
                          "--kv-key-axis channel")
+    ap.add_argument("--use-block-cache", action="store_true",
+                    help="the checkpoint's own reuse of the current block: computed in full at "
+                         "each sub-block start, then only the sub-block recomputed while the "
+                         "rest of the block is read back stale. Off is what the published "
+                         "numbers use. With a width below 16 the stale entries are rounded "
+                         "too -- the staleness x width pair of LLaDA2.0-mini's policy cells")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -107,7 +113,8 @@ def main() -> int:
     def generate(prompt, cfg_):
         return fdv2_generate(adapter, prompt, cfg_, threshold=args.threshold,
                              block_size=args.block_size,
-                             small_block_size=args.small_block_size)
+                             small_block_size=args.small_block_size,
+                             use_block_cache=args.use_block_cache)
 
     try:
         result = evaluate_gsm8k(adapter, n_samples=args.n_eval, gen_cfg=gen_cfg,
@@ -135,7 +142,7 @@ def main() -> int:
                     "kv_key_axis": args.kv_key_axis,
                     "kv_value_axis": args.kv_value_axis,
                     "rotate_qk": args.rotate_qk, "pre_bias": args.pre_bias,
-                    "kv_clip": args.kv_clip,
+                    "kv_clip": args.kv_clip, "use_block_cache": args.use_block_cache,
                     "kv_value_group_size": args.kv_value_group_size or args.kv_group_size,
                     "prefix_writes": stats.writes, "prefix_entries": stats.entries,
                 },
