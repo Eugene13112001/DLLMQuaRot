@@ -56,7 +56,7 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from dllmquant.cache import quantize_kv  # noqa: E402
+from dllmquant.cache import add_key_noise, quantize_kv  # noqa: E402
 from dllmquant.config import DLLMQuantConfig, QuantConfig  # noqa: E402
 from dllmquant.models import build_adapter  # noqa: E402
 
@@ -295,6 +295,11 @@ def main() -> int:
                          "width; the crest and K-space errors are then of the stored tensor, "
                          "the logit errors against the true keys. The tensor-side gate for "
                          "the bias intervention, as check_migration.py is for the gain")
+    ap.add_argument("--key-noise", type=float, default=0.0,
+                    help="add Gaussian noise of this many RMS to the stored keys, per "
+                         "head. With --bits 16 nothing is quantized, so the run reports "
+                         "what a structureless error of that size does to the logits -- "
+                         "the calibration for the matched-dose control of thesis 4")
     ap.add_argument("--key-mean", action="store_true",
                     help="SageAttention's smooth K: quantize K minus its per-channel mean over "
                          "the canvas and add the mean back -- the data-driven baseline for "
@@ -484,6 +489,12 @@ def main() -> int:
                         for side, t0 in (("K", k_store), ("V", v)):
                             t = rotated[side] if turned else t0
                             q = quantize_kv(t, bits, g, axis=base)
+                            if side == "K":
+                                # Calibration for the answer-level control: at 16
+                                # bits this is the only error, so the sweep reads
+                                # off which dose of structureless noise matches a
+                                # given quantizer's centered logit error.
+                                q = add_key_noise(q, t, args.key_noise)
                             acc.setdefault((side, bits, axis, g), []).append(
                                 rel_err(q, t))
                             if qs is not None and side == "K":
@@ -629,6 +640,7 @@ def main() -> int:
                 "split_rope": args.split_rope, "migrate_qk": args.migrate_qk,
                 "logit_error": args.logit_error, "migrate_mode": args.migrate_mode,
                 "pre_bias": args.pre_bias, "key_mean": args.key_mean,
+                "key_noise": args.key_noise,
             },
             "shape": "canvas x layer",
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)

@@ -24,7 +24,7 @@ from typing import Callable, List, Optional, Tuple
 
 import torch
 
-from ..cache import quantize_kv
+from ..cache import add_key_noise, quantize_kv
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -77,6 +77,7 @@ def make_quantized_cache_class(
     value_group: int = 0,
     rotation=None,
     key_mean: bool = False,
+    key_noise: float = 0.0,
 ):
     """A ``DynamicCache`` subclass that rounds what it stores.
 
@@ -125,6 +126,10 @@ def make_quantized_cache_class(
                 k = k + m
             if b_rot is not None:
                 k = k + b_rot
+            # The structureless control: noise of a chosen size instead of, or on top
+            # of, the quantizer's error, measured against the true keys so the dose
+            # means the same at 16 bits as at four.
+            k = add_key_noise(k, key_states.float(), key_noise)
             stats.pre_bias = key_biases is not None
             v = quantize_kv(value_states.float(), value_bits, value_group or group_size,
                             axis=value_axis, clip_ratio=clip_ratio)
@@ -151,6 +156,7 @@ def install_quantized_cache(
     clip_ratio: float = 0.95,
     value_group_size: int = 0,
     key_mean: bool = False,
+    key_noise: float = 0.0,
 ) -> Tuple[Callable[[], None], FDv2CacheStats]:
     """Replace the cache class the vendored model constructs. Returns (remove, stats).
 
@@ -207,6 +213,7 @@ def install_quantized_cache(
         value_group=value_group_size,
         rotation=current_rotation,
         key_mean=key_mean,
+        key_noise=key_noise,
     )
 
     def remove() -> None:

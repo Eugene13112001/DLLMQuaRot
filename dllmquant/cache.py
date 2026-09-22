@@ -77,6 +77,14 @@ class KVCacheConfig:
     value_axis: str = "channel"
     symmetric: bool = False
     clip_ratio: float = 0.95
+    # Gaussian noise added to the stored keys, in units of the RMS of the keys
+    # being written, per head. A control, not a format: thesis 4 has two models
+    # carrying the same centered logit error at four bits per token and scoring
+    # 91.5 and 0.0, and the question is whether the structure of that error is
+    # what separates them or whether one model is simply the more fragile of the
+    # two. Structureless error of a matched size answers it. At 16 bits nothing
+    # is quantized, so the noise is then the only thing the cache does.
+    key_noise: float = 0.0
     # Calibrated per-channel scales, selected by the mask ratio of what is
     # being stored. Set means the scales stop travelling with the cache: the
     # group size and the axis no longer apply, because a static scale is
@@ -129,6 +137,8 @@ class KVCacheConfig:
         valid = {"never", "every_n", "block", "mask_ratio"}
         if self.policy not in valid:
             raise ValueError(f"policy must be one of {sorted(valid)}")
+        if self.key_noise < 0:
+            raise ValueError(f"key_noise must be >= 0, got {self.key_noise}")
         for name in ("decoded_bits", "masked_bits", "key_bits", "value_bits"):
             b = getattr(self, name)
             if b is not None and not 2 <= b <= 16:
@@ -305,6 +315,23 @@ def channel_scales(
     lo, hi = channel_range(x)
     scale, zero, _, _ = _affine_params(lo, hi, bits, symmetric, clip_ratio)
     return scale, zero
+
+
+def add_key_noise(xq: torch.Tensor, x: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Add Gaussian noise of ``sigma`` times the RMS of ``x``, per head.
+
+    The size is taken from the true tensor, not the quantized one, so the dose
+    means the same thing at every width and with every axis -- including 16
+    bits, where it is the only error the cache carries. Per head, because that
+    is the unit a scale already lives in and the unit attention reads.
+    """
+    if sigma <= 0:
+        return xq
+    if x.dim() < 2:
+        raise ValueError(f"expected at least [heads, ...], got {tuple(x.shape)}")
+    dims = tuple(range(x.dim()))[-2:]
+    rms = x.float().pow(2).mean(dim=dims, keepdim=True).sqrt().to(x.dtype)
+    return xq + sigma * rms * torch.randn_like(xq)
 
 
 def quantize_kv_static(
@@ -885,8 +912,9 @@ class BlockKVCache:
         ratio = self.mask_ratio
         if mask is not None:
             ratio = float(mask.to(torch.float32).mean())
-        kq = self._correct(k, self._quantize_with_mask(k, mask, "key", layer, ratio),
-                           "key")
+        kq = add_key_noise(
+            self._correct(k, self._quantize_with_mask(k, mask, "key", layer, ratio),
+                          "key"), k, self.cfg.key_noise)
         vq = self._correct(v, self._quantize_with_mask(v, mask, "value", layer, ratio),
                            "value")
 
@@ -1087,8 +1115,9 @@ class BlockKVCache:
         ratio = self.mask_ratio
         if mask is not None:
             ratio = float(mask.to(torch.float32).mean())
-        kq = self._correct(k, self._quantize_with_mask(k, mask, "key", layer, ratio),
-                           "key")
+        kq = add_key_noise(
+            self._correct(k, self._quantize_with_mask(k, mask, "key", layer, ratio),
+                          "key"), k, self.cfg.key_noise)
         vq = self._correct(v, self._quantize_with_mask(v, mask, "value", layer, ratio),
                            "value")
         self._wk[layer], self._wv[layer] = kq, vq
@@ -1233,6 +1262,7 @@ __all__ = [
     "BlockKVCache",
     "ScaleBookRecorder",
     "CacheStats",
+    "add_key_noise",
     "quantize_kv",
     "quantize_kv_static",
     "channel_range",
