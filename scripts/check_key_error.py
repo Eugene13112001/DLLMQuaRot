@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 import sys
 from typing import Dict, List
@@ -106,6 +107,61 @@ def logit_rel_err(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
         de = de * allowed
         sc = sc * allowed
     return float(de.norm() / sc.norm().clamp_min(1e-12))
+
+
+def attn_divergence(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
+                    allowed, scale: float) -> tuple:
+    """What softmax does with the error: KL, top-1 flips, and how peaked attention is.
+
+    Thesis 4 is open because at four bits per token LLaDA2.0-mini and Fast-dLLM-v2
+    carry the same centered logit error (0.351 and 0.346) and score 91.5 and 0.0.
+    One tempting answer -- read the error in units of the spread of the logits,
+    since that is what softmax compares it against -- is already refuted by those
+    two numbers: the centered relative error *is* that ratio, exactly (``edev``
+    below reproduces it, and the tests pin the identity). What the centered error
+    does not fix is how a perturbation of that size moves the distribution, which
+    depends on how peaked the distribution is: a near-uniform attention reorders
+    its keys without changing what is read, and a sharply peaked one keeps its
+    order while a single flip changes everything. So this measures the movement
+    itself.
+
+    Returns, over the queries that may read at least one key:
+      KL(p || p^) averaged, with p = softmax of the true logits;
+      the share of queries whose top-1 key changes;
+      the effective number of keys attended, exp(entropy of p), averaged --
+      the peakedness the KL is built on;
+      ``edev``, the centered error in units of the spread, kept as a cross-check
+      against logit_rel_err(..., center=True).
+    """
+    rep_ = q.shape[1] // err.shape[1]
+    if rep_ > 1:
+        err = err.repeat_interleave(rep_, dim=1)
+        k = k.repeat_interleave(rep_, dim=1)
+    true = (q @ k.transpose(-1, -2)) * scale
+    hat = true + (q @ err.transpose(-1, -2)) * scale
+    if allowed is None:
+        w = torch.ones_like(true)
+    else:
+        w = allowed.expand_as(true)
+    live = w.sum(dim=-1) > 0
+    neg = torch.finfo(true.dtype).min
+    tm = true.masked_fill(w == 0, neg)
+    hm = hat.masked_fill(w == 0, neg)
+    logp = torch.log_softmax(tm, dim=-1)
+    logq = torch.log_softmax(hm, dim=-1)
+    p = logp.exp()
+    kl = ((p * (logp - logq)) * w).sum(dim=-1)
+    flip = (tm.argmax(dim=-1) != hm.argmax(dim=-1)).float()
+    eff = (-(p * logp * w).sum(dim=-1)).exp()
+    n = live.sum().clamp_min(1)
+    # Spread and error in the same absolute units, both centered per query.
+    ctr = _center_rows(true, allowed)
+    cerr = _center_rows(hat - true, allowed)
+    cnt = w.sum().clamp_min(1)
+    spread = ((ctr ** 2).sum() / cnt).sqrt()
+    edev = ((cerr ** 2).sum() / cnt).sqrt() / spread.clamp_min(1e-12)
+    return (float((kl * live).sum() / n), float((flip * live).sum() / n),
+            float((eff * live).sum() / n), float(edev))
 
 
 def qk_geometry(q: torch.Tensor, k: torch.Tensor, allowed) -> tuple:
@@ -437,6 +493,13 @@ def main() -> int:
                                 acc.setdefault(("Lc", bits, axis, g), []).append(
                                     logit_rel_err(qs, model_frame - t0, k, allowed,
                                                   center=True))
+                                kl, flip, eff, edev = attn_divergence(
+                                    qs, model_frame - t0, k, allowed,
+                                    1.0 / math.sqrt(k.shape[-1]))
+                                acc.setdefault(("KL", bits, axis, g), []).append(kl)
+                                acc.setdefault(("Flip", bits, axis, g), []).append(flip)
+                                acc.setdefault(("Eff", bits, axis, g), []).append(eff)
+                                acc.setdefault(("Edev", bits, axis, g), []).append(edev)
                                 if loud is not None and bool(loud.any()) and bool((~loud).any()):
                                     l_loud, l_rest = split_logit_err(
                                         qs, model_frame - t0, k, allowed, loud)
@@ -502,6 +565,26 @@ def main() -> int:
                 if rot is not None:
                     line += f" {vals['channel+rot'] / vals['token']:>9.2f}x"
                 print(line)
+        print()
+        print("=== what softmax sees: KL, top-1 flips, effective keys attended ===")
+        print(f"{'bits':>5} {'group':>6} " + " ".join(
+            f"{a:>10}/KL {a:>8}/flip {a:>9}/eff" for a in cols))
+        print("-" * (13 + 33 * len(cols)))
+        for bits in args.bits:
+            for g in args.group_size:
+                line = f"{bits:>5} {g:>6} "
+                for a in cols:
+                    line += (f" {mean(('KL', bits, a, g)):>13.3e}"
+                             f" {mean(('Flip', bits, a, g)):>13.3f}"
+                             f" {mean(('Eff', bits, a, g)):>13.3f}")
+                print(line)
+        print("  KL and flips are what attention actually does with the error above;")
+        print("  'eff' = exp(entropy) of the true attention, the number of keys it")
+        print("  effectively reads. Two models with the same centered logit error can")
+        print("  differ here -- that error is already the error in units of the logit")
+        print("  spread, so it cannot be what separates them. Attention is taken at")
+        print("  1/sqrt(head_dim); a model scaling its logits otherwise shifts KL and")
+        print("  flips but not the centered error.")
         print("  'token' = one scale per channel, 'channel' = one per token (the "
               "axis names are the grouping direction). Compare these rows across "
               "--migrate-qk runs: the denominator is the same model.")

@@ -51,6 +51,9 @@ def summarize(path: str, bits: int, group: int, centered: bool = False) -> Dict:
         for part in ("Lloud", "Lrest"):
             pk = f"{part}/{bits}/{axis}/{group}"
             out[f"{name}:{part}"] = mean(d["errors"][pk]) if pk in d["errors"] else None
+        for part in ("KL", "Flip", "Eff"):
+            pk = f"{part}/{bits}/{axis}/{group}"
+            out[f"{name}:{part}"] = mean(d["errors"][pk]) if pk in d["errors"] else None
     out["cos"] = mean(d["qk_cos"]) if d.get("qk_cos") else None
     out["iso"] = mean(d["qk_iso"]) if d.get("qk_iso") else None
     out["crest"] = per_layer(d["crest"]["K"])
@@ -106,6 +109,25 @@ def main() -> int:
         print(f"   lowest per-token logit error on {runs[0]['model']}: {best['name']} "
               f"({best['per-token']:.3f}); alpha = 1 shrink gives "
               f"{next((fmt(r['per-token']) for r in doses if r['alpha'] == 1.0 and r['mode'] == 'shrink'), '--')}")
+
+    if any(r.get(f"{n}:KL") is not None for r in runs for n, _ in SCHEMES):
+        print("\n2b. what attention does with that error: KL, top-1 flips, keys effectively read")
+        print(f"   {'run':<14}{'scheme':<12}{'err':>8}{'KL':>11}{'flip':>8}{'eff':>8}"
+              f"{'KL/err^2':>10}")
+        for r in runs:
+            for name, _ in SCHEMES:
+                kl = r.get(f"{name}:KL")
+                if kl is None:
+                    continue
+                e = r[name]
+                print(f"   {r['name']:<14}{name:<12}{fmt(e, 8)}{fmt(kl, 11, 5)}"
+                      f"{fmt(r.get(f'{name}:Flip'))}{fmt(r.get(f'{name}:Eff'), 8, 1)}"
+                      f"{fmt(kl / (e * e) if kl and e else None, 10, 3)}")
+        print("   Read with --centered: the error column is then the error in units of the")
+        print("   logit spread, so it cannot be what separates two models that agree on it.")
+        print("   KL/err^2 is the conversion each model applies -- a constant of the model")
+        print("   if the movement follows the error, and the place the gap must live if it")
+        print("   does not. 'eff' says how peaked the attention it acts on is.")
 
     print("\n3. key crest per layer (mean over canvases)")
     for r in runs:
