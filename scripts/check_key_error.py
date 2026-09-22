@@ -239,6 +239,10 @@ def main() -> int:
                          "width; the crest and K-space errors are then of the stored tensor, "
                          "the logit errors against the true keys. The tensor-side gate for "
                          "the bias intervention, as check_migration.py is for the gain")
+    ap.add_argument("--key-mean", action="store_true",
+                    help="SageAttention's smooth K: quantize K minus its per-channel mean over "
+                         "the canvas and add the mean back -- the data-driven baseline for "
+                         "--pre-bias. Logit errors stay against the true keys")
     ap.add_argument("--migrate-mode", default="shrink", choices=["shrink", "geomean"],
                     help="how --migrate-qk picks its factor (dllmquant/algos/smooth_qk.py)")
     ap.add_argument("--all-layers", action="store_true",
@@ -303,6 +307,8 @@ def main() -> int:
 
     # rel_err[(bits, axis)] -> list over (layer, canvas)
     acc: Dict[tuple, List[float]] = {}
+    if args.pre_bias and args.key_mean:
+        raise SystemExit("--pre-bias and --key-mean are compared in separate runs")
     key_biases: Dict[int, torch.Tensor] = {}
     if args.pre_bias:
         from dllmquant.models.base import find_submodule
@@ -378,6 +384,8 @@ def main() -> int:
             # the quantizer and put back after, so the stored tensor is k - RoPE(b) and
             # the error is measured against it; the logits are still the true q . k.
             k_store = k
+            if args.key_mean:
+                k_store = k - k.mean(dim=-2, keepdim=True)
             if li in key_biases:
                 b = key_biases[li].to(k.device).view(1, k.shape[1], 1, k.shape[-1])
                 b = b.expand(k.shape).contiguous()
@@ -537,7 +545,7 @@ def main() -> int:
                 "skip_qk_norm": args.skip_qk_norm, "rotate": args.rotate,
                 "split_rope": args.split_rope, "migrate_qk": args.migrate_qk,
                 "logit_error": args.logit_error, "migrate_mode": args.migrate_mode,
-                "pre_bias": args.pre_bias,
+                "pre_bias": args.pre_bias, "key_mean": args.key_mean,
             },
             "shape": "canvas x layer",
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)

@@ -76,6 +76,7 @@ def make_quantized_cache_class(
     clip_ratio: float = 0.95,
     value_group: int = 0,
     rotation=None,
+    key_mean: bool = False,
 ):
     """A ``DynamicCache`` subclass that rounds what it stores.
 
@@ -111,7 +112,17 @@ def make_quantized_cache_class(
                 if h is not None:
                     b_rot = b_rot @ h.to(b_rot.device, b_rot.dtype)
                 k = k - b_rot
+            # SageAttention's "smooth K", applied to storage: the per-channel mean of the
+            # keys this write stores (a block, or the prompt), taken out before the
+            # quantizer and put back after, one vector per write kept alongside the codes.
+            # Data-driven where pre-bias is exact: after RoPE the bias rotates with the
+            # position, and a mean over positions keeps only the part that does not.
+            m = k.mean(dim=-2, keepdim=True) if key_mean else None
+            if m is not None:
+                k = k - m
             k = quantize_kv(k, key_bits, group_size, axis=key_axis, clip_ratio=clip_ratio)
+            if m is not None:
+                k = k + m
             if b_rot is not None:
                 k = k + b_rot
             stats.pre_bias = key_biases is not None
@@ -139,6 +150,7 @@ def install_quantized_cache(
     pre_bias: bool = False,
     clip_ratio: float = 0.95,
     value_group_size: int = 0,
+    key_mean: bool = False,
 ) -> Tuple[Callable[[], None], FDv2CacheStats]:
     """Replace the cache class the vendored model constructs. Returns (remove, stats).
 
@@ -147,6 +159,9 @@ def install_quantized_cache(
     quantizer's range. On a model with no such bias it is refused rather than silently
     doing nothing.
     """
+    if pre_bias and key_mean:
+        raise ValueError("--pre-bias and --key-mean are two answers to one question; "
+                         "compare them in separate runs")
     import sys
 
     mod = sys.modules[type(adapter.model).__module__]
@@ -191,6 +206,7 @@ def install_quantized_cache(
         clip_ratio=clip_ratio,
         value_group=value_group_size,
         rotation=current_rotation,
+        key_mean=key_mean,
     )
 
     def remove() -> None:

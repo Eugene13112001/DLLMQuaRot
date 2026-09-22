@@ -68,6 +68,10 @@ def main() -> int:
                          "read. Exact at any width, and it takes the parameter-induced part "
                          "of the key outlier out of the quantizer's range -- the counterpart "
                          "of the QK-Norm gain migration on a model with no norm to migrate")
+    ap.add_argument("--key-mean", action="store_true",
+                    help="SageAttention's smooth K on the store: subtract the per-channel mean "
+                         "of the keys each write stores, quantize, add it back. The data-driven "
+                         "baseline for --pre-bias")
     ap.add_argument("--rotate-qk", action="store_true",
                     help="R4: rotate Q and K head-wise after RoPE, so the store holds "
                          "rotated keys -- QuaRot's arrangement, to be read together with "
@@ -102,7 +106,7 @@ def main() -> int:
         value_bits=args.kv_value_bits, group_size=args.kv_group_size,
         key_axis=args.kv_key_axis, value_axis=args.kv_value_axis,
         pre_bias=args.pre_bias, clip_ratio=args.kv_clip,
-        value_group_size=args.kv_value_group_size,
+        value_group_size=args.kv_value_group_size, key_mean=args.key_mean,
     )
     print(f"prefix cache at {args.kv_bits} bits, group {args.kv_group_size}, "
           f"K along {args.kv_key_axis}, V along {args.kv_value_axis}")
@@ -142,6 +146,7 @@ def main() -> int:
                     "kv_key_axis": args.kv_key_axis,
                     "kv_value_axis": args.kv_value_axis,
                     "rotate_qk": args.rotate_qk, "pre_bias": args.pre_bias,
+                    "key_mean": args.key_mean,
                     "kv_clip": args.kv_clip, "use_block_cache": args.use_block_cache,
                     "kv_value_group_size": args.kv_value_group_size or args.kv_group_size,
                     "prefix_writes": stats.writes, "prefix_entries": stats.entries,

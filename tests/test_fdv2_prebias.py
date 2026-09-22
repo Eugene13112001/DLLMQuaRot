@@ -116,3 +116,48 @@ def test_with_a_rotation_the_rotated_bias_is_what_leaves_the_store():
         value_axis="channel", stats=FDv2CacheStats(), key_biases=[bias], kv_heads=HEADS)
     wrong, _ = cls_wrong().update(k.clone(), v, 0, {"cos": cos, "sin": sin})
     assert not torch.allclose(wrong, k, atol=1e-2)
+
+
+def build_mean(bits, axis="channel"):
+    stats = FDv2CacheStats(key_axis=axis, value_axis="channel")
+    cls = make_quantized_cache_class(
+        FakeCache, key_bits=bits, value_bits=16, group_size=128, key_axis=axis,
+        value_axis="channel", stats=stats, key_mean=True)
+    return cls()
+
+
+def test_key_mean_is_exact_at_sixteen_bits():
+    k, v = torch.randn(1, HEADS, T, DIM), torch.randn(1, HEADS, T, DIM)
+    out, _ = build_mean(16).update(k.clone(), v, 0)
+    assert torch.allclose(out, k, atol=1e-5)
+
+
+def test_key_mean_catches_a_constant_offset_but_not_a_rotating_one():
+    # A bias that does not rotate is one vector for every key and the mean takes it out as
+    # well as pre-bias does. After RoPE it rotates with the position, and in a fast-rotating
+    # pair the mean over positions is close to zero -- that part stays in the store.
+    cos, sin = tables()
+    bias = torch.zeros(HEADS * DIM)
+    bias[0] = 40.0                         # pair (0, 8): the fastest rotation in the head
+    b_rot = rotated_key_bias(bias, cos, sin, HEADS)
+    torch.manual_seed(5)
+    k = torch.randn(1, HEADS, T, DIM) + b_rot
+    v = torch.randn(1, HEADS, T, DIM)
+    err = lambda x: float((x - k).norm() / k.norm())
+    exact = make_quantized_cache_class(
+        FakeCache, key_bits=2, value_bits=16, group_size=128, key_axis="channel",
+        value_axis="channel", stats=FDv2CacheStats(), key_biases=[bias], kv_heads=HEADS)()
+    by_mean = build_mean(2)
+    a, _ = exact.update(k.clone(), v, 0, {"cos": cos, "sin": sin})
+    b, _ = by_mean.update(k.clone(), v, 0)
+    assert err(a) < err(b)
+
+
+def test_pre_bias_and_key_mean_are_not_combined():
+    from dllmquant.models.fast_dllm_v2_local import install_quantized_cache
+
+    class Dummy:
+        pass
+
+    with pytest.raises(ValueError, match="separate runs"):
+        install_quantized_cache(Dummy(), bits=4, pre_bias=True, key_mean=True)
