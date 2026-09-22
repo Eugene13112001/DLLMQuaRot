@@ -90,6 +90,13 @@ def main() -> int:
         biases = biases_from_checkpoint(args.checkpoint, layers)
 
     feats = [bias_features(b, args.kv_heads) for b in biases]
+    # The bias relative to the key it is added to, when the dump was taken with --pre-bias:
+    # an additive term's effect on a per-token scale depends on that ratio, not on the
+    # bias alone, and the shape features above cannot see it.
+    share = d.get("bias_share")
+    if share:
+        for i in range(len(layers)):
+            feats[i]["||b|| / ||k||"] = sum(row[i] for row in share) / len(share)
     meas = {"axis (K space)": layer_ratio(d, cell("K", args.bits, "channel", args.group),
                                           cell("K", args.bits, "token", args.group))}
     lc_tok, lc_ch = (cell("Lc", args.bits, a, args.group) for a in ("channel", "token"))

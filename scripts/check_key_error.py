@@ -318,6 +318,7 @@ def main() -> int:
     vcrests: List[float] = []
     qk_cos: List[float] = []
     qk_iso: List[float] = []
+    bias_share: List[float] = []
     # Weights of the Q/K norms per probed layer, and what the probe actually
     # did with rotary -- recorded so the weight-law analysis reads the gains
     # from the same modules that produced the tensor, and a probe that silently
@@ -382,6 +383,9 @@ def main() -> int:
                 b = b.expand(k.shape).contiguous()
                 _, b_rot = probe._apply_rotary(b.clone(), b.clone(), k.shape[2])
                 k_store = k - b_rot.float()
+                # How much of the stored key the bias is: an additive term matters in
+                # proportion to what it is added to, which the bias alone cannot say.
+                bias_share.append(float(b_rot.float().norm() / k.norm().clamp_min(1e-12)))
             crests.append(crest(k_store))
             vcrests.append(crest(v))
             rotated = {}
@@ -541,6 +545,7 @@ def main() -> int:
             "crest": {"K": grid(crests), "V": grid(vcrests)},
             "qk_cos": grid(qk_cos) if qk_cos else None,
             "qk_iso": grid(qk_iso) if qk_iso else None,
+            "bias_share": grid(bias_share) if bias_share else None,
             # Per probed layer, in the order of config.layers.
             "gamma": {name: [per.get(li) for li in idx] for name, per in gammas.items()},
             # The k_proj bias of each probed layer, when the model has one: the other
