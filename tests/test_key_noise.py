@@ -62,3 +62,50 @@ def test_the_cache_leaves_values_alone_and_keys_noisy():
 def test_a_negative_dose_is_refused():
     with pytest.raises(ValueError, match="key_noise"):
         KVCacheConfig(enabled=True, key_noise=-0.1)
+
+
+def test_shared_noise_is_one_vector_per_write():
+    """Every position of a channel displaced the same way -- how a bias errs."""
+    k = keys()
+    out = add_key_noise(torch.zeros_like(k), k, 0.1, "shared")
+    first = out[:, :, :1, :]
+    assert torch.allclose(out, first.expand_as(out))
+
+
+def test_shared_and_iid_carry_the_same_size():
+    k = keys()
+    a = add_key_noise(torch.zeros_like(k), k, 0.1, "iid")
+    b = add_key_noise(torch.zeros_like(k), k, 0.1, "shared")
+    rel = lambda n: float(n.norm() / k.norm())  # noqa: E731
+    assert rel(a) == pytest.approx(rel(b), rel=0.3)
+
+
+def test_shared_noise_is_invisible_to_centered_logits():
+    """The point of the contrast: a displacement common to all keys does not reorder.
+
+    What softmax reads is each query's logits against their own mean, and a vector
+    added to every key contributes one constant per query. So at equal size the
+    shared mode has to move attention far less than the independent one -- which is
+    the hypothesis for why a quantizer's error is gentler than noise.
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_key_error import attn_divergence
+
+    torch.manual_seed(0)
+    q = torch.randn(1, 4, 32, 16, dtype=torch.float64)
+    k = torch.randn(1, 2, 32, 16, dtype=torch.float64)
+    sc = 1.0 / 4.0
+    iid = add_key_noise(torch.zeros_like(k), k, 0.1, "iid")
+    shared = add_key_noise(torch.zeros_like(k), k, 0.1, "shared")
+    kl_i, _, _, e_i = attn_divergence(q, iid, k, None, sc)
+    kl_s, _, _, e_s = attn_divergence(q, shared, k, None, sc)
+    assert kl_s < 0.2 * kl_i and e_s < 0.5 * e_i
+
+
+def test_a_bad_mode_is_refused():
+    with pytest.raises(ValueError, match="mode"):
+        add_key_noise(torch.zeros(1, 2, 4, 4), torch.zeros(1, 2, 4, 4), 0.1, "gaussian")
+    with pytest.raises(ValueError, match="key_noise_mode"):
+        KVCacheConfig(enabled=True, key_noise=0.1, key_noise_mode="gaussian")

@@ -310,6 +310,8 @@ def main() -> int:
                          "head. With --bits 16 nothing is quantized, so the run reports "
                          "what a structureless error of that size does to the logits -- "
                          "the calibration for the matched-dose control of thesis 4")
+    ap.add_argument("--key-noise-mode", default="iid", choices=["iid", "shared"],
+                    help="'iid' draws the noise per entry, 'shared' once per write and adds it to every position -- the correlation a bias has exactly and a per-channel scale largely. The matched-movement runs left open why the quantizer's error is gentler than random error of the same size; this is the knob that asks whether it is that")
     ap.add_argument("--key-mean", action="store_true",
                     help="SageAttention's smooth K: quantize K minus its per-channel mean over "
                          "the canvas and add the mean back -- the data-driven baseline for "
@@ -504,7 +506,8 @@ def main() -> int:
                                 # bits this is the only error, so the sweep reads
                                 # off which dose of structureless noise matches a
                                 # given quantizer's centered logit error.
-                                q = add_key_noise(q, t, args.key_noise)
+                                q = add_key_noise(q, t, args.key_noise,
+                                                  args.key_noise_mode)
                             acc.setdefault((side, bits, axis, g), []).append(
                                 rel_err(q, t))
                             if qs is not None and side == "K":
@@ -651,6 +654,7 @@ def main() -> int:
                 "logit_error": args.logit_error, "migrate_mode": args.migrate_mode,
                 "pre_bias": args.pre_bias, "key_mean": args.key_mean,
                 "key_noise": args.key_noise,
+                "key_noise_mode": args.key_noise_mode,
             },
             "shape": "canvas x layer",
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)

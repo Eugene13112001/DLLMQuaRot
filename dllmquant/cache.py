@@ -85,6 +85,14 @@ class KVCacheConfig:
     # two. Structureless error of a matched size answers it. At 16 bits nothing
     # is quantized, so the noise is then the only thing the cache does.
     key_noise: float = 0.0
+    # Whether that noise is drawn per entry or once per write and shared by every
+    # position. The two are the question the matched-movement runs left open: on
+    # Fast-dLLM-v2 independent noise at KL 0.22 scores 3.0 where its own quantizers
+    # near that movement score 43.5 and 58.0, so the quantizer's error is gentler
+    # than random error of the same size. A per-channel scale rounds every position
+    # of a channel the same way, and a bias is shared exactly; "shared" is that
+    # correlation with nothing else of the quantizer in it.
+    key_noise_mode: str = "iid"
     # Calibrated per-channel scales, selected by the mask ratio of what is
     # being stored. Set means the scales stop travelling with the cache: the
     # group size and the axis no longer apply, because a static scale is
@@ -139,6 +147,9 @@ class KVCacheConfig:
             raise ValueError(f"policy must be one of {sorted(valid)}")
         if self.key_noise < 0:
             raise ValueError(f"key_noise must be >= 0, got {self.key_noise}")
+        if self.key_noise_mode not in ("iid", "shared"):
+            raise ValueError(
+                f"key_noise_mode must be 'iid' or 'shared', got {self.key_noise_mode!r}")
         for name in ("decoded_bits", "masked_bits", "key_bits", "value_bits"):
             b = getattr(self, name)
             if b is not None and not 2 <= b <= 16:
@@ -317,21 +328,40 @@ def channel_scales(
     return scale, zero
 
 
-def add_key_noise(xq: torch.Tensor, x: torch.Tensor, sigma: float) -> torch.Tensor:
+def add_key_noise(xq: torch.Tensor, x: torch.Tensor, sigma: float,
+                  mode: str = "iid") -> torch.Tensor:
     """Add Gaussian noise of ``sigma`` times the RMS of ``x``, per head.
 
     The size is taken from the true tensor, not the quantized one, so the dose
     means the same thing at every width and with every axis -- including 16
     bits, where it is the only error the cache carries. Per head, because that
     is the unit a scale already lives in and the unit attention reads.
+
+    ``mode`` is what the matched-movement runs left open. ``"iid"`` draws a
+    number per entry: every key is displaced in its own direction, so the keys
+    are reordered. ``"shared"`` draws one vector per channel per write and adds
+    it to every position, which is how a bias and, to a large extent, a
+    per-channel scale err -- every position of a channel is displaced the same
+    way, and a displacement common to all keys moves the logits of a query
+    together rather than reordering them. On Fast-dLLM-v2 independent noise at a
+    movement of KL 0.22 scores 3.0 where the quantizers near that movement score
+    43.5 and 58.0, and this is the knob that says whether correlation is why.
     """
     if sigma <= 0:
         return xq
     if x.dim() < 2:
         raise ValueError(f"expected at least [heads, ...], got {tuple(x.shape)}")
+    if mode not in ("iid", "shared"):
+        raise ValueError(f"mode must be 'iid' or 'shared', got {mode!r}")
     dims = tuple(range(x.dim()))[-2:]
     rms = x.float().pow(2).mean(dim=dims, keepdim=True).sqrt().to(x.dtype)
-    return xq + sigma * rms * torch.randn_like(xq)
+    if mode == "iid":
+        noise = torch.randn_like(xq)
+    else:
+        shape = list(xq.shape)
+        shape[-2] = 1                      # one vector per channel, per write
+        noise = torch.randn(shape, dtype=xq.dtype, device=xq.device).expand_as(xq)
+    return xq + sigma * rms * noise
 
 
 def quantize_kv_static(
@@ -914,7 +944,7 @@ class BlockKVCache:
             ratio = float(mask.to(torch.float32).mean())
         kq = add_key_noise(
             self._correct(k, self._quantize_with_mask(k, mask, "key", layer, ratio),
-                          "key"), k, self.cfg.key_noise)
+                          "key"), k, self.cfg.key_noise, self.cfg.key_noise_mode)
         vq = self._correct(v, self._quantize_with_mask(v, mask, "value", layer, ratio),
                            "value")
 
@@ -1117,7 +1147,7 @@ class BlockKVCache:
             ratio = float(mask.to(torch.float32).mean())
         kq = add_key_noise(
             self._correct(k, self._quantize_with_mask(k, mask, "key", layer, ratio),
-                          "key"), k, self.cfg.key_noise)
+                          "key"), k, self.cfg.key_noise, self.cfg.key_noise_mode)
         vq = self._correct(v, self._quantize_with_mask(v, mask, "value", layer, ratio),
                            "value")
         self._wk[layer], self._wv[layer] = kq, vq

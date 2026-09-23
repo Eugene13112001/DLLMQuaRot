@@ -80,6 +80,7 @@ def make_quantized_cache_class(
     rotation=None,
     key_mean: bool = False,
     key_noise: float = 0.0,
+    key_noise_mode: str = "iid",
     skip_layers: frozenset = frozenset(),
 ):
     """A ``DynamicCache`` subclass that rounds what it stores.
@@ -140,7 +141,7 @@ def make_quantized_cache_class(
             # The structureless control: noise of a chosen size instead of, or on top
             # of, the quantizer's error, measured against the true keys so the dose
             # means the same at 16 bits as at four.
-            k = add_key_noise(k, key_states.float(), key_noise)
+            k = add_key_noise(k, key_states.float(), key_noise, key_noise_mode)
             stats.pre_bias = key_biases is not None
             v = quantize_kv(value_states.float(), value_bits, value_group or group_size,
                             axis=value_axis, clip_ratio=clip_ratio)
@@ -168,6 +169,7 @@ def install_quantized_cache(
     value_group_size: int = 0,
     key_mean: bool = False,
     key_noise: float = 0.0,
+    key_noise_mode: str = "iid",
     skip_layers: "tuple | None" = None,
 ) -> Tuple[Callable[[], None], FDv2CacheStats]:
     """Replace the cache class the vendored model constructs. Returns (remove, stats).
@@ -226,6 +228,7 @@ def install_quantized_cache(
         rotation=current_rotation,
         key_mean=key_mean,
         key_noise=key_noise,
+        key_noise_mode=key_noise_mode,
         skip_layers=frozenset(skip_layers or ()),
     )
 

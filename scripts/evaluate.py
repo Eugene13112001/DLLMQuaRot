@@ -138,6 +138,8 @@ def main() -> int:
                         "no difference")
     g.add_argument("--kv-key-noise", type=float, default=0.0,
                    help="structureless control for thesis 4: Gaussian noise on the stored keys, in units of the RMS of what is written, per head. At --kv-bits 16 it is the only error the cache carries, so a dose matched on the centered logit error asks whether a model dies of the size of the error or of its shape")
+    g.add_argument("--kv-key-noise-mode", default="iid", choices=["iid", "shared"],
+                   help="'iid' draws the noise per entry, 'shared' once per write and adds it to every position -- the correlation a bias has exactly and a per-channel scale largely. The matched-movement runs left open why the quantizer's error is gentler than random error of the same size; this is the knob that asks whether it is that")
     g.add_argument("--kv-group-size", type=int, default=128,
                    help="channels sharing one scale along head_dim; 128 is "
                         "the whole head on LLaDA2.0-mini")
@@ -438,6 +440,7 @@ def main() -> int:
             key_axis=args.kv_key_axis,
             value_axis=args.kv_value_axis,
             key_noise=args.kv_key_noise,
+            key_noise_mode=args.kv_key_noise_mode,
             scale_book=book,
             scale_book_kinds=book_kinds,
         )

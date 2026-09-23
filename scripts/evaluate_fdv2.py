@@ -60,6 +60,8 @@ def main() -> int:
                     help="channels per V scale (0 = --kv-group-size). BitSieve uses 32: one "
                          "scale per token per 32 channels, where this project's default is "
                          "the whole 128-channel head")
+    ap.add_argument("--kv-key-noise-mode", default="iid", choices=["iid", "shared"],
+                    help="'iid' draws the noise per entry, 'shared' once per write and adds it to every position -- the correlation a bias has exactly and a per-channel scale largely. The matched-movement runs left open why the quantizer's error is gentler than random error of the same size; this is the knob that asks whether it is that")
     ap.add_argument("--kv-skip-layers", type=int, nargs="*", default=(),
                     help="layers whose cache stays in full precision. The per-layer profile "
                          "of the attention movement puts the rotation's damage in two layers "
@@ -114,7 +116,7 @@ def main() -> int:
         value_bits=args.kv_value_bits, group_size=args.kv_group_size,
         key_axis=args.kv_key_axis, value_axis=args.kv_value_axis,
         pre_bias=args.pre_bias, clip_ratio=args.kv_clip, key_noise=args.kv_key_noise,
-        skip_layers=tuple(args.kv_skip_layers),
+        skip_layers=tuple(args.kv_skip_layers), key_noise_mode=args.kv_key_noise_mode,
         value_group_size=args.kv_value_group_size, key_mean=args.key_mean,
     )
     print(f"prefix cache at {args.kv_bits} bits, group {args.kv_group_size}, "
@@ -159,6 +161,7 @@ def main() -> int:
                     "kv_clip": args.kv_clip, "use_block_cache": args.use_block_cache,
                     "kv_key_noise": args.kv_key_noise,
                     "kv_skip_layers": list(args.kv_skip_layers),
+                    "kv_key_noise_mode": args.kv_key_noise_mode,
                     "kv_value_group_size": args.kv_value_group_size or args.kv_group_size,
                     "prefix_writes": stats.writes, "prefix_entries": stats.entries,
                 },
