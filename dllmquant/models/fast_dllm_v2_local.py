@@ -55,11 +55,13 @@ class FDv2CacheStats:
     key_axis: str = ""
     value_axis: str = ""
     pre_bias: bool = False
+    skipped: int = 0
 
     def describe(self) -> str:
         bias = ", K stored before the k_proj bias" if self.pre_bias else ""
+        kept = f", {self.skipped} writes kept exact" if self.skipped else ""
         return (f"prefix cache: {self.writes} writes, {self.entries} entries stored, "
-                f"K along {self.key_axis}, V along {self.value_axis}{bias}")
+                f"K along {self.key_axis}, V along {self.value_axis}{bias}{kept}")
 
 
 def make_quantized_cache_class(
@@ -78,6 +80,7 @@ def make_quantized_cache_class(
     rotation=None,
     key_mean: bool = False,
     key_noise: float = 0.0,
+    skip_layers: frozenset = frozenset(),
 ):
     """A ``DynamicCache`` subclass that rounds what it stores.
 
@@ -88,6 +91,14 @@ def make_quantized_cache_class(
 
     class QuantizedPrefixCache(base):
         def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+            if layer_idx in skip_layers:
+                # Kept in full precision. The per-layer profile of the attention
+                # movement says the rotation's damage is two layers out of 28 --
+                # the first and the last, at KL 3.2 and 5.6 where the other 26
+                # sit at 0.02 -- so whether those two carry the whole collapse is
+                # a question about them, not about the width.
+                stats.skipped += 1
+                return super().update(key_states, value_states, layer_idx, cache_kwargs)
             k = key_states.float()
             b_rot = None
             if key_biases is not None:
@@ -157,6 +168,7 @@ def install_quantized_cache(
     value_group_size: int = 0,
     key_mean: bool = False,
     key_noise: float = 0.0,
+    skip_layers: "tuple | None" = None,
 ) -> Tuple[Callable[[], None], FDv2CacheStats]:
     """Replace the cache class the vendored model constructs. Returns (remove, stats).
 
@@ -214,6 +226,7 @@ def install_quantized_cache(
         rotation=current_rotation,
         key_mean=key_mean,
         key_noise=key_noise,
+        skip_layers=frozenset(skip_layers or ()),
     )
 
     def remove() -> None:

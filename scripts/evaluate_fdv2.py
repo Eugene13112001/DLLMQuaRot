@@ -60,6 +60,12 @@ def main() -> int:
                     help="channels per V scale (0 = --kv-group-size). BitSieve uses 32: one "
                          "scale per token per 32 channels, where this project's default is "
                          "the whole 128-channel head")
+    ap.add_argument("--kv-skip-layers", type=int, nargs="*", default=(),
+                    help="layers whose cache stays in full precision. The per-layer profile "
+                         "of the attention movement puts the rotation's damage in two layers "
+                         "of 28, the first and the last (KL 3.2 and 5.6 against 0.02 in the "
+                         "other 26), so this asks whether those two carry the collapse. Two "
+                         "layers of 28 is 7% of the cache, and the cost has to be stated")
     ap.add_argument("--kv-key-noise", type=float, default=0.0,
                     help="structureless control for thesis 4: Gaussian noise on the stored keys, in units of the RMS of what is written, per head. At --kv-bits 16 it is the only error the cache carries, so a dose matched on the centered logit error asks whether a model dies of the size of the error or of its shape")
     ap.add_argument("--kv-clip", type=float, default=0.95,
@@ -108,6 +114,7 @@ def main() -> int:
         value_bits=args.kv_value_bits, group_size=args.kv_group_size,
         key_axis=args.kv_key_axis, value_axis=args.kv_value_axis,
         pre_bias=args.pre_bias, clip_ratio=args.kv_clip, key_noise=args.kv_key_noise,
+        skip_layers=tuple(args.kv_skip_layers),
         value_group_size=args.kv_value_group_size, key_mean=args.key_mean,
     )
     print(f"prefix cache at {args.kv_bits} bits, group {args.kv_group_size}, "
@@ -151,6 +158,7 @@ def main() -> int:
                     "key_mean": args.key_mean,
                     "kv_clip": args.kv_clip, "use_block_cache": args.use_block_cache,
                     "kv_key_noise": args.kv_key_noise,
+                    "kv_skip_layers": list(args.kv_skip_layers),
                     "kv_value_group_size": args.kv_value_group_size or args.kv_group_size,
                     "prefix_writes": stats.writes, "prefix_entries": stats.entries,
                 },

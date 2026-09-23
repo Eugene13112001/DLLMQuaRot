@@ -92,3 +92,40 @@ def test_entries_accumulate_across_writes():
         cache.update(k, v, 0)
     assert stats.writes == 3 and stats.entries == 24
     assert "K along token" in stats.describe()
+
+
+def test_named_layers_are_stored_exactly():
+    """The per-layer movement profile puts the rotation's damage in two layers of 28.
+
+    Whether those two carry the whole collapse is a question about them, so the cache
+    has to be able to leave them alone -- exactly, and without touching the others.
+    """
+    stats = FDv2CacheStats(key_axis="token", value_axis="channel")
+    cls = make_quantized_cache_class(
+        FakeCache, key_bits=2, value_bits=2, group_size=128,
+        key_axis="token", value_axis="channel", stats=stats,
+        skip_layers=frozenset({0, 27}))
+    cache = cls()
+    k, v = kv()
+    for layer in (0, 1, 27):
+        ok, ov = cache.update(k, v, layer)
+        if layer in (0, 27):
+            assert torch.equal(ok, k) and torch.equal(ov, v)
+        else:
+            assert not torch.equal(ok, k)
+    assert stats.skipped == 2 and stats.writes == 1
+    assert "2 writes kept exact" in stats.describe()
+
+
+def test_a_skipped_layer_is_exact_even_with_noise_on():
+    stats = FDv2CacheStats(key_axis="token", value_axis="channel")
+    cls = make_quantized_cache_class(
+        FakeCache, key_bits=16, value_bits=16, group_size=128,
+        key_axis="token", value_axis="channel", stats=stats,
+        key_noise=0.1, skip_layers=frozenset({5}))
+    cache = cls()
+    k, v = kv()
+    ok, _ = cache.update(k, v, 5)
+    assert torch.equal(ok, k)
+    ok, _ = cache.update(k, v, 6)
+    assert not torch.equal(ok, k)
