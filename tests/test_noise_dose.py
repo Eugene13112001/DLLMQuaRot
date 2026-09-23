@@ -52,3 +52,25 @@ def test_the_fit_is_pulled_by_a_sweep_that_saturates():
     c = fit(points)
     worst = max(abs(p["err"] - c * p["sigma"]) / p["err"] for p in points)
     assert worst > 0.1
+
+
+def test_interpolation_beats_the_fit_where_the_form_breaks():
+    """Fast-dLLM-v2's sweep: the local exponent falls from 1.9 to 1.5 over it.
+
+    A quadratic through the origin is then off by a third on the dose, which is
+    the difference between landing on and past the cliff.
+    """
+    from noise_dose import interpolate
+    points = [{"sigma": 0.02, "kl": 0.06123}, {"sigma": 0.05, "kl": 0.34727},
+              {"sigma": 0.10, "kl": 0.96693}, {"sigma": 0.20, "kl": 2.46863}]
+    d, e = interpolate(points, 0.47)
+    assert d == pytest.approx(0.0614, rel=0.01)
+    assert 1.4 < e < 1.6
+    quadratic = (0.47 / fit(points, "kl", 2)) ** 0.5
+    assert quadratic > 1.3 * d
+
+
+def test_a_target_outside_the_sweep_is_not_extrapolated():
+    from noise_dose import interpolate
+    points = [{"sigma": 0.02, "kl": 0.01}, {"sigma": 0.05, "kl": 0.06}]
+    assert interpolate(points, 0.5) == (None, None)

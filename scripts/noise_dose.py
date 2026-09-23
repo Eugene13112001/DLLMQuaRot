@@ -52,6 +52,27 @@ def fit(points: List[Dict], key: str = "err", power: int = 1) -> float:
     return sum(x * y for x, y in zip(xs, ys)) / den if den else 0.0
 
 
+def interpolate(points: List[Dict], target: float, key: str = "kl"):
+    """The dose between the two measured doses that bracket ``target``.
+
+    The quadratic form holds only while the movement is small: on Fast-dLLM-v2 the
+    local exponent falls from 1.9 to 1.5 over the sweep, because KL cannot keep
+    growing once attention is destroyed, and a fit through the origin then misses
+    the dose by half. Between two neighbouring doses a power law is enough, and it
+    uses only measured points.
+
+    Returns (sigma, local exponent), or (None, None) when the target is outside
+    the sweep -- which is a reason to widen the sweep, not to extrapolate.
+    """
+    import math
+
+    for a, b in zip(points, points[1:]):
+        if a[key] <= target <= b[key]:
+            e = math.log(b[key] / a[key]) / math.log(b["sigma"] / a["sigma"])
+            return a["sigma"] * (target / a[key]) ** (1 / e), e
+    return None, None
+
+
 def residual(points: List[Dict], c: float, key: str, power: int) -> float:
     return max(abs(p[key] - c * p["sigma"] ** power) / max(p[key], 1e-9) for p in points)
 
@@ -102,15 +123,16 @@ def main() -> int:
         wkl = residual(points, a, "kl", 2)
         print(f"  KL  = {a:.2f} * sigma^2, worst residual {100 * wkl:.0f}%"
               + ("" if wkl < 0.15 else "  <- read the table instead"))
-        top = max(p["sigma"] for p in points)
         for t in args.target_kl:
-            d = (t / a) ** 0.5
-            far = d / top
-            note = ""
-            if far > 1.5:
-                note = (f"  <- {far:.1f}x beyond the largest dose measured; KL flattens as "
-                        "attention is destroyed, so this is a floor on the dose, not the dose")
-            print(f"  dose for movement KL {t}: sigma = {d:.4f}{note}")
+            d, e = interpolate(points, t)
+            if d is None:
+                q = (t / a) ** 0.5
+                print(f"  dose for movement KL {t}: sigma = {q:.4f} from the fit -- "
+                      "outside the sweep, so widen it rather than trust this")
+                continue
+            print(f"  dose for movement KL {t}: sigma = {d:.4f} "
+                  f"(between measured doses, local exponent {e:.2f}"
+                  + (f"; the fit would say {(t / a) ** 0.5:.4f})" if wkl >= 0.15 else ")"))
     return 0
 
 
