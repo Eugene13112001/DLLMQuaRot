@@ -91,3 +91,15 @@ def test_movement_is_not_a_function_of_the_error():
     assert abs(edev_f2 - edev_p) < 0.05 * edev_p
     assert eff_p < eff_f
     assert kl_p > 1.5 * kl_f
+
+
+def test_a_ratio_against_an_exact_tensor_is_a_dash_not_a_crash():
+    """16 bits plus --key-noise leaves V exact, and the axis ratio is then 0/0.
+
+    The calibration sweep for thesis 4 runs exactly there, and it died on this
+    division after the model was loaded and the tensors were measured.
+    """
+    from check_key_error import ratio
+    assert ratio(0.5, 0.25).strip() == "2.00x"
+    assert ratio(0.0, 0.0).strip() == "--"
+    assert ratio(0.5, 0.0).strip() == "--"

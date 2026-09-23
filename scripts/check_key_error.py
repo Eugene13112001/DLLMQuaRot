@@ -223,6 +223,16 @@ def _bias_of(block) -> "list | None":
     return None if bias is None else [float(x) for x in bias.detach().float().cpu()]
 
 
+def ratio(a: float, b: float, width: int = 13) -> str:
+    """a / b, or a dash when b is zero.
+
+    A run with the quantizer switched off -- 16 bits, where only --key-noise
+    writes anything -- leaves V exact, and the axis ratio of an exact tensor is
+    0/0. That is a table cell, not a reason to lose the run.
+    """
+    return f"{a / b:>{width}.2f}x" if b else f"{'--':>{width + 1}}"
+
+
 def crest(x: torch.Tensor) -> float:
     """Peak over RMS, per head, averaged. How outlier-ridden the tensor is."""
     flat = x.reshape(x.shape[1], -1).float()
@@ -540,7 +550,7 @@ def main() -> int:
                 t = mean((side, bits, "token", g))
                 c = mean((side, bits, "channel", g))
                 print(f"{side:>5} {bits:>5} {g:>6} {t:>14.3e} {c:>15.3e} "
-                      f"{c / t:>13.2f}x")
+                      + ratio(c, t))
 
     if rot is not None:
         print()
@@ -557,7 +567,7 @@ def main() -> int:
                     tokr = mean((side, bits, "channel+rot", g))
                     chr_ = mean((side, bits, "token+rot", g))
                     print(f"{side:>5} {bits:>5} {g:>6} {ch:>10.3e} {tok:>10.3e} "
-                          f"{tokr:>10.3e} {chr_:>10.3e} {tokr / ch:>11.2f}x")
+                          f"{tokr:>10.3e} {chr_:>10.3e}" + ratio(tokr, ch, 11))
         print("  tok+R4 / ch above one: the per-channel scale beats QuaRot's "
               "rotate-then-group-per-token on this tensor.")
 
@@ -572,9 +582,9 @@ def main() -> int:
             for g in args.group_size:
                 vals = {a: mean(("L", bits, a, g)) for a in cols}
                 line = f"{bits:>5} {g:>6} " + " ".join(f"{vals[a]:>13.3e}" for a in cols)
-                line += f" {vals['channel'] / vals['token']:>7.2f}x"
+                line += " " + ratio(vals['channel'], vals['token'], 7)
                 if rot is not None:
-                    line += f" {vals['channel+rot'] / vals['token']:>9.2f}x"
+                    line += " " + ratio(vals['channel+rot'], vals['token'], 9)
                 print(line)
         print()
         print("=== what softmax sees: KL, top-1 flips, effective keys attended ===")
