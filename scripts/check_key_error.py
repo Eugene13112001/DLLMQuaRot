@@ -164,6 +164,66 @@ def attn_divergence(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
             float((eff * live).sum() / n), float(edev))
 
 
+def sink_and_jensen(q: torch.Tensor, k: torch.Tensor, allowed, scale: float,
+                    sink: int = 4) -> tuple:
+    """The two numbers our own explanations are attacked with.
+
+    1. Attention sinks. KVTuner reports that heads with *sparse* attention are the
+       more robust to cache quantization, which is the opposite sign to ours --
+       concentrated attention being the more fragile. The reconciliation on offer is
+       that their sparsity is the sink: the first few positions hold nearly all the
+       mass, and perturbing such a distribution is harmless because the order of the
+       keys does not change. If our low effective-key count is the same sink, our
+       explanation collapses. So this returns the mass the first ``sink`` allowed
+       positions carry, and the effective key count recomputed with those positions
+       dropped and the rest renormalised.
+
+    2. Jensen's term. Adding zero-mean noise to the stored keys multiplies each
+       noised key's softmax weight by exp(Var/2) of its logit noise, because exp is
+       convex. A factor common to every key cancels in the softmax -- but ours is not
+       common: the prefix is quantized while the current block's keys are recomputed
+       clean, so the prefix is systematically inflated against the block. This
+       returns the term per unit of noise variance, ||q||^2 * rms(k)^2 / (2 d), so
+       the term at a given sigma is sigma^2 times it, comparable against the spread
+       of the logits.
+    """
+    rep_ = q.shape[1] // k.shape[1]
+    if rep_ > 1:
+        k = k.repeat_interleave(rep_, dim=1)
+    true = (q @ k.transpose(-1, -2)) * scale
+    w = torch.ones_like(true) if allowed is None else allowed.expand_as(true).clone()
+    live = w.sum(dim=-1) > 0
+    n = live.sum().clamp_min(1)
+    neg = torch.finfo(true.dtype).min
+    logp = torch.log_softmax(true.masked_fill(w == 0, neg), dim=-1)
+    p = logp.exp()
+
+    # the first `sink` allowed positions, per query
+    idx = torch.arange(w.shape[-1], device=w.device).expand_as(w)
+    rank = (w > 0).cumsum(dim=-1) - 1          # 0 for the first allowed key, ...
+    is_sink = (w > 0) & (rank < sink)
+    sink_mass = (p * is_sink).sum(dim=-1)
+
+    # The rest is a fresh softmax over the remaining logits, not a renormalisation of
+    # p: once the sink holds essentially all the mass the other entries underflow, and
+    # dividing them by their own vanishing sum returns noise.
+    rest = (w > 0) & (~is_sink)
+    logpr = torch.log_softmax(true.masked_fill(~rest, neg), dim=-1)
+    pr = logpr.exp() * rest
+    eff_nosink = (-(pr * torch.where(rest, logpr, torch.zeros_like(logpr))).sum(dim=-1)).exp()
+
+    ctr = _center_rows(true, allowed)
+    cnt = w.sum().clamp_min(1)
+    spread = ((ctr ** 2).sum() / cnt).sqrt()
+    d = k.shape[-1]
+    rms2 = k.float().pow(2).mean()
+    qn2 = q.float().pow(2).sum(dim=-1)          # ||q||^2 per query
+    jensen_unit = (qn2 * live).sum() / n * rms2 / (2 * d)
+    del idx
+    return (float((sink_mass * live).sum() / n), float((eff_nosink * live).sum() / n),
+            float(jensen_unit), float(spread))
+
+
 def qk_geometry(q: torch.Tensor, k: torch.Tensor, allowed) -> tuple:
     """Two numbers about how the logits are built, over the allowed positions.
 
@@ -310,6 +370,9 @@ def main() -> int:
                          "head. With --bits 16 nothing is quantized, so the run reports "
                          "what a structureless error of that size does to the logits -- "
                          "the calibration for the matched-dose control of thesis 4")
+    ap.add_argument("--sink-keys", type=int, default=4,
+                    help="how many of the first allowed positions count as the attention "
+                         "sink when recomputing the effective key count without it")
     ap.add_argument("--key-noise-mode", default="iid", choices=["iid", "shared"],
                     help="'iid' draws the noise per entry, 'shared' once per write and adds it to every position -- the correlation a bias has exactly and a per-channel scale largely. The matched-movement runs left open why the quantizer's error is gentler than random error of the same size; this is the knob that asks whether it is that")
     ap.add_argument("--key-mean", action="store_true",
@@ -394,6 +457,10 @@ def main() -> int:
             key_biases[li] = bias.detach().float()
 
     crests: List[float] = []
+    sink_mass: List[float] = []
+    eff_nosink: List[float] = []
+    jensen_unit: List[float] = []
+    spreads: List[float] = []
     vcrests: List[float] = []
     qk_cos: List[float] = []
     qk_iso: List[float] = []
@@ -467,6 +534,14 @@ def main() -> int:
                 # How much of the stored key the bias is: an additive term matters in
                 # proportion to what it is added to, which the bias alone cannot say.
                 bias_share.append(float(b_rot.float().norm() / k.norm().clamp_min(1e-12)))
+            if qs is not None:
+                sm, en, ju, sp = sink_and_jensen(qs, k, allowed,
+                                                 1.0 / math.sqrt(k.shape[-1]),
+                                                 args.sink_keys)
+                sink_mass.append(sm)
+                eff_nosink.append(en)
+                jensen_unit.append(ju)
+                spreads.append(sp)
             crests.append(crest(k_store))
             vcrests.append(crest(v))
             rotated = {}
@@ -613,6 +688,28 @@ def main() -> int:
               "axis names are the grouping direction). Compare these rows across "
               "--migrate-qk runs: the denominator is the same model.")
 
+    if sink_mass:
+        sm = sum(sink_mass) / len(sink_mass)
+        en = sum(eff_nosink) / len(eff_nosink)
+        ju = sum(jensen_unit) / len(jensen_unit)
+        sp = sum(spreads) / len(spreads)
+        print()
+        print("=== the two objections, measured ===")
+        print(f"  mass on the first {args.sink_keys} allowed keys: {sm:.3f}")
+        print(f"  effective keys, sink dropped and the rest renormalised: {en:.1f}")
+        print("  If the effective count without the sink is close to the count with it,")
+        print("  the concentration is not the sink and KVTuner's opposite sign is about")
+        print("  a different quantity. If it jumps, our explanation is the sink's.")
+        print(f"  Jensen term per unit variance: {ju:.4f}; logit spread: {sp:.3f}")
+        for sig in (0.0393, 0.0614, 0.1323, 0.1961):
+            print(f"    sigma {sig:.4f} -> term {sig * sig * ju:.4f} "
+                  f"= {100 * sig * sig * ju / max(sp, 1e-9):.1f}% of the spread")
+        print("  The term is a per-key inflation of the noised keys' logits. It cancels")
+        print("  where every key carries it; ours does not, since the current block is")
+        print("  recomputed clean. Above a few percent of the spread it is a rival")
+        print("  explanation for noise being worse than the quantizer, and it is")
+        print("  subtractable in closed form.")
+
     print()
     print(f"  crest factor, peak over RMS per head: "
           f"K {sum(crests) / len(crests):.2f}, V {sum(vcrests) / len(vcrests):.2f}")
@@ -660,6 +757,10 @@ def main() -> int:
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)
                        for (side, bits, axis, g), v in acc.items()},
             "crest": {"K": grid(crests), "V": grid(vcrests)},
+            "sink_mass": grid(sink_mass) if sink_mass else None,
+            "eff_nosink": grid(eff_nosink) if eff_nosink else None,
+            "jensen_unit": grid(jensen_unit) if jensen_unit else None,
+            "logit_spread": grid(spreads) if spreads else None,
             "qk_cos": grid(qk_cos) if qk_cos else None,
             "qk_iso": grid(qk_iso) if qk_iso else None,
             "bias_share": grid(bias_share) if bias_share else None,
