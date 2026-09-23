@@ -1,14 +1,20 @@
-"""Pick the noise dose that matches a given centered logit error, per model.
+"""Pick the noise dose that matches a given error or a given attention movement.
 
-The control for thesis 4 only means something if the dose is matched: LLaDA2.0-mini and
-Fast-dLLM-v2 carry the same centered error at four bits per token (0.351 and 0.346) and
-score 91.5 and 0.0, so the structureless error has to be brought to that same number on
-each model before their answers can be compared. Isotropic noise of relative size sigma
-produces a logit error proportional to sigma -- the isotropic-noise factor is the constant
--- so a one-parameter fit through the origin over the sweep gives the dose directly, and
-the residuals say whether the proportionality held.
+The control for thesis 4 only means something if the dose is matched, and the tensor run
+says on what. The two models carry the same centered logit error at four bits per token
+(0.351 and 0.346) and score 91.5 and 0.0, but they do not carry the same *movement*:
+Fast-dLLM-v2's attention travels twice as far for that error (KL 0.470 against 0.222),
+because its attention is the most peaked of the three. That is one of the two factors, and
+it is already measured. What is left is whether, at equal movement, the two models still
+differ -- at KL 0.8 LLaDA2.0-mini keeps 59.5 while Fast-dLLM-v2 is at 0.5 with half that.
+So the dose worth spending a run on is the one matched on KL, and matching on the error
+instead would re-ask the question the tensor already answered.
 
-    python scripts/noise_dose.py out/kn_*.json --target 0.35
+Isotropic noise of relative size sigma gives a logit error proportional to sigma, and a KL
+that grows with its square, so both are one-parameter fits through the origin; the
+residuals say whether the form held over the sweep.
+
+    python scripts/noise_dose.py out/kn_*.json --target-kl 0.47 0.22
 """
 
 from __future__ import annotations
@@ -38,11 +44,16 @@ def read(path: str) -> Dict:
     return out
 
 
-def fit(points: List[Dict]) -> float:
-    """Least squares through the origin: err = c * sigma."""
-    num = sum(p["sigma"] * p["err"] for p in points)
-    den = sum(p["sigma"] ** 2 for p in points)
-    return num / den if den else 0.0
+def fit(points: List[Dict], key: str = "err", power: int = 1) -> float:
+    """Least squares through the origin: ``key`` = c * sigma**power."""
+    xs = [p["sigma"] ** power for p in points]
+    ys = [p[key] for p in points]
+    den = sum(x * x for x in xs)
+    return sum(x * y for x, y in zip(xs, ys)) / den if den else 0.0
+
+
+def residual(points: List[Dict], c: float, key: str, power: int) -> float:
+    return max(abs(p[key] - c * p["sigma"] ** power) / max(p[key], 1e-9) for p in points)
 
 
 def main() -> int:
@@ -51,6 +62,10 @@ def main() -> int:
     ap.add_argument("dumps", nargs="+")
     ap.add_argument("--target", type=float, default=0.35,
                     help="centered logit error to match (the four-bit per-token cell)")
+    ap.add_argument("--target-kl", type=float, nargs="*", default=(0.47, 0.22),
+                    help="attention movements to match, in KL. The defaults are the two "
+                         "levels the four-bit per-token cells sit at: the one that kills "
+                         "Fast-dLLM-v2 and the one LLaDA2.0-mini carries unharmed")
     args = ap.parse_args()
 
     runs = [read(p) for p in args.dumps]
@@ -71,10 +86,21 @@ def main() -> int:
         if c <= 0:
             print("  no slope: the sweep carries no error, check the dumps")
             continue
-        worst = max(abs(p["err"] - c * p["sigma"]) / max(p["err"], 1e-9) for p in points)
+        worst = residual(points, c, "err", 1)
         print(f"  err = {c:.2f} * sigma, worst residual {100 * worst:.0f}%"
               + ("" if worst < 0.1 else "  <- not proportional, read the table instead"))
         print(f"  dose for centered error {args.target}: sigma = {args.target / c:.4f}")
+        if any(p["kl"] is None for p in points):
+            print("  no KL in these dumps: re-take them with a build that records it")
+            continue
+        a = fit(points, "kl", 2)
+        if a <= 0:
+            continue
+        wkl = residual(points, a, "kl", 2)
+        print(f"  KL  = {a:.2f} * sigma^2, worst residual {100 * wkl:.0f}%"
+              + ("" if wkl < 0.15 else "  <- read the table instead"))
+        for t in args.target_kl:
+            print(f"  dose for movement KL {t}: sigma = {(t / a) ** 0.5:.4f}")
     return 0
 
 
