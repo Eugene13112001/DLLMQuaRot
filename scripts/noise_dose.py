@@ -82,6 +82,9 @@ def main() -> int:
             fl = f"{p['flip']:>8.3f}" if p["flip"] is not None else f"{'--':>8}"
             ef = f"{p['eff']:>8.1f}" if p["eff"] is not None else f"{'--':>8}"
             print(f"  {p['sigma']:>7.3f}{p['err']:>14.3f}{kl}{fl}{ef}")
+        if len(points) < 3:
+            print(f"  only {len(points)} dose(s): a fit through the origin cannot be "
+                  "checked here, and the residuals below mean nothing")
         c = fit(points)
         if c <= 0:
             print("  no slope: the sweep carries no error, check the dumps")
@@ -99,8 +102,15 @@ def main() -> int:
         wkl = residual(points, a, "kl", 2)
         print(f"  KL  = {a:.2f} * sigma^2, worst residual {100 * wkl:.0f}%"
               + ("" if wkl < 0.15 else "  <- read the table instead"))
+        top = max(p["sigma"] for p in points)
         for t in args.target_kl:
-            print(f"  dose for movement KL {t}: sigma = {(t / a) ** 0.5:.4f}")
+            d = (t / a) ** 0.5
+            far = d / top
+            note = ""
+            if far > 1.5:
+                note = (f"  <- {far:.1f}x beyond the largest dose measured; KL flattens as "
+                        "attention is destroyed, so this is a floor on the dose, not the dose")
+            print(f"  dose for movement KL {t}: sigma = {d:.4f}{note}")
     return 0
 
 
