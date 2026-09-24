@@ -200,7 +200,7 @@ def sink_and_jensen(q: torch.Tensor, k: torch.Tensor, allowed, scale: float,
 
     # the first `sink` allowed positions, per query
     idx = torch.arange(w.shape[-1], device=w.device).expand_as(w)
-    rank = (w > 0).cumsum(dim=-1) - 1          # 0 for the first allowed key, ...
+    rank = (w > 0).to(torch.int64).cumsum(dim=-1) - 1   # 0 for the first allowed key
     is_sink = (w > 0) & (rank < sink)
     sink_mass = (p * is_sink).sum(dim=-1)
 
@@ -534,14 +534,6 @@ def main() -> int:
                 # How much of the stored key the bias is: an additive term matters in
                 # proportion to what it is added to, which the bias alone cannot say.
                 bias_share.append(float(b_rot.float().norm() / k.norm().clamp_min(1e-12)))
-            if qs is not None:
-                sm, en, ju, sp = sink_and_jensen(qs, k, allowed,
-                                                 1.0 / math.sqrt(k.shape[-1]),
-                                                 args.sink_keys)
-                sink_mass.append(sm)
-                eff_nosink.append(en)
-                jensen_unit.append(ju)
-                spreads.append(sp)
             crests.append(crest(k_store))
             vcrests.append(crest(v))
             rotated = {}
@@ -560,6 +552,15 @@ def main() -> int:
                 c, iso = qk_geometry(qs, k, allowed)
                 qk_cos.append(c)
                 qk_iso.append(iso)
+                # after `allowed` exists: the mask is built a few lines above, and
+                # calling this before it is what made the first run die.
+                sm, en, ju, sp = sink_and_jensen(qs, k, allowed,
+                                                 1.0 / math.sqrt(k.shape[-1]),
+                                                 args.sink_keys)
+                sink_mass.append(sm)
+                eff_nosink.append(en)
+                jensen_unit.append(ju)
+                spreads.append(sp)
                 if li in loud_masks:
                     loud = loud_masks[li].to(k.device)
             parts = {}
