@@ -109,3 +109,42 @@ def test_a_bad_mode_is_refused():
         add_key_noise(torch.zeros(1, 2, 4, 4), torch.zeros(1, 2, 4, 4), 0.1, "gaussian")
     with pytest.raises(ValueError, match="key_noise_mode"):
         KVCacheConfig(enabled=True, key_noise=0.1, key_noise_mode="gaussian")
+
+
+def test_prefix_only_noise_moves_mass_and_the_closed_form_overstates_it():
+    """The mechanism, and the reason we measure it instead of computing it.
+
+    Independent noise on part of a row inflates that part's mass, because exp is
+    convex. It does not raise the KL -- fewer keys perturbed means fewer random
+    kicks -- so the KL is the wrong place to look. And the closed form exp(Var/2)
+    assumes the perturbed group self-averages; with concentrated attention a handful
+    of keys carry the sum and the realised shift is far smaller. Both halves are
+    pinned here: mass does move toward the noised prefix, and the closed form
+    overstates how much by several times.
+    """
+    import math
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_key_error import sink_and_jensen, tail_mass_shift
+
+    torch.manual_seed(0)
+    d, t, tail, scale = 16, 64, 8, 3.5
+    q = torch.randn(1, 4, t, d, dtype=torch.float64) * scale
+    k = torch.randn(1, 2, t, d, dtype=torch.float64) * scale
+    sc = 1.0 / math.sqrt(d)
+    _, _, ju, sp, _ = sink_and_jensen(q, k, None, sc, sink=4, tail=tail)
+    sigma = 0.25
+    term = sigma * sigma * ju
+    assert term / sp > 0.2                       # the regime the real model sits in
+
+    torch.manual_seed(7)
+    err = add_key_noise(torch.zeros_like(k), k, sigma, "iid")
+    err[..., -tail:, :] = 0.0                    # the current block stays clean
+    mt, mh = tail_mass_shift(q, err, k, None, sc, tail)
+    realised = mt - mh                           # mass that left the clean block
+    assert realised > 0                          # it moved toward the noised prefix
+
+    pre = 1.0 - mt
+    predicted = pre * math.exp(term) / (pre * math.exp(term) + mt) - pre
+    assert predicted > 3 * realised              # and the closed form overstates it

@@ -164,8 +164,39 @@ def attn_divergence(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
             float((eff * live).sum() / n), float(edev))
 
 
+def tail_mass_shift(q: torch.Tensor, err: torch.Tensor, k: torch.Tensor,
+                    allowed, scale: float, tail: int) -> tuple:
+    """Attention mass on the last ``tail`` positions, before and after the error.
+
+    The closed form for Jensen's inflation, exp(Var/2), assumes the perturbed group
+    self-averages: many keys contributing, each drawing its own noise, so their sum
+    tends to the expectation. Concentrated attention breaks that -- a handful of
+    keys carry the sum, and for a handful the realised inflation is a draw, not its
+    mean. On a toy in the real model's regime the closed form said the prefix gains
+    13 points of mass and the realised shift was 1.4. So the term is an upper bound
+    and this is the measurement: what actually moved.
+    """
+    rep_ = q.shape[1] // err.shape[1]
+    if rep_ > 1:
+        err = err.repeat_interleave(rep_, dim=1)
+        k = k.repeat_interleave(rep_, dim=1)
+    true = (q @ k.transpose(-1, -2)) * scale
+    hat = true + (q @ err.transpose(-1, -2)) * scale
+    w = torch.ones_like(true) if allowed is None else allowed.expand_as(true)
+    live = w.sum(dim=-1) > 0
+    n = live.sum().clamp_min(1)
+    neg = torch.finfo(true.dtype).min
+    idx = torch.arange(w.shape[-1], device=w.device).expand_as(w)
+    is_tail = ((w > 0) & (idx >= w.shape[-1] - tail)).to(true.dtype)
+    pt = torch.softmax(true.masked_fill(w == 0, neg), dim=-1)
+    ph = torch.softmax(hat.masked_fill(w == 0, neg), dim=-1)
+    mt = ((pt * is_tail).sum(dim=-1) * live).sum() / n
+    mh = ((ph * is_tail).sum(dim=-1) * live).sum() / n
+    return float(mt), float(mh)
+
+
 def sink_and_jensen(q: torch.Tensor, k: torch.Tensor, allowed, scale: float,
-                    sink: int = 4) -> tuple:
+                    sink: int = 4, tail: int = 32) -> tuple:
     """The two numbers our own explanations are attacked with.
 
     1. Attention sinks. KVTuner reports that heads with *sparse* attention are the
@@ -186,6 +217,14 @@ def sink_and_jensen(q: torch.Tensor, k: torch.Tensor, allowed, scale: float,
        returns the term per unit of noise variance, ||q||^2 * rms(k)^2 / (2 d), so
        the term at a given sigma is sigma^2 times it, comparable against the spread
        of the logits.
+
+       The term alone does not say how much harm it does. It inflates the whole
+       noised group's mass by exp(term), and what that moves depends on how much
+       mass the *clean* group holds: if the current block holds little, an inflated
+       prefix has nowhere to grow. So the last returned value is the mass on the
+       final ``tail`` positions -- the block generation recomputes clean -- and the
+       shift it predicts is
+       ``m' = (1-m) e^term / ((1-m) e^term + m)`` against ``1-m``.
     """
     rep_ = q.shape[1] // k.shape[1]
     if rep_ > 1:
@@ -219,9 +258,10 @@ def sink_and_jensen(q: torch.Tensor, k: torch.Tensor, allowed, scale: float,
     rms2 = k.float().pow(2).mean()
     qn2 = q.float().pow(2).sum(dim=-1)          # ||q||^2 per query
     jensen_unit = (qn2 * live).sum() / n * rms2 / (2 * d)
-    del idx
+    is_tail = (w > 0) & (idx >= w.shape[-1] - tail)
+    tail_mass = (p * is_tail).sum(dim=-1)
     return (float((sink_mass * live).sum() / n), float((eff_nosink * live).sum() / n),
-            float(jensen_unit), float(spread))
+            float(jensen_unit), float(spread), float((tail_mass * live).sum() / n))
 
 
 def qk_geometry(q: torch.Tensor, k: torch.Tensor, allowed) -> tuple:
@@ -370,6 +410,17 @@ def main() -> int:
                          "head. With --bits 16 nothing is quantized, so the run reports "
                          "what a structureless error of that size does to the logits -- "
                          "the calibration for the matched-dose control of thesis 4")
+    ap.add_argument("--block-tail", type=int, default=32, metavar="N",
+                    help="positions at the end of the canvas that stand for the block "
+                         "generation recomputes clean; their attention mass is what "
+                         "decides how much the exp(Var/2) inflation of the prefix can "
+                         "actually move")
+    ap.add_argument("--noise-prefix-only", type=int, default=0, metavar="N",
+                    help="leave the last N positions free of --key-noise, the way "
+                         "generation leaves the current block clean while the prefix "
+                         "carries the store's error. 0 noises every position, which "
+                         "cancels the exp(Var/2) inflation and doses on the random part "
+                         "alone; set it to the block size to calibrate honestly")
     ap.add_argument("--sink-keys", type=int, default=4,
                     help="how many of the first allowed positions count as the attention "
                          "sink when recomputing the effective key count without it")
@@ -461,6 +512,7 @@ def main() -> int:
     eff_nosink: List[float] = []
     jensen_unit: List[float] = []
     spreads: List[float] = []
+    tail_mass: List[float] = []
     vcrests: List[float] = []
     qk_cos: List[float] = []
     qk_iso: List[float] = []
@@ -554,13 +606,14 @@ def main() -> int:
                 qk_iso.append(iso)
                 # after `allowed` exists: the mask is built a few lines above, and
                 # calling this before it is what made the first run die.
-                sm, en, ju, sp = sink_and_jensen(qs, k, allowed,
-                                                 1.0 / math.sqrt(k.shape[-1]),
-                                                 args.sink_keys)
+                sm, en, ju, sp, tm = sink_and_jensen(
+                    qs, k, allowed, 1.0 / math.sqrt(k.shape[-1]),
+                    args.sink_keys, args.block_tail)
                 sink_mass.append(sm)
                 eff_nosink.append(en)
                 jensen_unit.append(ju)
                 spreads.append(sp)
+                tail_mass.append(tm)
                 if li in loud_masks:
                     loud = loud_masks[li].to(k.device)
             parts = {}
@@ -582,8 +635,23 @@ def main() -> int:
                                 # bits this is the only error, so the sweep reads
                                 # off which dose of structureless noise matches a
                                 # given quantizer's centered logit error.
-                                q = add_key_noise(q, t, args.key_noise,
-                                                  args.key_noise_mode)
+                                noised = add_key_noise(q, t, args.key_noise,
+                                                       args.key_noise_mode)
+                                if args.noise_prefix_only > 0 and args.key_noise > 0:
+                                    # Match what generation does. Inside a block the
+                                    # prefix is read from the store, carrying the
+                                    # noise, while the current block's keys are
+                                    # recomputed clean and concatenated (vendored
+                                    # modeling.py, the branch that cats instead of
+                                    # calling update). With every key noised the
+                                    # exp(Var/2) inflation is a factor common to the
+                                    # row and cancels in the softmax; with only the
+                                    # prefix noised it does not, and the calibration
+                                    # has to see that or it doses on the random part
+                                    # alone.
+                                    tail = args.noise_prefix_only
+                                    noised[..., -tail:, :] = q[..., -tail:, :]
+                                q = noised
                             acc.setdefault((side, bits, axis, g), []).append(
                                 rel_err(q, t))
                             if qs is not None and side == "K":
@@ -599,6 +667,12 @@ def main() -> int:
                                 acc.setdefault(("KL", bits, axis, g), []).append(kl)
                                 acc.setdefault(("Flip", bits, axis, g), []).append(flip)
                                 acc.setdefault(("Eff", bits, axis, g), []).append(eff)
+                                if args.key_noise > 0:
+                                    mt, mh = tail_mass_shift(
+                                        qs, model_frame - t0, k, allowed,
+                                        1.0 / math.sqrt(k.shape[-1]), args.block_tail)
+                                    acc.setdefault(("MassT", bits, axis, g), []).append(mt)
+                                    acc.setdefault(("MassH", bits, axis, g), []).append(mh)
                                 acc.setdefault(("Edev", bits, axis, g), []).append(edev)
                                 if loud is not None and bool(loud.any()) and bool((~loud).any()):
                                     l_loud, l_rest = split_logit_err(
@@ -678,6 +752,21 @@ def main() -> int:
                              f" {mean(('Flip', bits, a, g)):>13.3f}"
                              f" {mean(('Eff', bits, a, g)):>13.3f}")
                 print(line)
+        if args.key_noise > 0:
+            g0, a0 = args.group_size[0], cols[0]
+            for bits in args.bits:
+                key_t, key_h = ("MassT", bits, a0, g0), ("MassH", bits, a0, g0)
+                if key_t in acc:
+                    mt, mh = mean(key_t), mean(key_h)
+                    print()
+                    print(f"=== realised shift of attention mass, {bits} bits ===")
+                    print(f"  mass on the last {args.block_tail} positions: "
+                          f"{mt:.3f} -> {mh:.3f} ({100 * (mh - mt):+.1f} points)")
+                    print("  Negative means mass moved to the noised prefix, which is the")
+                    print("  Jensen inflation as it actually lands. Compare it with the")
+                    print("  closed form above: that one assumes the noised group")
+                    print("  self-averages and overstates the shift when attention is")
+                    print("  concentrated.")
         print("  KL and flips are what attention actually does with the error above;")
         print("  'eff' = exp(entropy) of the true attention, the number of keys it")
         print("  effectively reads. Two models with the same centered logit error can")
@@ -701,10 +790,16 @@ def main() -> int:
         print("  If the effective count without the sink is close to the count with it,")
         print("  the concentration is not the sink and KVTuner's opposite sign is about")
         print("  a different quantity. If it jumps, our explanation is the sink's.")
+        tm = sum(tail_mass) / len(tail_mass)
         print(f"  Jensen term per unit variance: {ju:.4f}; logit spread: {sp:.3f}")
+        print(f"  mass on the last {args.block_tail} positions (the clean block): {tm:.3f}")
         for sig in (0.0393, 0.0614, 0.1323, 0.1961):
-            print(f"    sigma {sig:.4f} -> term {sig * sig * ju:.4f} "
-                  f"= {100 * sig * sig * ju / max(sp, 1e-9):.1f}% of the spread")
+            term = sig * sig * ju
+            pre = 1.0 - tm
+            moved = pre * math.exp(term) / (pre * math.exp(term) + tm) - pre
+            print(f"    sigma {sig:.4f} -> term {term:.4f} "
+                  f"= {100 * term / max(sp, 1e-9):.1f}% of the spread, "
+                  f"mass to the prefix +{100 * moved:.1f} points")
         print("  The term is a per-key inflation of the noised keys' logits. It cancels")
         print("  where every key carries it; ours does not, since the current block is")
         print("  recomputed clean. Above a few percent of the spread it is a rival")
@@ -753,6 +848,7 @@ def main() -> int:
                 "pre_bias": args.pre_bias, "key_mean": args.key_mean,
                 "key_noise": args.key_noise,
                 "key_noise_mode": args.key_noise_mode,
+                "noise_prefix_only": args.noise_prefix_only,
             },
             "shape": "canvas x layer",
             "errors": {f"{side}/{bits}/{axis}/{g}": grid(v)
@@ -762,6 +858,7 @@ def main() -> int:
             "eff_nosink": grid(eff_nosink) if eff_nosink else None,
             "jensen_unit": grid(jensen_unit) if jensen_unit else None,
             "logit_spread": grid(spreads) if spreads else None,
+            "tail_mass": grid(tail_mass) if tail_mass else None,
             "qk_cos": grid(qk_cos) if qk_cos else None,
             "qk_iso": grid(qk_iso) if qk_iso else None,
             "bias_share": grid(bias_share) if bias_share else None,
