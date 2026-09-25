@@ -1,0 +1,2376 @@
+{
+  "sha": "69f3473f5e1c1504bae35cc50c7858ef900a9b17",
+  "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/69f3473f5e1c1504bae35cc50c7858ef900a9b17",
+  "tree": [
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "04c27b4d8959c28ee9483f69f2f8eada6ef8b543",
+      "size": 3182,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/04c27b4d8959c28ee9483f69f2f8eada6ef8b543"
+    },
+    {
+      "path": "LICENSE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "228229d3a5fc1b67b4cc60c07753213614712676",
+      "size": 11401,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/228229d3a5fc1b67b4cc60c07753213614712676"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f942a152918104f50b5255fecb15f4f18072bee9",
+      "size": 18642,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/f942a152918104f50b5255fecb15f4f18072bee9"
+    },
+    {
+      "path": "assets",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "a9a1d7eadabb27f4a721fab35aecc436bdae22db",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/a9a1d7eadabb27f4a721fab35aecc436bdae22db"
+    },
+    {
+      "path": "assets/deepcompressor.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8d4a1ef7d7a458f557e2bb05b2d3aacdf4649ac9",
+      "size": 47764,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/8d4a1ef7d7a458f557e2bb05b2d3aacdf4649ac9"
+    },
+    {
+      "path": "assets/diffusion",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "67b05daf9ea1bfc7a2d16ff71d02bf87a185afc4",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/67b05daf9ea1bfc7a2d16ff71d02bf87a185afc4"
+    },
+    {
+      "path": "assets/diffusion/.gitkeep",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "assets/diffusion/svdquant",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "2a551e5ef979799aa06cf3bee38b6866e7f3b693",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/2a551e5ef979799aa06cf3bee38b6866e7f3b693"
+    },
+    {
+      "path": "assets/diffusion/svdquant/svdquant.gif",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d0b675d48490d9bf934c0ed6cf541042a30b9a22",
+      "size": 294087,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d0b675d48490d9bf934c0ed6cf541042a30b9a22"
+    },
+    {
+      "path": "assets/diffusion/svdquant/teaser.jpg",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5623fc46278ee09acfec1a8dbc95cc3331827561",
+      "size": 1766517,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/5623fc46278ee09acfec1a8dbc95cc3331827561"
+    },
+    {
+      "path": "assets/llm",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "524877b325394974201c9a6c47b0c3e4f106fa8e",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/524877b325394974201c9a6c47b0c3e4f106fa8e"
+    },
+    {
+      "path": "assets/llm/.gitkeep",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "assets/llm/qoq",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "c3c3be8572616dc63fb79d68e93f24c0ed139a07",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/c3c3be8572616dc63fb79d68e93f24c0ed139a07"
+    },
+    {
+      "path": "assets/llm/qoq/qoq-qserve.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b2dfc972605a2d39cd1f5d09fbabfd4d3cfcff1c",
+      "size": 245133,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b2dfc972605a2d39cd1f5d09fbabfd4d3cfcff1c"
+    },
+    {
+      "path": "assets/llm/qoq/qoq.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f892e115bbea2c30965b4b0b3784aac15633bbf4",
+      "size": 625316,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/f892e115bbea2c30965b4b0b3784aac15633bbf4"
+    },
+    {
+      "path": "deepcompressor",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e908a2119e2b795d92cdcf5885794aa6497849a7",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/e908a2119e2b795d92cdcf5885794aa6497849a7"
+    },
+    {
+      "path": "deepcompressor/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5c0cf285cb9b647150914087937f12440ab102b2",
+      "size": 47,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/5c0cf285cb9b647150914087937f12440ab102b2"
+    },
+    {
+      "path": "deepcompressor/app",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "284e6b874f766141d5979e02fecf9fbbdd073ac9",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/284e6b874f766141d5979e02fecf9fbbdd073ac9"
+    },
+    {
+      "path": "deepcompressor/app/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "deepcompressor/app/diffusion",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6bd8887a9647e24b73e07e9b470c54c6605e9a60",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/6bd8887a9647e24b73e07e9b470c54c6605e9a60"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/cache",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "8d759c0e428e9d05778ac0b4c78c476449cece5d",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/8d759c0e428e9d05778ac0b4c78c476449cece5d"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/cache/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "82c3e1f7234966cb1ceca31d06703eb0e5c34d8e",
+      "size": 71,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/82c3e1f7234966cb1ceca31d06703eb0e5c34d8e"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/cache/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "74b774dd716367be2ae1abd57f933b2b6e6718c3",
+      "size": 2403,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/74b774dd716367be2ae1abd57f933b2b6e6718c3"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "14d55fd87cd041694de57ae5acd832ed479439a6",
+      "size": 8440,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/14d55fd87cd041694de57ae5acd832ed479439a6"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e867042d7b470df9d327e1ce2b6df1dcab81b4d5",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/e867042d7b470df9d327e1ce2b6df1dcab81b4d5"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4c7af45afefffe6f81474fe9db694c9af1cf299e",
+      "size": 138,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/4c7af45afefffe6f81474fe9db694c9af1cf299e"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/base.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "535b19172fd2e6344932dde3acb331a9c2d584a7",
+      "size": 2623,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/535b19172fd2e6344932dde3acb331a9c2d584a7"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/calib.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f794d30830bce9fc15b7da12c619c9d011ef174b",
+      "size": 15238,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/f794d30830bce9fc15b7da12c619c9d011ef174b"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/collect",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "78a81649be8850b37950ce49ffc70a88bf1ffaa6",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/78a81649be8850b37950ce49ffc70a88bf1ffaa6"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/collect/calib.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5b0e99c03c7f471a238220fc5a8c573bcdd1f816",
+      "size": 5657,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/5b0e99c03c7f471a238220fc5a8c573bcdd1f816"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/collect/utils.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dc4169d6a1931f4718a2d84b7d7ad4a10cad6788",
+      "size": 3293,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/dc4169d6a1931f4718a2d84b7d7ad4a10cad6788"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "c6f6b23a92cd901e26c8e871bc7523d8ba180989",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/c6f6b23a92cd901e26c8e871bc7523d8ba180989"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/COCO",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "85422db737c9a226d539aae0bf45ebb9183e7bc2",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/85422db737c9a226d539aae0bf45ebb9183e7bc2"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/COCO/COCO.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2f155c752eedb5f0c4f8a4d8293e5700be3f5f23",
+      "size": 7724,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/2f155c752eedb5f0c4f8a4d8293e5700be3f5f23"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/COCO/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/DCI",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "7ff18e460af148b17a28a55a3f1c4c4a01e9caa5",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/7ff18e460af148b17a28a55a3f1c4c4a01e9caa5"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/DCI/DCI.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a65454e95cb90646d386e95db9013566bcef7ff7",
+      "size": 4032,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/a65454e95cb90646d386e95db9013566bcef7ff7"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/DCI/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/MJHQ",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "9848ca4d6775747d029e9ae0fbaaf520f5fe1725",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/9848ca4d6775747d029e9ae0fbaaf520f5fe1725"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/MJHQ/MJHQ.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8cfa715964c272bb324a9f7e7c71e550e0efcd90",
+      "size": 3958,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/8cfa715964c272bb324a9f7e7c71e550e0efcd90"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/MJHQ/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "496f394b1e7d092025922694d2ef48c39422fd9e",
+      "size": 2624,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/496f394b1e7d092025922694d2ef48c39422fd9e"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/dataset/data/dump.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4082fa3cb28bcb73c646af089aa4272a0f70e00b",
+      "size": 3905,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/4082fa3cb28bcb73c646af089aa4272a0f70e00b"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/eval",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "0755986d7972684148169f0ecbb254bbfc54e6d2",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/0755986d7972684148169f0ecbb254bbfc54e6d2"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/eval/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b0960a027e582038ec3efe5eb5676ddb2c4f0e08",
+      "size": 65,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b0960a027e582038ec3efe5eb5676ddb2c4f0e08"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/eval/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "12de797185bc150a4f4fd377b49bcc9b4b15045d",
+      "size": 9873,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/12de797185bc150a4f4fd377b49bcc9b4b15045d"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/eval/metrics",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "582829074617b4fd0ca05974d918476fde62c2be",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/582829074617b4fd0ca05974d918476fde62c2be"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/eval/metrics/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bfe9aa285d185f09bc2fa3945fabd2757772a981",
+      "size": 4543,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/bfe9aa285d185f09bc2fa3945fabd2757772a981"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/eval/metrics/fid.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8c054bf9850728c7c13521da3501d152fed74d07",
+      "size": 4298,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/8c054bf9850728c7c13521da3501d152fed74d07"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/eval/metrics/image_reward.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f964431ae5a777a195b15601b07dc6f2e315e365",
+      "size": 889,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/f964431ae5a777a195b15601b07dc6f2e315e365"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/eval/metrics/multimodal.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "455aaf688066ad3e92f882adcfde7a6f11b03353",
+      "size": 2573,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/455aaf688066ad3e92f882adcfde7a6f11b03353"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/eval/metrics/run.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "782b79961c449da4ecf3ea534df5a3272155a3a8",
+      "size": 940,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/782b79961c449da4ecf3ea534df5a3272155a3a8"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/eval/metrics/similarity.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b93adb82173b66be1924f59f2b86cd0cec360f4e",
+      "size": 3943,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b93adb82173b66be1924f59f2b86cd0cec360f4e"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/nn",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "875e938e213de6372565d421fccba36413a08a1a",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/875e938e213de6372565d421fccba36413a08a1a"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/nn/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "40a96afc6ff09d58a702b76e3f7dd412fe975e26",
+      "size": 24,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/40a96afc6ff09d58a702b76e3f7dd412fe975e26"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/nn/attention.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6f29a9fab2ddcbab17d7f227d10582b6923159e6",
+      "size": 7213,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/6f29a9fab2ddcbab17d7f227d10582b6923159e6"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/nn/patch.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a39ff406899565d9f7577b9ea2b2139589e92c8e",
+      "size": 6069,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/a39ff406899565d9f7577b9ea2b2139589e92c8e"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/nn/struct.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a25c4f4d1438d502cc7899af94bde2c3394948e5",
+      "size": 87134,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/a25c4f4d1438d502cc7899af94bde2c3394948e5"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/pipeline",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "7a29d0eb36864e87fde1f73a57202b245f662cd9",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/7a29d0eb36864e87fde1f73a57202b245f662cd9"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/pipeline/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d667085cd8cfd9a393aac21d7d69a2b35767ce8a",
+      "size": 69,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d667085cd8cfd9a393aac21d7d69a2b35767ce8a"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/pipeline/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bc7cbe204016860835937ba9f317108c296a97c4",
+      "size": 18410,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/bc7cbe204016860835937ba9f317108c296a97c4"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/ptq.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "74c1c173739359b19dab978446ebf7b4cf17c483",
+      "size": 17924,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/74c1c173739359b19dab978446ebf7b4cf17c483"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e5f01d78bbbcbc9158623958cc24285dc7e2a881",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/e5f01d78bbbcbc9158623958cc24285dc7e2a881"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3dda2a1e02ddc1aeab89067cd72a303b5e227ec0",
+      "size": 382,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/3dda2a1e02ddc1aeab89067cd72a303b5e227ec0"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/activation.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7e0dd27dc40ec8d5f66868c76954eccb102a8501",
+      "size": 13170,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/7e0dd27dc40ec8d5f66868c76954eccb102a8501"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "54a51de7a03139c804523ce710c083966d47aacf",
+      "size": 24884,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/54a51de7a03139c804523ce710c083966d47aacf"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/quantizer",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6f786a57734c1425e470c341e0ec55c4eac3da16",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/6f786a57734c1425e470c341e0ec55c4eac3da16"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/quantizer/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cc8153fa65eb683511cca05f21657be60741832c",
+      "size": 154,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/cc8153fa65eb683511cca05f21657be60741832c"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/quantizer/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3c3f7e25d1a1cfd33cebe3f1ff046f61ce321184",
+      "size": 17573,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/3c3f7e25d1a1cfd33cebe3f1ff046f61ce321184"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/quantizer/quantizer.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8103ca92798fa5269b8668623bdbbc6376cc0033",
+      "size": 14274,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/8103ca92798fa5269b8668623bdbbc6376cc0033"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/rotate.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "718d38d3ac76a1862a6531c7fd6316885095adbf",
+      "size": 6221,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/718d38d3ac76a1862a6531c7fd6316885095adbf"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/smooth.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "22f7b12477bdf80490768f9c7d640fa1483d7dad",
+      "size": 30633,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/22f7b12477bdf80490768f9c7d640fa1483d7dad"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/utils.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b2c329d4f77a7208714a8d95f1d4d075134c0c49",
+      "size": 3895,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b2c329d4f77a7208714a8d95f1d4d075134c0c49"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/quant/weight.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c9a046dec0af96dfe36d59d881423bba16ed37db",
+      "size": 22087,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/c9a046dec0af96dfe36d59d881423bba16ed37db"
+    },
+    {
+      "path": "deepcompressor/app/diffusion/utils.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dae2565eafede3782bc94f7746dbcc28d56e9288",
+      "size": 6090,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/dae2565eafede3782bc94f7746dbcc28d56e9288"
+    },
+    {
+      "path": "deepcompressor/app/llm",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "8f5e41eab12613ed82aa87dddc0504bf6333990f",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/8f5e41eab12613ed82aa87dddc0504bf6333990f"
+    },
+    {
+      "path": "deepcompressor/app/llm/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "40a96afc6ff09d58a702b76e3f7dd412fe975e26",
+      "size": 24,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/40a96afc6ff09d58a702b76e3f7dd412fe975e26"
+    },
+    {
+      "path": "deepcompressor/app/llm/cache",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "8a338e6207f1f9ad969b289f7c4fc4c70b5b66ce",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/8a338e6207f1f9ad969b289f7c4fc4c70b5b66ce"
+    },
+    {
+      "path": "deepcompressor/app/llm/cache/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "40a96afc6ff09d58a702b76e3f7dd412fe975e26",
+      "size": 24,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/40a96afc6ff09d58a702b76e3f7dd412fe975e26"
+    },
+    {
+      "path": "deepcompressor/app/llm/cache/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d3bff454d949d767eb3a7b52240aa6c9f36f740a",
+      "size": 1689,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d3bff454d949d767eb3a7b52240aa6c9f36f740a"
+    },
+    {
+      "path": "deepcompressor/app/llm/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0cb6967ec20b10f5311ec0a6a18486eb44acfb4c",
+      "size": 4728,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/0cb6967ec20b10f5311ec0a6a18486eb44acfb4c"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "ecdee5de27a58efcdc9b8c8c7fc923c092f01260",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/ecdee5de27a58efcdc9b8c8c7fc923c092f01260"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "40a96afc6ff09d58a702b76e3f7dd412fe975e26",
+      "size": 24,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/40a96afc6ff09d58a702b76e3f7dd412fe975e26"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval/base.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "43cb96eca3fc72caaf9d19cf196af5e88397c108",
+      "size": 694,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/43cb96eca3fc72caaf9d19cf196af5e88397c108"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5e0555b2821f8ca3a12d476e48be8615286960ec",
+      "size": 9091,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/5e0555b2821f8ca3a12d476e48be8615286960ec"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval/custom.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9636df26377f99056b5394370a7886836a8eff3f",
+      "size": 3516,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/9636df26377f99056b5394370a7886836a8eff3f"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval/lm_eval.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7732938d30d898ecd028b7a065ee660eac766dda",
+      "size": 1829,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/7732938d30d898ecd028b7a065ee660eac766dda"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval/longbench",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "adf1e1bf352675375c3defcd5363f651eecada10",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/adf1e1bf352675375c3defcd5363f651eecada10"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval/longbench/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4a7816a643bdf48a29d95634111c987f88254798",
+      "size": 54,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/4a7816a643bdf48a29d95634111c987f88254798"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval/longbench/eval.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "59592263eafb306a4b33c4f8a05a19cccf14a4a3",
+      "size": 13172,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/59592263eafb306a4b33c4f8a05a19cccf14a4a3"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval/longbench/metrics.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7bc4afe284047beb64a4b5037001876c07b02e43",
+      "size": 5231,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/7bc4afe284047beb64a4b5037001876c07b02e43"
+    },
+    {
+      "path": "deepcompressor/app/llm/eval/longbench/task2prompt.json",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1c85f6bc0f0df4e42131aa49a867797ee7043ecf",
+      "size": 5437,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/1c85f6bc0f0df4e42131aa49a867797ee7043ecf"
+    },
+    {
+      "path": "deepcompressor/app/llm/model",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "60baf19a3770d5bd78015559503af895bd52f732",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/60baf19a3770d5bd78015559503af895bd52f732"
+    },
+    {
+      "path": "deepcompressor/app/llm/model/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "40a96afc6ff09d58a702b76e3f7dd412fe975e26",
+      "size": 24,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/40a96afc6ff09d58a702b76e3f7dd412fe975e26"
+    },
+    {
+      "path": "deepcompressor/app/llm/model/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6b26ce230ad3317040e9dd9d64b92d0d8f90d0f5",
+      "size": 6553,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/6b26ce230ad3317040e9dd9d64b92d0d8f90d0f5"
+    },
+    {
+      "path": "deepcompressor/app/llm/nn",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "3da9394d78f2edbd1f6b8515e43b8ab223c15216",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/3da9394d78f2edbd1f6b8515e43b8ab223c15216"
+    },
+    {
+      "path": "deepcompressor/app/llm/nn/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "41a9268ea12db3c36786d1b9669f8cb7dfe6aa0c",
+      "size": 109,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/41a9268ea12db3c36786d1b9669f8cb7dfe6aa0c"
+    },
+    {
+      "path": "deepcompressor/app/llm/nn/patch.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cd007c37bbcc8e9a9b8477b01e95d1b0b5f77a56",
+      "size": 8993,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/cd007c37bbcc8e9a9b8477b01e95d1b0b5f77a56"
+    },
+    {
+      "path": "deepcompressor/app/llm/nn/struct.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "85643c2ed170fef8ea3546698ce3717652d937a5",
+      "size": 37512,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/85643c2ed170fef8ea3546698ce3717652d937a5"
+    },
+    {
+      "path": "deepcompressor/app/llm/ptq.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0aa3691624c9292c59c119b16cbcfc1f5a052059",
+      "size": 17880,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/0aa3691624c9292c59c119b16cbcfc1f5a052059"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "8d43749de42fe20fe4b5b081f4276252bd3e8e69",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/8d43749de42fe20fe4b5b081f4276252bd3e8e69"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eb0936a9f4b6191ec27676e0bd667a686da01cf9",
+      "size": 332,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/eb0936a9f4b6191ec27676e0bd667a686da01cf9"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/activation.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "71a9a9b3cc28955dea33d914a5ffa8d96a2e6310",
+      "size": 11352,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/71a9a9b3cc28955dea33d914a5ffa8d96a2e6310"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9c433328ee66d0b8d943cb94823ad1aecf4168fa",
+      "size": 18564,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/9c433328ee66d0b8d943cb94823ad1aecf4168fa"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/dataset.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6dfce864abf1cba9369abae78c341bfad978f003",
+      "size": 13498,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/6dfce864abf1cba9369abae78c341bfad978f003"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/quantizer",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "9a05b08aaa46be3c54bf3a9738561bc55b6a6e72",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/9a05b08aaa46be3c54bf3a9738561bc55b6a6e72"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/quantizer/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5c5acaafaefdf8037bd00a46c315f3b46ae0dd81",
+      "size": 136,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/5c5acaafaefdf8037bd00a46c315f3b46ae0dd81"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/quantizer/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fbe241a9c59e7b1d5f220675363834e40b9ddcbe",
+      "size": 10156,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/fbe241a9c59e7b1d5f220675363834e40b9ddcbe"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/quantizer/quantizer.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "92aab0562072d5fa0186e440e91232a7876e187c",
+      "size": 12056,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/92aab0562072d5fa0186e440e91232a7876e187c"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/reorder.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7714196865183a7ce6f69aa1b1615275592a7396",
+      "size": 16797,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/7714196865183a7ce6f69aa1b1615275592a7396"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/rotate.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "19dd92e9eeb9a0997d7cf4058251fa1a7df6fde7",
+      "size": 8660,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/19dd92e9eeb9a0997d7cf4058251fa1a7df6fde7"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/smooth.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "de9d17fc9b7e48b890e75260fd08ed334361d872",
+      "size": 10462,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/de9d17fc9b7e48b890e75260fd08ed334361d872"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/utils.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3b731d71cd5906924b67ff2a85c01b03e8b12082",
+      "size": 3073,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/3b731d71cd5906924b67ff2a85c01b03e8b12082"
+    },
+    {
+      "path": "deepcompressor/app/llm/quant/weight.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a663c2ab32af8058620b261f5649d1edc7044e1a",
+      "size": 7685,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/a663c2ab32af8058620b261f5649d1edc7044e1a"
+    },
+    {
+      "path": "deepcompressor/backend",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "ee98a1992cf8b1b126f92b0ec6b6e235ed99e26b",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/ee98a1992cf8b1b126f92b0ec6b6e235ed99e26b"
+    },
+    {
+      "path": "deepcompressor/backend/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "deepcompressor/backend/nunchaku",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "32314dfab8a3f52cde7b5b3d891daf2c7cfe4364",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/32314dfab8a3f52cde7b5b3d891daf2c7cfe4364"
+    },
+    {
+      "path": "deepcompressor/backend/nunchaku/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "deepcompressor/backend/nunchaku/convert.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f667f3bbabae68b42de0eee854c87f5b3ab21460",
+      "size": 18740,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/f667f3bbabae68b42de0eee854c87f5b3ab21460"
+    },
+    {
+      "path": "deepcompressor/backend/nunchaku/convert_lora.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a5fe24521a41a04e1828d16d1fd59ef0f2ec2957",
+      "size": 14185,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/a5fe24521a41a04e1828d16d1fd59ef0f2ec2957"
+    },
+    {
+      "path": "deepcompressor/backend/nunchaku/utils.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4022512dad4bcbcef3424b1bc7c027f87e3ccd86",
+      "size": 19739,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/4022512dad4bcbcef3424b1bc7c027f87e3ccd86"
+    },
+    {
+      "path": "deepcompressor/backend/qserve",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "02b59ea338a23a99f6c8a3bcca6e4f6b5e26731d",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/02b59ea338a23a99f6c8a3bcca6e4f6b5e26731d"
+    },
+    {
+      "path": "deepcompressor/backend/qserve/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "deepcompressor/backend/qserve/convert.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "630cfabb2f705d906e1f8ad9ba071eac1343a1ea",
+      "size": 9066,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/630cfabb2f705d906e1f8ad9ba071eac1343a1ea"
+    },
+    {
+      "path": "deepcompressor/backend/qserve/utils.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "181a4ec5c6d127e28933e197950acd5fb95c63a3",
+      "size": 10249,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/181a4ec5c6d127e28933e197950acd5fb95c63a3"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6b8b00228bedd322e9b2ffeed95fd665818a7cd0",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/6b8b00228bedd322e9b2ffeed95fd665818a7cd0"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/convert.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "47a898c9071a2f96b4056faa26206007ef432112",
+      "size": 6941,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/47a898c9071a2f96b4056faa26206007ef432112"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "cde48527e5f3c61f0ca5c976467653b7454b7508",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/cde48527e5f3c61f0ca5c976467653b7454b7508"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/load.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "142f81ec68f30dc0f08ae519a542b87682cf85db",
+      "size": 1040,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/142f81ec68f30dc0f08ae519a542b87682cf85db"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/pybind.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "34b52b62044d56cc76e0ac6e4ebfc4d516b509db",
+      "size": 368,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/34b52b62044d56cc76e0ac6e4ebfc4d516b509db"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/quantization",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "0d7a9367565dd8fccd6d7abd5248276953ecac47",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/0d7a9367565dd8fccd6d7abd5248276953ecac47"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/quantization/dequantize.cuh",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1d3018cb1020942ca1e43afbb2542fffd0a6c4a8",
+      "size": 6201,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/1d3018cb1020942ca1e43afbb2542fffd0a6c4a8"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/quantization/gemm",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e50e4693d5719fedd2182f121dcf1917f1b56355",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/e50e4693d5719fedd2182f121dcf1917f1b56355"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/quantization/gemm/gemm_cuda.cu",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "851d24b705aa0b944bad7ba41279357cb54428db",
+      "size": 55402,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/851d24b705aa0b944bad7ba41279357cb54428db"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/quantization/gemm/gemm_cuda.h",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "58b2625d27b4cfb9f13d6c2eaecf3d8626b394ca",
+      "size": 177,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/58b2625d27b4cfb9f13d6c2eaecf3d8626b394ca"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/quantization/gemm/semaphore.h",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "acc636f745c53fec08521c7ec863b5d1baf675f4",
+      "size": 3886,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/acc636f745c53fec08521c7ec863b5d1baf675f4"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/quantization/gemv",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6e5df4e74f48cf9758a3a47499f6f746f41fdce2",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/6e5df4e74f48cf9758a3a47499f6f746f41fdce2"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/quantization/gemv/gemv_cuda.cu",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0307321db6d8fa1730146cdc2d9fbd642a6903cc",
+      "size": 11067,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/0307321db6d8fa1730146cdc2d9fbd642a6903cc"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/quantization/gemv/gemv_cuda.h",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5600040525dde6865444bee13cceebb4e88b49d5",
+      "size": 252,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/5600040525dde6865444bee13cceebb4e88b49d5"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/csrc/utils.cuh",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8414d7c78269d1741744ed83425afc2680cdd914",
+      "size": 11205,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/8414d7c78269d1741744ed83425afc2680cdd914"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/linear.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "719086d460444f2d417f69d40cb7df8142ab5c61",
+      "size": 6593,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/719086d460444f2d417f69d40cb7df8142ab5c61"
+    },
+    {
+      "path": "deepcompressor/backend/tinychat/utils.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0d03d4a93334dd266ab5610eb4707cf3067f0071",
+      "size": 4367,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/0d03d4a93334dd266ab5610eb4707cf3067f0071"
+    },
+    {
+      "path": "deepcompressor/backend/utils.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9c3fe12739ef7f85a5224ad750cfcd3e799fe21a",
+      "size": 6038,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/9c3fe12739ef7f85a5224ad750cfcd3e799fe21a"
+    },
+    {
+      "path": "deepcompressor/calib",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "d5e4e996255b979ad7d890c7dc6399cb8f2ece67",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/d5e4e996255b979ad7d890c7dc6399cb8f2ece67"
+    },
+    {
+      "path": "deepcompressor/calib/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "40a96afc6ff09d58a702b76e3f7dd412fe975e26",
+      "size": 24,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/40a96afc6ff09d58a702b76e3f7dd412fe975e26"
+    },
+    {
+      "path": "deepcompressor/calib/config",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "381628957f7b622befd5d0e59a975208f30e0f69",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/381628957f7b622befd5d0e59a975208f30e0f69"
+    },
+    {
+      "path": "deepcompressor/calib/config/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fb9abf45c595c5b56ff13dc6a2057bd910ccb601",
+      "size": 549,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/fb9abf45c595c5b56ff13dc6a2057bd910ccb601"
+    },
+    {
+      "path": "deepcompressor/calib/config/lowrank.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4839e78477bb47203f12970dfae49d2fda217db8",
+      "size": 4647,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/4839e78477bb47203f12970dfae49d2fda217db8"
+    },
+    {
+      "path": "deepcompressor/calib/config/range.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "70e5d7b1fc4fadfda8d07d5e95f8a7c0b1cdfb43",
+      "size": 6681,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/70e5d7b1fc4fadfda8d07d5e95f8a7c0b1cdfb43"
+    },
+    {
+      "path": "deepcompressor/calib/config/reorder.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fd64073a4c6f00e38fa541c018cf2ef1b3164dbb",
+      "size": 5582,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/fd64073a4c6f00e38fa541c018cf2ef1b3164dbb"
+    },
+    {
+      "path": "deepcompressor/calib/config/rotation.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ab6f911503c35151fe72d4a8bc9c0c1d9ebcd932",
+      "size": 3214,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/ab6f911503c35151fe72d4a8bc9c0c1d9ebcd932"
+    },
+    {
+      "path": "deepcompressor/calib/config/search.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a59cee7f25ab11c693a691355a13d45255174b32",
+      "size": 4780,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/a59cee7f25ab11c693a691355a13d45255174b32"
+    },
+    {
+      "path": "deepcompressor/calib/config/smooth.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6b8e2feed8bbcf1c7f7756e36a9bb3c5fafca7aa",
+      "size": 17516,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/6b8e2feed8bbcf1c7f7756e36a9bb3c5fafca7aa"
+    },
+    {
+      "path": "deepcompressor/calib/lowrank.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "960423e8726e33694523d88f5d1a26e63e0e6df7",
+      "size": 9693,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/960423e8726e33694523d88f5d1a26e63e0e6df7"
+    },
+    {
+      "path": "deepcompressor/calib/metric.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5ab01eaa5c3bfe2cbc13fff61ce0fb1c06e56f71",
+      "size": 7350,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/5ab01eaa5c3bfe2cbc13fff61ce0fb1c06e56f71"
+    },
+    {
+      "path": "deepcompressor/calib/range.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5a395e7f04c347f6d6e5a115d74bfa2f94b3c151",
+      "size": 21119,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/5a395e7f04c347f6d6e5a115d74bfa2f94b3c151"
+    },
+    {
+      "path": "deepcompressor/calib/reorder.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9a0b0093dbc23e42e01a2a35df68f20e1f6ecc31",
+      "size": 21619,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/9a0b0093dbc23e42e01a2a35df68f20e1f6ecc31"
+    },
+    {
+      "path": "deepcompressor/calib/rotate.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2e587c0740eedfc9fe6b994e6dcae33aefb4ac6e",
+      "size": 10238,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/2e587c0740eedfc9fe6b994e6dcae33aefb4ac6e"
+    },
+    {
+      "path": "deepcompressor/calib/search.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "28ea6219383681ec8d2b1d984304c51605ea8b94",
+      "size": 51037,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/28ea6219383681ec8d2b1d984304c51605ea8b94"
+    },
+    {
+      "path": "deepcompressor/calib/smooth.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "876daa10a4d60b3cef707234c39a6106e517bb93",
+      "size": 47439,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/876daa10a4d60b3cef707234c39a6106e517bb93"
+    },
+    {
+      "path": "deepcompressor/csrc",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "8aeab721f68a0bf62102446fc07c749c380cef7b",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/8aeab721f68a0bf62102446fc07c749c380cef7b"
+    },
+    {
+      "path": "deepcompressor/csrc/load.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6aae3f1b64847ce8bba8786542957aca6a3bf2ed",
+      "size": 951,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/6aae3f1b64847ce8bba8786542957aca6a3bf2ed"
+    },
+    {
+      "path": "deepcompressor/csrc/pybind.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "37b11320a104dfee8856b1b34deaa9281090ad90",
+      "size": 356,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/37b11320a104dfee8856b1b34deaa9281090ad90"
+    },
+    {
+      "path": "deepcompressor/csrc/quantize",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "32a8572ed60e091d7a22b8a3aa1ec925dc9d18ba",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/32a8572ed60e091d7a22b8a3aa1ec925dc9d18ba"
+    },
+    {
+      "path": "deepcompressor/csrc/quantize/quantize.cu",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d2331d25b07d33a909d0c6a4995a96470274eefd",
+      "size": 4126,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d2331d25b07d33a909d0c6a4995a96470274eefd"
+    },
+    {
+      "path": "deepcompressor/csrc/quantize/quantize.h",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "06869abbf80d876844615575af96a0167121e402",
+      "size": 322,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/06869abbf80d876844615575af96a0167121e402"
+    },
+    {
+      "path": "deepcompressor/data",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "329951999682163729b32c8ca6ca2a1a153bb1ee",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/329951999682163729b32c8ca6ca2a1a153bb1ee"
+    },
+    {
+      "path": "deepcompressor/data/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1b91235212261b8bd99c8ca5d674775012fcf405",
+      "size": 199,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/1b91235212261b8bd99c8ca5d674775012fcf405"
+    },
+    {
+      "path": "deepcompressor/data/cache.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "79b5fd3be4da6296a19860bf95a8ee9b800bf086",
+      "size": 9875,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/79b5fd3be4da6296a19860bf95a8ee9b800bf086"
+    },
+    {
+      "path": "deepcompressor/data/codebook.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6c0d5a5e3469e7f050ecbe0a7fed4c4cc09360d9",
+      "size": 7616,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/6c0d5a5e3469e7f050ecbe0a7fed4c4cc09360d9"
+    },
+    {
+      "path": "deepcompressor/data/common.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "747bc59077ba9d7c6dacd55e4aa59ab7b4fa3294",
+      "size": 230,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/747bc59077ba9d7c6dacd55e4aa59ab7b4fa3294"
+    },
+    {
+      "path": "deepcompressor/data/dtype.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8ab64e1bba00633956f8468c195f3c47c2bb726b",
+      "size": 16225,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/8ab64e1bba00633956f8468c195f3c47c2bb726b"
+    },
+    {
+      "path": "deepcompressor/data/range.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d0f0d5d75ea09615fd9993c9f30e29f4ba44c610",
+      "size": 18548,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d0f0d5d75ea09615fd9993c9f30e29f4ba44c610"
+    },
+    {
+      "path": "deepcompressor/data/scale.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "25e003cc6f4c59f282b461c6d91ce827ad009fc6",
+      "size": 4272,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/25e003cc6f4c59f282b461c6d91ce827ad009fc6"
+    },
+    {
+      "path": "deepcompressor/data/tensor.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d32607796bbd1c3d0f64687eac2c41b133353912",
+      "size": 1252,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d32607796bbd1c3d0f64687eac2c41b133353912"
+    },
+    {
+      "path": "deepcompressor/data/utils",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "02e84b568065dc61ca963908c7b388a2f8ab4819",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/02e84b568065dc61ca963908c7b388a2f8ab4819"
+    },
+    {
+      "path": "deepcompressor/data/utils/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "04b502bc23d54a45d2ccabe55267e5c8cee1d793",
+      "size": 127,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/04b502bc23d54a45d2ccabe55267e5c8cee1d793"
+    },
+    {
+      "path": "deepcompressor/data/utils/dtype.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8b9a0eb3c13035e2662ba6a16a693a7b0d10bfc7",
+      "size": 3494,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/8b9a0eb3c13035e2662ba6a16a693a7b0d10bfc7"
+    },
+    {
+      "path": "deepcompressor/data/utils/reshape.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "24227ed9305e89728b9f1a7bc876f015aea62262",
+      "size": 4821,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/24227ed9305e89728b9f1a7bc876f015aea62262"
+    },
+    {
+      "path": "deepcompressor/data/utils/scale.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "335ca0cdad88f942606f09897937b7280caa8ef8",
+      "size": 1853,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/335ca0cdad88f942606f09897937b7280caa8ef8"
+    },
+    {
+      "path": "deepcompressor/data/utils/shape.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4e43244eb5b3d37ccd0d48c0a5dca443aba43a4d",
+      "size": 7996,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/4e43244eb5b3d37ccd0d48c0a5dca443aba43a4d"
+    },
+    {
+      "path": "deepcompressor/data/zero.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b00d92ddeacb87daedffebc64317d2d0fc6f09b2",
+      "size": 224,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b00d92ddeacb87daedffebc64317d2d0fc6f09b2"
+    },
+    {
+      "path": "deepcompressor/dataset",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "b5d7bc6b57d423b1a872dc79157b5e2915555b91",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/b5d7bc6b57d423b1a872dc79157b5e2915555b91"
+    },
+    {
+      "path": "deepcompressor/dataset/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "653cd8d4b3d36f825fb9d594f49ebb26ce2154d6",
+      "size": 157,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/653cd8d4b3d36f825fb9d594f49ebb26ce2154d6"
+    },
+    {
+      "path": "deepcompressor/dataset/action.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "298f649c0a618c86d0a30eafe5bc023d7ec71f2b",
+      "size": 7987,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/298f649c0a618c86d0a30eafe5bc023d7ec71f2b"
+    },
+    {
+      "path": "deepcompressor/dataset/cache.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7d63d48ec98dcb484e830703e58d8fec9906c34d",
+      "size": 21085,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/7d63d48ec98dcb484e830703e58d8fec9906c34d"
+    },
+    {
+      "path": "deepcompressor/dataset/config.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4d880bc66b341d4ab8e48defe975e7def6512fbc",
+      "size": 1404,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/4d880bc66b341d4ab8e48defe975e7def6512fbc"
+    },
+    {
+      "path": "deepcompressor/nn",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "f8fcefef97ae24b9bd529088d9051e8526b43f85",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/f8fcefef97ae24b9bd529088d9051e8526b43f85"
+    },
+    {
+      "path": "deepcompressor/nn/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "40a96afc6ff09d58a702b76e3f7dd412fe975e26",
+      "size": 24,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/40a96afc6ff09d58a702b76e3f7dd412fe975e26"
+    },
+    {
+      "path": "deepcompressor/nn/patch",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "696630f6468df6aff0b67452ad11954ee419316c",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/696630f6468df6aff0b67452ad11954ee419316c"
+    },
+    {
+      "path": "deepcompressor/nn/patch/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "acdbee736db54e6528da3cfa1c14dd080546754e",
+      "size": 110,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/acdbee736db54e6528da3cfa1c14dd080546754e"
+    },
+    {
+      "path": "deepcompressor/nn/patch/conv.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d094b4f1eeea07c6657db088131a35ff5089858d",
+      "size": 6808,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d094b4f1eeea07c6657db088131a35ff5089858d"
+    },
+    {
+      "path": "deepcompressor/nn/patch/linear.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "08570ea70657f257d2465b01eb72cec733899d88",
+      "size": 4794,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/08570ea70657f257d2465b01eb72cec733899d88"
+    },
+    {
+      "path": "deepcompressor/nn/patch/lowrank.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "624774116d37b4a5d42299d4af85b04a24a32279",
+      "size": 4095,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/624774116d37b4a5d42299d4af85b04a24a32279"
+    },
+    {
+      "path": "deepcompressor/nn/patch/sdpa.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bf1ce83974c5bc76dc96e8332bd730cf716771af",
+      "size": 691,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/bf1ce83974c5bc76dc96e8332bd730cf716771af"
+    },
+    {
+      "path": "deepcompressor/nn/struct",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "3de8d52147ef3d8922d12ae3a1b1e991079f8172",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/3de8d52147ef3d8922d12ae3a1b1e991079f8172"
+    },
+    {
+      "path": "deepcompressor/nn/struct/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "88078120ef8ec8210b3e1ca700eb3c2712bf2bac",
+      "size": 65,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/88078120ef8ec8210b3e1ca700eb3c2712bf2bac"
+    },
+    {
+      "path": "deepcompressor/nn/struct/attn.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0a63aa69f1f9876e197353588b9bf6bb6124f13d",
+      "size": 32134,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/0a63aa69f1f9876e197353588b9bf6bb6124f13d"
+    },
+    {
+      "path": "deepcompressor/nn/struct/base.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "65526ecd13d06e467eb824c2302e82b9f4744891",
+      "size": 5935,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/65526ecd13d06e467eb824c2302e82b9f4744891"
+    },
+    {
+      "path": "deepcompressor/quantizer",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "3b7c6d6cc38c4927963daa55a6061d90c17cd8fe",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/3b7c6d6cc38c4927963daa55a6061d90c17cd8fe"
+    },
+    {
+      "path": "deepcompressor/quantizer/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "feb560436cc31034e54adab84daf34bcd52aa0fb",
+      "size": 58,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/feb560436cc31034e54adab84daf34bcd52aa0fb"
+    },
+    {
+      "path": "deepcompressor/quantizer/config",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "9652550e512386bdb6830ec7b21a4295e21aa8a7",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/9652550e512386bdb6830ec7b21a4295e21aa8a7"
+    },
+    {
+      "path": "deepcompressor/quantizer/config/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7ad8d0f767ba77544a866cd2440a44dac9c17a80",
+      "size": 249,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/7ad8d0f767ba77544a866cd2440a44dac9c17a80"
+    },
+    {
+      "path": "deepcompressor/quantizer/config/base.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "95cfb2f09f3a99e4c9386625c16d8abed05966c1",
+      "size": 15332,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/95cfb2f09f3a99e4c9386625c16d8abed05966c1"
+    },
+    {
+      "path": "deepcompressor/quantizer/config/kernel.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5db9d41d0a42138847348e40b699c2547e109165",
+      "size": 5232,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/5db9d41d0a42138847348e40b699c2547e109165"
+    },
+    {
+      "path": "deepcompressor/quantizer/config/lowrank.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "81a459eca1965838970109824374144e5ba76a58",
+      "size": 1358,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/81a459eca1965838970109824374144e5ba76a58"
+    },
+    {
+      "path": "deepcompressor/quantizer/impl",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "3ac20dc6e7456445af8a752e388f9d751ef25553",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/3ac20dc6e7456445af8a752e388f9d751ef25553"
+    },
+    {
+      "path": "deepcompressor/quantizer/impl/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "deepcompressor/quantizer/impl/base.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2b26f0333f980a58f8ef3db04d92ea6ccc13aee9",
+      "size": 14507,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/2b26f0333f980a58f8ef3db04d92ea6ccc13aee9"
+    },
+    {
+      "path": "deepcompressor/quantizer/impl/info.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d9207866484836ec4e23904ffc2dc7786cf1eb86",
+      "size": 6728,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d9207866484836ec4e23904ffc2dc7786cf1eb86"
+    },
+    {
+      "path": "deepcompressor/quantizer/impl/scale.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cb09af080bd48282c66f1819b72d40541816922a",
+      "size": 11502,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/cb09af080bd48282c66f1819b72d40541816922a"
+    },
+    {
+      "path": "deepcompressor/quantizer/impl/simple.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4173ece3796d9fb31fd285a13fb0f147f263840f",
+      "size": 2459,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/4173ece3796d9fb31fd285a13fb0f147f263840f"
+    },
+    {
+      "path": "deepcompressor/quantizer/impl/ste.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9e1f39d8d9ee51223be07d8c9ddd5a19a6ae83e5",
+      "size": 779,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/9e1f39d8d9ee51223be07d8c9ddd5a19a6ae83e5"
+    },
+    {
+      "path": "deepcompressor/quantizer/kernel",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "26761faa25e64fb11e4ac0b36ed6f81add20d8eb",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/26761faa25e64fb11e4ac0b36ed6f81add20d8eb"
+    },
+    {
+      "path": "deepcompressor/quantizer/kernel/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f891180c692097d56455bdea6322937d983a1be5",
+      "size": 137,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/f891180c692097d56455bdea6322937d983a1be5"
+    },
+    {
+      "path": "deepcompressor/quantizer/kernel/gptq.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "274a9badb2b54ab0cba6c3ecd5f4babdbbd9e294",
+      "size": 12177,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/274a9badb2b54ab0cba6c3ecd5f4babdbbd9e294"
+    },
+    {
+      "path": "deepcompressor/quantizer/kernel/rtn.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "587b2f77c9cad2f640234d87b786054faf2f1264",
+      "size": 3786,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/587b2f77c9cad2f640234d87b786054faf2f1264"
+    },
+    {
+      "path": "deepcompressor/quantizer/processor.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "36a098b0240ae3452bfe570310eaec513785ccb4",
+      "size": 17147,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/36a098b0240ae3452bfe570310eaec513785ccb4"
+    },
+    {
+      "path": "deepcompressor/utils",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "156153c2efd5c16cd805a9e669c49f5bc06e1d71",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/156153c2efd5c16cd805a9e669c49f5bc06e1d71"
+    },
+    {
+      "path": "deepcompressor/utils/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "91bee6090d7570e3ae436afab268a6f7f3dd13a1",
+      "size": 68,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/91bee6090d7570e3ae436afab268a6f7f3dd13a1"
+    },
+    {
+      "path": "deepcompressor/utils/common.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8040a9af2746b3c3c23d1333afd6f585fc549291",
+      "size": 6556,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/8040a9af2746b3c3c23d1333afd6f585fc549291"
+    },
+    {
+      "path": "deepcompressor/utils/config",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e16ac626a97743fdc13461d19f1aaa1a36fddd29",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/e16ac626a97743fdc13461d19f1aaa1a36fddd29"
+    },
+    {
+      "path": "deepcompressor/utils/config/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a10f95b67e0259dff0fa60c0b15d84be9e957188",
+      "size": 85,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/a10f95b67e0259dff0fa60c0b15d84be9e957188"
+    },
+    {
+      "path": "deepcompressor/utils/config/base.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7b29a2a2785a883da5506ab183a3a3c45eda1539",
+      "size": 7204,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/7b29a2a2785a883da5506ab183a3a3c45eda1539"
+    },
+    {
+      "path": "deepcompressor/utils/config/model.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "62aad76eda75e9fd7660350edc037a195bf77647",
+      "size": 1619,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/62aad76eda75e9fd7660350edc037a195bf77647"
+    },
+    {
+      "path": "deepcompressor/utils/config/output.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e2384ed2e1e25274a1e12822c553628af803d93b",
+      "size": 3874,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e2384ed2e1e25274a1e12822c553628af803d93b"
+    },
+    {
+      "path": "deepcompressor/utils/config/path.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "66615a973dcd836b4cdd7d0ed37374f51b7ee600",
+      "size": 2690,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/66615a973dcd836b4cdd7d0ed37374f51b7ee600"
+    },
+    {
+      "path": "deepcompressor/utils/dataclass.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "93fd47c9e499188d30fc5c566dd2d2c5e6cf7680",
+      "size": 1066,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/93fd47c9e499188d30fc5c566dd2d2c5e6cf7680"
+    },
+    {
+      "path": "deepcompressor/utils/hooks",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "48454288b51f69c6ca0db00b55e9138742d09069",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/48454288b51f69c6ca0db00b55e9138742d09069"
+    },
+    {
+      "path": "deepcompressor/utils/hooks/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b4d2b077ba28417a8cbb7623d2c498e01881c340",
+      "size": 331,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b4d2b077ba28417a8cbb7623d2c498e01881c340"
+    },
+    {
+      "path": "deepcompressor/utils/hooks/branch.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "274e1979bf879d118c67b0f4b43f0db1ec60fa87",
+      "size": 2256,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/274e1979bf879d118c67b0f4b43f0db1ec60fa87"
+    },
+    {
+      "path": "deepcompressor/utils/hooks/hook.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d58d89fd37150234b3a1c4ca00643ea03e3f4ca3",
+      "size": 7187,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d58d89fd37150234b3a1c4ca00643ea03e3f4ca3"
+    },
+    {
+      "path": "deepcompressor/utils/hooks/packager.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3b07a1bb7fbc555e3c0ab449eabfc307c212c534",
+      "size": 9943,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/3b07a1bb7fbc555e3c0ab449eabfc307c212c534"
+    },
+    {
+      "path": "deepcompressor/utils/hooks/processor.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "714187e781955f1b5c203bc7912942e92b2bf14d",
+      "size": 3139,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/714187e781955f1b5c203bc7912942e92b2bf14d"
+    },
+    {
+      "path": "deepcompressor/utils/math",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "90f2868e4db934fb30de80a76b08944ba888bd73",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/90f2868e4db934fb30de80a76b08944ba888bd73"
+    },
+    {
+      "path": "deepcompressor/utils/math/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3e46d620aaef30f2c4b303a562516c5c61dba884",
+      "size": 75,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/3e46d620aaef30f2c4b303a562516c5c61dba884"
+    },
+    {
+      "path": "deepcompressor/utils/math/functional.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "562c19f53b8fcbab4ab44f1166fc463ee9db98ca",
+      "size": 740,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/562c19f53b8fcbab4ab44f1166fc463ee9db98ca"
+    },
+    {
+      "path": "deepcompressor/utils/math/hadamard.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f5624457acb6f877c3698d20b0da35d252ee08ba",
+      "size": 2321799,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/f5624457acb6f877c3698d20b0da35d252ee08ba"
+    },
+    {
+      "path": "deepcompressor/utils/patch.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d6f19472295ae6038b390e008528d1b6f0c92e4c",
+      "size": 2229,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d6f19472295ae6038b390e008528d1b6f0c92e4c"
+    },
+    {
+      "path": "deepcompressor/utils/tools",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "61bca22341b9755ddda55ee130c66ea6fb43f69b",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/61bca22341b9755ddda55ee130c66ea6fb43f69b"
+    },
+    {
+      "path": "deepcompressor/utils/tools/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7c202f598949d1a6e8a1b91553566d08560e03b5",
+      "size": 52,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/7c202f598949d1a6e8a1b91553566d08560e03b5"
+    },
+    {
+      "path": "deepcompressor/utils/tools/logging.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e39f015c46dc72404df29371ecee8f6a1a7870f2",
+      "size": 6658,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e39f015c46dc72404df29371ecee8f6a1a7870f2"
+    },
+    {
+      "path": "deepcompressor/utils/tools/sys.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9401c0cf567ff8d57bf8dbb7d9d7fc4a80d0812f",
+      "size": 1212,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/9401c0cf567ff8d57bf8dbb7d9d7fc4a80d0812f"
+    },
+    {
+      "path": "deepcompressor/version.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "42d9553f192d8dba06cdd1c914ca250fc1ddf2fd",
+      "size": 74,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/42d9553f192d8dba06cdd1c914ca250fc1ddf2fd"
+    },
+    {
+      "path": "environment.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "caac1dab7e5270601e3178a0716f3604eaa069b2",
+      "size": 85,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/caac1dab7e5270601e3178a0716f3604eaa069b2"
+    },
+    {
+      "path": "examples",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "a0e48834ac8ff12dccbb8ae59bb0268212a98c7e",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/a0e48834ac8ff12dccbb8ae59bb0268212a98c7e"
+    },
+    {
+      "path": "examples/diffusion",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "af0d722ce92a44f8c40ac7734d13a62cc26c87a6",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/af0d722ce92a44f8c40ac7734d13a62cc26c87a6"
+    },
+    {
+      "path": "examples/diffusion/.gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c52c4ac7569eb5483ad787c1a341c204aacd43b5",
+      "size": 126,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/c52c4ac7569eb5483ad787c1a341c204aacd43b5"
+    },
+    {
+      "path": "examples/diffusion/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bfd51960d5073a38a7b110fbb818b60bad007161",
+      "size": 12907,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/bfd51960d5073a38a7b110fbb818b60bad007161"
+    },
+    {
+      "path": "examples/diffusion/configs",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "5195900d0cbcb18d443332e870bdf59c2e4e2306",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/5195900d0cbcb18d443332e870bdf59c2e4e2306"
+    },
+    {
+      "path": "examples/diffusion/configs/__default__.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c0ad56cd22c6e4f2766f09a2fb8475503a292c91",
+      "size": 2439,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/c0ad56cd22c6e4f2766f09a2fb8475503a292c91"
+    },
+    {
+      "path": "examples/diffusion/configs/collect",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "036d5f9f587b6be172b6d64c3d9fd278c55b2ce0",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/036d5f9f587b6be172b6d64c3d9fd278c55b2ce0"
+    },
+    {
+      "path": "examples/diffusion/configs/collect/qdiff.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "31426107cdcdeb15675d2ab0451ec689959eb6a5",
+      "size": 98,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/31426107cdcdeb15675d2ab0451ec689959eb6a5"
+    },
+    {
+      "path": "examples/diffusion/configs/lora",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "89844e67b61f27d36827b5c2b7b282375fe81a9b",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/89844e67b61f27d36827b5c2b7b282375fe81a9b"
+    },
+    {
+      "path": "examples/diffusion/configs/lora/__default__.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c33ebbe90b78ab32814f544868b9d5d91e1e0413",
+      "size": 46,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/c33ebbe90b78ab32814f544868b9d5d91e1e0413"
+    },
+    {
+      "path": "examples/diffusion/configs/lora/flux.1-dev",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "a0bc7aec2f84161c74629ab21c18a1b331ee84f1",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/a0bc7aec2f84161c74629ab21c18a1b331ee84f1"
+    },
+    {
+      "path": "examples/diffusion/configs/lora/flux.1-dev/anime.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d44abb2454c3c87899a22c1039f655345aee44a4",
+      "size": 326,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d44abb2454c3c87899a22c1039f655345aee44a4"
+    },
+    {
+      "path": "examples/diffusion/configs/lora/flux.1-dev/ghibsky.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "77519d990606bda5a197726151357a1d80df7eae",
+      "size": 334,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/77519d990606bda5a197726151357a1d80df7eae"
+    },
+    {
+      "path": "examples/diffusion/configs/lora/flux.1-dev/realism.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "487fa5fced22d64984c116db25bf26b7257055cc",
+      "size": 333,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/487fa5fced22d64984c116db25bf26b7257055cc"
+    },
+    {
+      "path": "examples/diffusion/configs/lora/flux.1-dev/sketch.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eaf27ddb59bf06d5977852415be0957e2536bd08",
+      "size": 410,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/eaf27ddb59bf06d5977852415be0957e2536bd08"
+    },
+    {
+      "path": "examples/diffusion/configs/lora/flux.1-dev/yarn.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1c473c526ff72b24c4f0938cb59ba93d70c99b90",
+      "size": 337,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/1c473c526ff72b24c4f0938cb59ba93d70c99b90"
+    },
+    {
+      "path": "examples/diffusion/configs/model",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "b8302e73b408087247e85461e6c1247a0d1ba3dd",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/b8302e73b408087247e85461e6c1247a0d1ba3dd"
+    },
+    {
+      "path": "examples/diffusion/configs/model/flux.1-dev.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0a0ae8b24785e558c9436dc0264fb9b2a3c2144f",
+      "size": 1181,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/0a0ae8b24785e558c9436dc0264fb9b2a3c2144f"
+    },
+    {
+      "path": "examples/diffusion/configs/model/flux.1-schnell.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9355dca7d3e141c4c8121efae90f99fe62e0942b",
+      "size": 1182,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/9355dca7d3e141c4c8121efae90f99fe62e0942b"
+    },
+    {
+      "path": "examples/diffusion/configs/model/pixart-sigma.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b094c4b7509f3a41eecd53e0f62c1bfcec8336eb",
+      "size": 921,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b094c4b7509f3a41eecd53e0f62c1bfcec8336eb"
+    },
+    {
+      "path": "examples/diffusion/configs/model/sana-1.6b.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "129e8f869c8278cd89027be6cedf45f356fe2e03",
+      "size": 1368,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/129e8f869c8278cd89027be6cedf45f356fe2e03"
+    },
+    {
+      "path": "examples/diffusion/configs/svdquant",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "a1b97da3d19e68f40d2dfa225f560de0da37db0e",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/a1b97da3d19e68f40d2dfa225f560de0da37db0e"
+    },
+    {
+      "path": "examples/diffusion/configs/svdquant/__default__.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ec39459138662de8f2700d953b61c0084f6ebcad",
+      "size": 849,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/ec39459138662de8f2700d953b61c0084f6ebcad"
+    },
+    {
+      "path": "examples/diffusion/configs/svdquant/fast.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "236b892a7e039fb6e4418a03dc97fee1e9f52994",
+      "size": 75,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/236b892a7e039fb6e4418a03dc97fee1e9f52994"
+    },
+    {
+      "path": "examples/diffusion/configs/svdquant/gptq.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bc9b7c63ed30d8f47f3ba305cdb0d7b87cb4b5e4",
+      "size": 165,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/bc9b7c63ed30d8f47f3ba305cdb0d7b87cb4b5e4"
+    },
+    {
+      "path": "examples/diffusion/configs/svdquant/int4.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "626635b0145e6e938d29901f01f2691c5b2f0618",
+      "size": 331,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/626635b0145e6e938d29901f01f2691c5b2f0618"
+    },
+    {
+      "path": "examples/diffusion/configs/svdquant/nvfp4.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c839b98661a33106983239fb81f92cb7c73a0cb4",
+      "size": 557,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/c839b98661a33106983239fb81f92cb7c73a0cb4"
+    },
+    {
+      "path": "examples/diffusion/configs/text",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "b60922a547a2a82a447a6e545fc7cec2965d1dbb",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/b60922a547a2a82a447a6e545fc7cec2965d1dbb"
+    },
+    {
+      "path": "examples/diffusion/configs/text/__default__.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ef87b92782542c2897e58c0d53653d0ba8c4b723",
+      "size": 3967,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/ef87b92782542c2897e58c0d53653d0ba8c4b723"
+    },
+    {
+      "path": "examples/diffusion/configs/text/awq.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2f6f3049e966c097ab4078a9afd0a958f583a166",
+      "size": 996,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/2f6f3049e966c097ab4078a9afd0a958f583a166"
+    },
+    {
+      "path": "examples/diffusion/prompts",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "84c4172d7bd28350c2fcb83fda2751c443e05085",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/84c4172d7bd28350c2fcb83fda2751c443e05085"
+    },
+    {
+      "path": "examples/diffusion/prompts/lora",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "a7ee172cfbfe164aa35d796fcb6b03330ffec32d",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/a7ee172cfbfe164aa35d796fcb6b03330ffec32d"
+    },
+    {
+      "path": "examples/diffusion/prompts/lora/anime.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "15830f40b60fd10b0471a1c1df30b6d972abe897",
+      "size": 5664,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/15830f40b60fd10b0471a1c1df30b6d972abe897"
+    },
+    {
+      "path": "examples/diffusion/prompts/lora/ghibsky.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c55905f6e6c498a875d6a20712c1029607aab2a5",
+      "size": 13573,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/c55905f6e6c498a875d6a20712c1029607aab2a5"
+    },
+    {
+      "path": "examples/diffusion/prompts/lora/realism.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ce7209dee287378cdbc52f63e68eb43e9be2f153",
+      "size": 9995,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/ce7209dee287378cdbc52f63e68eb43e9be2f153"
+    },
+    {
+      "path": "examples/diffusion/prompts/lora/sketch.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7c3313172387f6e58f9dec79347483641243723a",
+      "size": 10469,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/7c3313172387f6e58f9dec79347483641243723a"
+    },
+    {
+      "path": "examples/diffusion/prompts/lora/yarn.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d3b437aa67702c5d7b0794d51c9014bdda0759da",
+      "size": 5429,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/d3b437aa67702c5d7b0794d51c9014bdda0759da"
+    },
+    {
+      "path": "examples/diffusion/prompts/qdiff.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e8e0a3905b113e3de75f754fe88f98315cb5ff66",
+      "size": 62384,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/e8e0a3905b113e3de75f754fe88f98315cb5ff66"
+    },
+    {
+      "path": "examples/diffusion/scripts",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "033088b10d75cf01ca975447f0eb23c799edaed0",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/033088b10d75cf01ca975447f0eb23c799edaed0"
+    },
+    {
+      "path": "examples/diffusion/scripts/svdquant.sh",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "566ca2eb9469a7c50d17122d8cb9b55734a15e99",
+      "size": 103,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/566ca2eb9469a7c50d17122d8cb9b55734a15e99"
+    },
+    {
+      "path": "examples/llm",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "595413222a0781f6c0faa59853d3925b8fd78768",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/595413222a0781f6c0faa59853d3925b8fd78768"
+    },
+    {
+      "path": "examples/llm/.gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8bd1bd091ce8bfb01aca93648834cb03fa2e1dc8",
+      "size": 11,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/8bd1bd091ce8bfb01aca93648834cb03fa2e1dc8"
+    },
+    {
+      "path": "examples/llm/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "034dd0d9d35182fe7f89b9d08f96d6f0b7cea3f9",
+      "size": 12410,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/034dd0d9d35182fe7f89b9d08f96d6f0b7cea3f9"
+    },
+    {
+      "path": "examples/llm/configs",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "af5ca973d5370b1dcb545b55db8418f293881ddd",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/af5ca973d5370b1dcb545b55db8418f293881ddd"
+    },
+    {
+      "path": "examples/llm/configs/__default__.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "960fcc01ad826c20323a2ca653f0a0866e5e8525",
+      "size": 3354,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/960fcc01ad826c20323a2ca653f0a0866e5e8525"
+    },
+    {
+      "path": "examples/llm/configs/awq.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b6f9a408032503f5b10c7cda649dc5131e170787",
+      "size": 975,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b6f9a408032503f5b10c7cda649dc5131e170787"
+    },
+    {
+      "path": "examples/llm/configs/gptq.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b3e45792031469b09a6b036ea3db2487336184d9",
+      "size": 985,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b3e45792031469b09a6b036ea3db2487336184d9"
+    },
+    {
+      "path": "examples/llm/configs/ooo.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9a6098fc1b62d86f30b82ed2b58bd8b6a68f1386",
+      "size": 1640,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/9a6098fc1b62d86f30b82ed2b58bd8b6a68f1386"
+    },
+    {
+      "path": "examples/llm/configs/qoq-g128.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "67900543baab21f92a14054d8382c1d5cc4b132f",
+      "size": 1512,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/67900543baab21f92a14054d8382c1d5cc4b132f"
+    },
+    {
+      "path": "examples/llm/configs/qoq-gchn.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b5e804996d08dd56d11f44da6bf8c8feadeedf8b",
+      "size": 1425,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b5e804996d08dd56d11f44da6bf8c8feadeedf8b"
+    },
+    {
+      "path": "examples/llm/configs/smoothquant-dynamic.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7432542a6ff81fb52932a9e66999cd02ae2c02d4",
+      "size": 710,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/7432542a6ff81fb52932a9e66999cd02ae2c02d4"
+    },
+    {
+      "path": "examples/llm/configs/smoothquant-static.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ffcebf419e0f19faae4d1d34887bcf8ed78fcebb",
+      "size": 1002,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/ffcebf419e0f19faae4d1d34887bcf8ed78fcebb"
+    },
+    {
+      "path": "examples/llm/scripts",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "dd97f4de684bcac091a1a097d17b46610c5d242b",
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/trees/dd97f4de684bcac091a1a097d17b46610c5d242b"
+    },
+    {
+      "path": "examples/llm/scripts/awq.sh",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "59133fb1d439861f786cbca55b9a705efd87467c",
+      "size": 534,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/59133fb1d439861f786cbca55b9a705efd87467c"
+    },
+    {
+      "path": "examples/llm/scripts/gptq.sh",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8d4a14eeaa409da3dd174aede508cf05f133b16f",
+      "size": 554,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/8d4a14eeaa409da3dd174aede508cf05f133b16f"
+    },
+    {
+      "path": "examples/llm/scripts/qoq.sh",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b37207eafa3e3cbcf25076c7fca5b150971058c0",
+      "size": 6057,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/b37207eafa3e3cbcf25076c7fca5b150971058c0"
+    },
+    {
+      "path": "examples/llm/scripts/smoothquant.sh",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "766f7b08f2cd4d2fe8293da00f32bb556ecbee3f",
+      "size": 1740,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/766f7b08f2cd4d2fe8293da00f32bb556ecbee3f"
+    },
+    {
+      "path": "pyproject.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "55eb2efef6703dfe624036231126393d271ccf0c",
+      "size": 1757,
+      "url": "https://api.github.com/repos/nunchux-ai/deepcompressor/git/blobs/55eb2efef6703dfe624036231126393d271ccf0c"
+    }
+  ],
+  "truncated": false
+}
