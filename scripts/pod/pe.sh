@@ -55,4 +55,10 @@ e fd_2_b64_mean --kv-bits 2 --block-size 64 --key-mean
 e fd_2_b8      --kv-bits 2 --block-size 8
 e fd_2_b64     --kv-bits 2 --block-size 64
 
+# Optional: the window PatternKV refreshes at (every 128 tokens), so the comparison against
+# a published piecewise pattern is direct rather than by argument. Furthest from the shipped
+# setting, so it is last -- if the model code refuses 64 it will refuse this too.
+e fd_2_b128_pre  --kv-bits 2 --block-size 128 --pre-bias
+e fd_2_b128_mean --kv-bits 2 --block-size 128 --key-mean
+
 echo "$(date +%H:%M) наклон разрыва по длине записи — готово"
