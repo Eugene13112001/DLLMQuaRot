@@ -144,6 +144,22 @@ def build_prompt(adapter: ModelAdapter, question: str, few_shot: str = "") -> to
     return tok(text, return_tensors="pt")["input_ids"][0]
 
 
+def _completion_tokens(adapter: ModelAdapter, ids: torch.Tensor) -> int:
+    """Tokens up to the first stop or mask: the answer's length, not the canvas's."""
+    stops = set()
+    for name in ("eos_token_id", "pad_token_id"):
+        t = getattr(adapter.tokenizer, name, None)
+        if isinstance(t, int):
+            stops.add(t)
+    mask = getattr(adapter, "mask_id", None)
+    if isinstance(mask, int):
+        stops.add(mask)
+    for i, t in enumerate(ids.tolist()):
+        if t in stops:
+            return i
+    return int(ids.numel())
+
+
 @torch.no_grad()
 def evaluate_gsm8k(
     adapter: ModelAdapter,
@@ -174,19 +190,23 @@ def evaluate_gsm8k(
         item = ds[i]
         prompt = build_prompt(adapter, item["question"])
         out = (generate or adapter.generate)(prompt, cfg)
-        completion = adapter.tokenizer.decode(
-            out[0, prompt.shape[-1]:], skip_special_tokens=True
-        )
+        # A sampler that counts its own steps returns (ids, info); info lands in the
+        # sample as is, so the per-question record needs no knob here.
+        out, info = out if isinstance(out, tuple) else (out, {})
+        new_ids = out[0, prompt.shape[-1]:]
+        completion = adapter.tokenizer.decode(new_ids, skip_special_tokens=True)
 
         pred = extract_answer(completion)
         gold = gold_answer(item["answer"])
         hit = pred is not None and gold is not None and abs(pred - gold) < 1e-4
         correct += int(hit)
 
-        samples.append(
-            {"question": item["question"], "completion": completion,
-             "pred": pred, "gold": gold, "correct": hit}
-        )
+        sample = {"question": item["question"], "completion": completion,
+                  "pred": pred, "gold": gold, "correct": hit,
+                  "prompt_tokens": int(prompt.shape[-1]),
+                  "completion_tokens": _completion_tokens(adapter, new_ids)}
+        sample.update(info)
+        samples.append(sample)
         if verbose and (i + 1) % progress_every == 0:
             done = time.time() - started
             rate = done / (i + 1)
