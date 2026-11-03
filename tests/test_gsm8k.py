@@ -21,3 +21,12 @@ def test_gold_and_compare():
     assert gsm8k.gold("Natalia sold 48+24 = <<48+24=72>>72 clips.\n#### 72") == "72"
     assert gsm8k.gold("...\n#### 1,000") == "1000"
     assert gsm8k.is_correct("72.0", "72") and not gsm8k.is_correct("71", "72")
+
+
+def test_prompts_match_authors_evaluation():
+    q = "How many?"
+    assert gsm8k.PROMPT_STYLES["sdar"].format(question=q) == (
+        "How many?\nPlease reason step by step, and put your final answer within \\boxed{}.")
+    assert gsm8k.PROMPT_STYLES["fastdllm"].format(question=q) == (
+        "Question: How many?\nPlease reason step by step, and put your final answer within \\boxed{{}}.")
+    assert gsm8k.extract("so \\boxed{{72}}.") == "72"

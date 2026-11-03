@@ -3,8 +3,13 @@ import json
 import re
 from pathlib import Path
 
+# User message per model, as in the authors' own GSM8K evaluation.
+#   sdar:     OpenCompass gsm8k_0shot_v2_gen_17d799 (SDAR evaluation/opencompass configs).
+#   fastdllm: lm-eval `gsm8k` 0-shot, "Question: ...\nAnswer:", with "Answer:" replaced
+#             in Fast-dLLM v2/eval.py by a plain (non-format) string, so the braces stay doubled.
 PROMPT_STYLES = {
-    "boxed": "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
+    "sdar": "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
+    "fastdllm": "Question: {question}\nPlease reason step by step, and put your final answer within \\boxed{{{{}}}}.",
     "plain": "{question}",
 }
 

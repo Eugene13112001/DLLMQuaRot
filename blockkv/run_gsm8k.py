@@ -71,7 +71,8 @@ def main():
     ap.add_argument("--threshold", type=float, help="default: 0.9 SDAR, 1.0 Fast-dLLM v2")
     ap.add_argument("--steps", type=int, help="SDAR denoising steps per block (default: block size)")
     ap.add_argument("--small-block", type=int, default=8, help="Fast-dLLM v2 sub-block")
-    ap.add_argument("--prompt-style", default="boxed", choices=list(gsm8k.PROMPT_STYLES))
+    ap.add_argument("--prompt-style", choices=list(gsm8k.PROMPT_STYLES),
+                    help="default: the model family's own evaluation prompt")
     ap.add_argument("--mask-id", type=int)
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16"])
     ap.add_argument("--check-native", type=int, default=0,
@@ -84,6 +85,7 @@ def main():
     path = resolve_path(repo_id, args.model_path)
     threshold = args.threshold if args.threshold is not None else (0.9 if family == "sdar" else 1.0)
     steps = args.steps or args.block
+    style = args.prompt_style or family
 
     tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
@@ -100,7 +102,7 @@ def main():
         with open(out, encoding="utf-8") as f:
             done = {json.loads(l)["idx"] for l in f if l.strip()}
     meta = dict(vars(args), family=family, repo=repo_id, path=path, threshold=threshold,
-                steps=steps, mask_id=mid, stop_ids=stops)
+                steps=steps, prompt_style=style, mask_id=mid, stop_ids=stops)
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     print(json.dumps(meta), flush=True)
 
@@ -109,8 +111,9 @@ def main():
             if i in done:
                 continue
             p = problems[i]
+            # No system message: Fast-dLLM v2's template inserts its default one itself, SDAR's adds none.
             text = tok.apply_chat_template(
-                [{"role": "user", "content": gsm8k.PROMPT_STYLES[args.prompt_style].format(question=p["question"])}],
+                [{"role": "user", "content": gsm8k.PROMPT_STYLES[style].format(question=p["question"])}],
                 tokenize=False, add_generation_prompt=True)
             ids = tok(text, return_tensors="pt").input_ids.cuda()
             t0 = time.time()
