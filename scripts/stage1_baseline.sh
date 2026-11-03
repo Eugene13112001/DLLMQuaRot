@@ -24,7 +24,8 @@ run() {  # model block gpu suffix
   local extra=()
   [[ $1 == fastdllm ]] && extra+=(--check-native 3)
   CUDA_VISIBLE_DEVICES=$3 python -m blockkv.run_gsm8k --model "$1" --block "$2" \
-    --out "$OUT/$1_b$2$4.jsonl" "${common[@]}" "${extra[@]}" > "$OUT/$1_b$2$4.log" 2>&1
+    --out "$OUT/$1_b$2$4.jsonl" ${common[@]+"${common[@]}"} ${extra[@]+"${extra[@]}"} \
+    > "$OUT/$1_b$2$4.log" 2>&1 || echo "FAILED: $1 block $2 (see $OUT/$1_b$2$4.log)"
 }
 
 # One configuration per GPU at a time; configurations queue round-robin.
@@ -47,4 +48,9 @@ if [[ "${REPEAT:-0}" == 1 ]]; then
   python -m blockkv.summarize --compare "$OUT/${first%%:*}_b${first##*:}.jsonl" "$OUT/${first%%:*}_b${first##*:}_rep.jsonl"
 fi
 
-python -m blockkv.summarize "$OUT"/*_b[0-9]*[0-9].jsonl
+files=()
+for r in $RUNS; do
+  f="$OUT/${r%%:*}_b${r##*:}.jsonl"
+  [[ -s "$f" ]] && files+=("$f")
+done
+python -m blockkv.summarize "${files[@]}"

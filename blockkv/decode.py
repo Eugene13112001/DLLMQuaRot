@@ -92,7 +92,7 @@ def sdar_generate(model, prompt_ids, mask_id, block_length, denoising_steps,
             logits = fwd(lo, hi, cur, False).logits[0]
             tok, conf = _greedy(logits)
             conf = torch.where(masked, conf, -torch.inf)
-            k = min(n_transfer[min(step, denoising_steps - 1)], int(masked.sum()))
+            k = max(1, min(n_transfer[min(step, denoising_steps - 1)], int(masked.sum())))
             high = conf > threshold
             commit = high if int(high.sum()) >= k else torch.zeros_like(masked).scatter(0, conf.topk(k).indices, True)
             cur[0, commit] = tok[commit]
