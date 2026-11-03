@@ -36,7 +36,7 @@ bash scripts/stage1_baseline.sh                 # все 1319
 
 Для Fast-dLLM v2 на первых трёх задачах ответы нашего цикла сверяются с родным `model.generate()` токен в токен (`--check-native`).
 
-Настройки по умолчанию: SDAR — порог 0,9, шагов на блок = размер блока; Fast-dLLM v2 — блок 32, подблок 8, порог 1 (как в SoloQ и в их `eval_script.sh`); до 2048 токенов ответа.
+Настройки по умолчанию — как в оценке авторов: порог 1,0 у обеих моделей (SDAR — `eval_sdar_hf.py`, Fast-dLLM v2 — `eval_script.sh` и SoloQ), то есть по одному токену за шаг; SDAR — шагов на блок = размер блока; Fast-dLLM v2 — блок 32, подблок 8; до 2048 токенов ответа. Для режима с порогом из плана (этап 2) — `--threshold 0.9`.
 
 Промпт у каждой модели свой, как в оценке авторов (`--prompt-style` меняет):
 
@@ -45,4 +45,4 @@ bash scripts/stage1_baseline.sh                 # все 1319
 | SDAR (OpenCompass `gsm8k_0shot_v2_gen_17d799`) | `{question}\nPlease reason step by step, and put your final answer within \boxed{}.` | нет |
 | Fast-dLLM v2 (lm-eval `gsm8k` 0-shot + их `eval.py`) | `Question: {question}\nPlease reason step by step, and put your final answer within \boxed{{}}.` — двойные скобки так и есть у них | «You are a helpful assistant.» — шаблон чата добавляет сам |
 
-Опубликованные цифры SDAR посчитаны с порогом 1,0 (по одному токену за шаг) и до 4096 токенов. Для сверки с их таблицей запускать `--threshold 1.0 --gen-length 4096`.
+SDAR в своей оценке генерирует до 4096 токенов; если длинные ответы обрезаются, запускать с `--gen-length 4096`.

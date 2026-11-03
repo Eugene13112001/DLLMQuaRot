@@ -68,7 +68,8 @@ def main():
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--gen-length", type=int, default=2048)
-    ap.add_argument("--threshold", type=float, help="default: 0.9 SDAR, 1.0 Fast-dLLM v2")
+    ap.add_argument("--threshold", type=float, default=1.0,
+                    help="as in both authors' GSM8K evaluation: 1.0, one token per step")
     ap.add_argument("--steps", type=int, help="SDAR denoising steps per block (default: block size)")
     ap.add_argument("--small-block", type=int, default=8, help="Fast-dLLM v2 sub-block")
     ap.add_argument("--prompt-style", choices=list(gsm8k.PROMPT_STYLES),
@@ -83,7 +84,7 @@ def main():
 
     family, repo_id = repo(args.model, args.block)
     path = resolve_path(repo_id, args.model_path)
-    threshold = args.threshold if args.threshold is not None else (0.9 if family == "sdar" else 1.0)
+    threshold = args.threshold
     steps = args.steps or args.block
     style = args.prompt_style or family
 

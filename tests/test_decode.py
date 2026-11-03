@@ -107,6 +107,14 @@ def test_fastdllm_reproduces_target(small, P):
     assert st.forced == st.steps
 
 
+def test_sdar_threshold_one_is_static_one_token_per_step():
+    """Threshold 1.0 with steps = block reduces to SDAR's 'low_confidence' static remasking."""
+    P, block = 16, 8
+    gen, st = decode.sdar_generate(FakeSDAR(P + 20), torch.tensor([[target(p) for p in range(P)]]),
+                                   MASK, block, block, 1.0, 64, [STOP])
+    assert set(st.per_step) == {1} and st.forced == st.steps
+
+
 def test_threshold_zero_commits_whole_block_in_one_step():
     P, block = 16, 8
     gen, st = decode.sdar_generate(FakeSDAR(P + 20), torch.tensor([[target(p) for p in range(P)]]),
