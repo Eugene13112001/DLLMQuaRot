@@ -8,7 +8,8 @@
 #      RUNS (model:block[:threshold], default below), REPEAT=1 to rerun the first
 #      configuration into *_rep.jsonl for the determinism check.
 # Threshold 1.0 (the default) is the authors' evaluation, for checking against their
-# numbers; SDAR at 0.9 is the reference every compressed run is compared with.
+# numbers (and, for Fast-dLLM v2, with SoloQ's); the 0.9 runs are the reference
+# every compressed run is compared with.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -16,7 +17,7 @@ N=${N:-}
 GPUS=(${GPUS:-0})
 RUNS=${RUNS:-"sdar8b:4 sdar8b:8 sdar8b:16 sdar8b:32 sdar8b:64
   sdar8b:4:0.9 sdar8b:8:0.9 sdar8b:16:0.9 sdar8b:32:0.9 sdar8b:64:0.9
-  fastdllm:32"}
+  fastdllm:32 fastdllm:32:0.9"}
 OUT=out/stage1/${N:-full}
 mkdir -p "$OUT"
 
