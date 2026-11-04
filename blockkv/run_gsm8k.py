@@ -35,14 +35,22 @@ def resolve_path(repo_id, override):
     return repo_id
 
 
-def stop_ids(tok, model):
+# Per family, as in the authors' GSM8K evaluation:
+#   sdar:     OpenCompass huggingface_bd3.py — float16, gen_length 4096, stops = generation_config eos
+#             + tokenizer eos, templated prompt encoded without special tokens.
+#   fastdllm: Fast-dLLM v2/eval.py — bfloat16, max_new_tokens 2048, generate() stops on 151645 only.
+DEFAULTS = {
+    "sdar": dict(dtype="float16", gen_length=4096),
+    "fastdllm": dict(dtype="bfloat16", gen_length=2048),
+}
+
+
+def stop_ids(family, tok, model):
+    if family == "fastdllm":
+        return [tok.convert_tokens_to_ids("<|im_end|>")]
     ids = set()
     for e in (tok.eos_token_id, getattr(model.generation_config, "eos_token_id", None)):
         ids.update(e if isinstance(e, (list, tuple)) else [e] if e is not None else [])
-    for t in ("<|im_end|>", "<|endoftext|>"):
-        i = tok.convert_tokens_to_ids(t)
-        if isinstance(i, int) and i != tok.unk_token_id:
-            ids.add(i)
     return sorted(ids)
 
 
@@ -67,7 +75,7 @@ def main():
     ap.add_argument("--limit", type=int, help="first N problems only")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
-    ap.add_argument("--gen-length", type=int, default=2048)
+    ap.add_argument("--gen-length", type=int, help="default: 4096 SDAR, 2048 Fast-dLLM v2")
     ap.add_argument("--threshold", type=float, default=1.0,
                     help="as in both authors' GSM8K evaluation: 1.0, one token per step")
     ap.add_argument("--steps", type=int, help="SDAR denoising steps per block (default: block size)")
@@ -75,7 +83,7 @@ def main():
     ap.add_argument("--prompt-style", choices=list(gsm8k.PROMPT_STYLES),
                     help="default: the model family's own evaluation prompt")
     ap.add_argument("--mask-id", type=int)
-    ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16"])
+    ap.add_argument("--dtype", choices=["bfloat16", "float16"], help="default: float16 SDAR, bfloat16 Fast-dLLM v2")
     ap.add_argument("--check-native", type=int, default=0,
                     help="Fast-dLLM v2: also run model.generate() on the first N problems and assert identical tokens")
     args = ap.parse_args()
@@ -87,11 +95,13 @@ def main():
     threshold = args.threshold
     steps = args.steps or args.block
     style = args.prompt_style or family
+    gen_length = args.gen_length or DEFAULTS[family]["gen_length"]
+    dtype = args.dtype or DEFAULTS[family]["dtype"]
 
     tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        path, torch_dtype=getattr(torch, args.dtype), trust_remote_code=True).cuda().eval()
-    mid, stops = mask_id(family, tok, args.mask_id), stop_ids(tok, model)
+        path, torch_dtype=getattr(torch, dtype), trust_remote_code=True).cuda().eval()
+    mid, stops = mask_id(family, tok, args.mask_id), stop_ids(family, tok, model)
 
     problems = gsm8k.load(args.data)
     idxs = list(range(len(problems)))[:args.limit][args.shard::args.num_shards]
@@ -103,7 +113,8 @@ def main():
         with open(out, encoding="utf-8") as f:
             done = {json.loads(l)["idx"] for l in f if l.strip()}
     meta = dict(vars(args), family=family, repo=repo_id, path=path, threshold=threshold,
-                steps=steps, prompt_style=style, mask_id=mid, stop_ids=stops)
+                steps=steps, prompt_style=style, gen_length=gen_length, dtype=dtype,
+                mask_id=mid, stop_ids=stops)
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     print(json.dumps(meta), flush=True)
 
@@ -116,18 +127,19 @@ def main():
             text = tok.apply_chat_template(
                 [{"role": "user", "content": gsm8k.PROMPT_STYLES[style].format(question=p["question"])}],
                 tokenize=False, add_generation_prompt=True)
-            ids = tok(text, return_tensors="pt").input_ids.cuda()
+            ids = tok(text, return_tensors="pt", add_special_tokens=family != "sdar").input_ids.cuda()
             t0 = time.time()
             if family == "sdar":
                 gen, st = decode.sdar_generate(model, ids, mid, args.block, steps, threshold,
-                                               args.gen_length, stops)
+                                               gen_length, stops)
             else:
                 gen, st = decode.fastdllm_generate(model, ids, mid, args.block, args.small_block,
-                                                   threshold, args.gen_length, stops)
+                                                   threshold, gen_length, stops)
                 if n < args.check_native:
-                    ref = model.generate(ids, tokenizer=tok, max_new_tokens=args.gen_length, mask_id=mid,
+                    ref = model.generate(ids, tokenizer=tok, max_new_tokens=gen_length, mask_id=mid,
                                          threshold=threshold, small_block_size=args.small_block,
-                                         block_size=args.block, temperature=0)[0, ids.shape[1]:]
+                                         block_size=args.block, stop_token=stops[0],
+                                         temperature=0)[0, ids.shape[1]:]
                     s = decode.first_stop(ref, stops)
                     ref = ref if s is None else ref[:s + 1]
                     assert torch.equal(ref, gen), f"problem {i}: our loop differs from model.generate()"

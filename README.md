@@ -46,7 +46,18 @@ bash scripts/stage1_baseline.sh                 # все 1319
 
 Для Fast-dLLM v2 на первых трёх задачах ответы нашего цикла сверяются с родным `model.generate()` токен в токен (`--check-native`).
 
-Настройки по умолчанию — как в оценке авторов: порог 1,0 у обеих моделей (SDAR — `eval_sdar_hf.py`, Fast-dLLM v2 — `eval_script.sh` и SoloQ), то есть по одному токену за шаг; SDAR — шагов на блок = размер блока; Fast-dLLM v2 — блок 32, подблок 8; до 2048 токенов ответа. Для режима с порогом из плана (этап 2) — `--threshold 0.9`.
+Настройки по умолчанию — как в оценке авторов:
+
+| | SDAR (OpenCompass `huggingface_bd3.py`, `eval_sdar_hf.py`) | Fast-dLLM v2 (`v2/eval.py`, `eval_script.sh`) |
+|---|---|---|
+| Порог | 1,0 (по одному токену за шаг) | 1 |
+| Шагов на блок / подблок | = размер блока | блок 32, подблок 8 |
+| Длина ответа | до 4096 | до 2048 |
+| Тип чисел | float16 | bfloat16 |
+| Стоп-токены | `generation_config` + eos токенизатора (151645, 151643) | только `<|im_end|>` (151645), как в их `generate()` |
+| Кодирование промпта | `add_special_tokens=False` | по умолчанию |
+
+Для режима с порогом из плана — `--threshold 0.9`.
 
 Промпт у каждой модели свой, как в оценке авторов (`--prompt-style` меняет):
 
@@ -54,5 +65,3 @@ bash scripts/stage1_baseline.sh                 # все 1319
 |---|---|---|
 | SDAR (OpenCompass `gsm8k_0shot_v2_gen_17d799`) | `{question}\nPlease reason step by step, and put your final answer within \boxed{}.` | нет |
 | Fast-dLLM v2 (lm-eval `gsm8k` 0-shot + их `eval.py`) | `Question: {question}\nPlease reason step by step, and put your final answer within \boxed{{}}.` — двойные скобки так и есть у них | «You are a helpful assistant.» — шаблон чата добавляет сам |
-
-SDAR в своей оценке генерирует до 4096 токенов; если длинные ответы обрезаются, запускать с `--gen-length 4096`.
