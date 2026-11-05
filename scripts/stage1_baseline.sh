@@ -66,4 +66,8 @@ for r in $RUNS; do
   f="$OUT/$(name "$r").jsonl"
   [[ -s "$f" ]] && files+=("$f")
 done
-python -m blockkv.summarize "${files[@]}"
+if (( ${#files[@]} )); then
+  python -m blockkv.summarize "${files[@]}"
+else
+  echo "No finished configurations: see $OUT/*.log"
+fi
