@@ -1,6 +1,9 @@
 torch>=2.5
-transformers>=4.52.4
-flash-attn  # SDAR's modeling file imports it unconditionally
+# Fast-dLLM v2 pins 4.53.1 (v2/requirements.txt); SDAR needs >=4.52.4.
+# transformers 5 breaks Fast-dLLM v2's remote code (ROPE_INIT_FUNCTIONS has no 'default').
+transformers==4.53.1
+# SDAR's modeling file imports it unconditionally; install separately:
+#   pip install flash-attn --no-build-isolation
 datasets
 pandas
 pytest

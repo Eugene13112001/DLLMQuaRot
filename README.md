@@ -27,7 +27,8 @@ GSM8K: `openai/gsm8k` (main, test) или `test.jsonl` из grade-school-math, �
 ## Запуск
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt               # transformers==4.53.1, as Fast-dLLM v2 pins it
+pip install flash-attn --no-build-isolation   # SDAR imports it
 export MODELS_DIR=/path/to/models GSM8K=/path/to/gsm8k/test.jsonl GPUS="0 1 2 3"
 N=20 bash scripts/stage1_baseline.sh            # проверка: читать ответы в out/stage1/20/*.jsonl
 N=200 REPEAT=1 bash scripts/stage1_baseline.sh  # + проверка детерминизма
