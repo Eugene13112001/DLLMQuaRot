@@ -4,6 +4,7 @@ torch>=2.5
 transformers==4.53.1
 # SDAR's modeling file imports it unconditionally; install separately:
 #   pip install flash-attn --no-build-isolation
+accelerate  # device_map='cuda': weights load straight to the GPU
 datasets
 pandas
 pytest

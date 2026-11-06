@@ -6,7 +6,8 @@
 # Env: MODELS_DIR (checkpoints named as on HF, e.g. $MODELS_DIR/SDAR-8B-Chat-b16),
 #      GSM8K (test.jsonl/.parquet; default HF openai/gsm8k), GPUS (default "0"),
 #      RUNS (model:block[:threshold], default below), REPEAT=1 to rerun the first
-#      configuration into *_rep.jsonl for the determinism check.
+#      configuration into *_rep.jsonl for the determinism check, STAGGER (seconds
+#      between queue starts, default 90).
 # Threshold 1.0 (the default) is the authors' evaluation, for checking against their
 # numbers (and, for Fast-dLLM v2, with SoloQ's); the 0.9 runs are the reference
 # every compressed run is compared with.
@@ -45,6 +46,7 @@ run() {  # spec gpu suffix
 i=0
 for gpu in "${GPUS[@]}"; do
   (
+    sleep $((i * ${STAGGER:-90}))  # queues start one by one, so model loads don't pile up
     j=0
     for r in $RUNS; do
       if (( j % ${#GPUS[@]} == i )); then run "$r" "$gpu" ""; fi

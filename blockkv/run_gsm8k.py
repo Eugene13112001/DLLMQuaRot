@@ -99,8 +99,11 @@ def main():
     dtype = args.dtype or DEFAULTS[family]["dtype"]
 
     tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    # Straight onto the GPU, shard by shard: loading on the CPU first needs the whole
+    # model in host RAM per process, and several runs at once get OOM-killed.
     model = AutoModelForCausalLM.from_pretrained(
-        path, torch_dtype=getattr(torch, dtype), trust_remote_code=True).cuda().eval()
+        path, torch_dtype=getattr(torch, dtype), trust_remote_code=True,
+        device_map="cuda", low_cpu_mem_usage=True).eval()
     mid, stops = mask_id(family, tok, args.mask_id), stop_ids(family, tok, model)
 
     problems = gsm8k.load(args.data)
