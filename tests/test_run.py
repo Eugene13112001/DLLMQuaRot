@@ -22,3 +22,12 @@ def test_repo_names():
     assert run_gsm8k.repo("sdar8b", 4) == ("sdar", "JetLM/SDAR-8B-Chat")
     assert run_gsm8k.repo("sdar8b", 16) == ("sdar", "JetLM/SDAR-8B-Chat-b16")
     assert run_gsm8k.repo("fastdllm", 32) == ("fastdllm", "Efficient-Large-Model/Fast_dLLM_v2_7B")
+
+
+def test_resume_drops_a_cut_last_line(tmp_path):
+    out = tmp_path / "r.jsonl"
+    out.write_text('{"idx": 0, "correct": true}\n{"idx": 1, "correct": false}\n{"idx": 2, "corr',
+                   encoding="utf-8")
+    assert run_gsm8k.read_done(out) == {0, 1}
+    assert out.read_text(encoding="utf-8").count("\n") == 2
+    assert run_gsm8k.read_done(tmp_path / "missing.jsonl") == set()

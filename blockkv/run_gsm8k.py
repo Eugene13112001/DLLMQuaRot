@@ -54,6 +54,22 @@ def stop_ids(family, tok, model):
     return sorted(ids)
 
 
+def read_done(out):
+    """idx already in `out`. A run killed mid-write leaves a cut last line: drop it."""
+    if not out.exists():
+        return set()
+    good, done = [], set()
+    with open(out, encoding="utf-8") as f:
+        for line in f:
+            try:
+                done.add(json.loads(line)["idx"])
+                good.append(line if line.endswith("\n") else line + "\n")
+            except (json.JSONDecodeError, KeyError):
+                print(f"dropping a broken line in {out}", flush=True)
+    out.write_text("".join(good), encoding="utf-8")
+    return done
+
+
 def mask_id(family, tok, override):
     if override is not None:
         return override
@@ -111,10 +127,7 @@ def main():
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    done = set()
-    if out.exists():
-        with open(out, encoding="utf-8") as f:
-            done = {json.loads(l)["idx"] for l in f if l.strip()}
+    done = read_done(out)
     meta = dict(vars(args), family=family, repo=repo_id, path=path, threshold=threshold,
                 steps=steps, prompt_style=style, gen_length=gen_length, dtype=dtype,
                 mask_id=mid, stop_ids=stops)
