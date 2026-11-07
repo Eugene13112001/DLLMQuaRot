@@ -15,7 +15,9 @@ size, so blocks are compared at the same granularity and the same honest bits:
   values  per token:   one (min, step) per token over `group` channels.
 
 `window` newest tokens always stay in 16 bit (KIVI's residual); `sink` first
-tokens are never quantized. The current block is never in the cache, so it is
+tokens are never quantized. `only="k"` or `"v"` quantizes the keys or the values
+alone. `bits=16` runs the hook without rounding anything: the cache must come
+out bit-identical, which checks the hook itself. The current block is never in the cache, so it is
 never quantized either.
 """
 from dataclasses import dataclass, field
@@ -71,11 +73,13 @@ class KVQuant:
     window: int = 0
     sink: int = 0
     key_mode: str = "channel"
+    only: str = None                       # None: keys and values; "k" or "v": that one alone
     done: int = None                       # first position not yet quantized
     _err: dict = field(default_factory=dict)
 
     def __post_init__(self):
         assert self.key_mode in ("channel", "token")
+        assert self.only in (None, "k", "v")
         self.done = self.sink
 
     def __call__(self, cache, start, end):
@@ -85,13 +89,16 @@ class KVQuant:
         lo, hi = self.done, self.done + n * self.group
         for k, v in cache_layers(cache):
             ks, vs = k[:, :, lo:hi], v[:, :, lo:hi]
-            kq = quant_keys(ks, self.bits, self.group, self.key_mode)
-            vq = quant_tokens(vs, self.bits, self.group)
+            kq = quant_keys(ks, self.bits, self.group, self.key_mode) if self._does("k") else ks
+            vq = quant_tokens(vs, self.bits, self.group) if self._does("v") else vs
             self._acc("k", ks, kq)
             self._acc("v", vs, vq)
             k[:, :, lo:hi] = kq
             v[:, :, lo:hi] = vq
         self.done = hi
+
+    def _does(self, name):
+        return self.bits < 16 and self.only in (None, name)
 
     def _acc(self, name, x, xq):
         x = x.float()
@@ -101,7 +108,9 @@ class KVQuant:
 
     @property
     def honest_bits(self):
-        return self.bits + 32 / self.group
+        """Bits per cached number, keys and values averaged; 16 for what stays 16 bit."""
+        per = [self.bits + 32 / self.group if self._does(n) else 16 for n in ("k", "v")]
+        return sum(per) / 2
 
     def summary(self, cache_len):
         """Per-sample numbers for the output row."""

@@ -2,7 +2,8 @@
 # Stage 1.2: KV-cache quantization (KIVI-style, variant A) on GSM8K.
 #   bash scripts/stage1_kv.sh                 # search: fixed random 400 problems
 #   SUBSET= bash scripts/stage1_kv.sh         # final: all 1319
-# Env: RUNS (model:block:threshold:bits, default below), GPUS (default "0";
+# Env: RUNS (model:block:threshold:bits, default below; bits 2/3/4/8/16, and
+#      "2k" / "2v" quantize the keys / the values alone), GPUS (default "0";
 #      repeat a GPU to run several configurations on it), SUBSET (default 400),
 #      SEED (default 0), KV_GROUP (32), KV_WINDOW (0), KV_SINK (0), KEY_MODE
 #      (channel), STAGGER (seconds between queue starts, 90), GSM8K, MODELS_DIR.
@@ -39,8 +40,10 @@ run() {  # spec gpu
   local m b t q stem
   IFS=: read -r m b t q <<< "$1"
   stem=$(name "$1")
+  local only=()
+  [[ $q == *[kv] ]] && only=(--kv-only "${q: -1}")
   CUDA_VISIBLE_DEVICES=$2 python -m blockkv.run_gsm8k --model "$m" --block "$b" --threshold "$t" \
-    --kv-bits "$q" --out "$OUT/$stem.jsonl" "${common[@]}" \
+    --kv-bits "${q%[kv]}" "${only[@]}" --out "$OUT/$stem.jsonl" "${common[@]}" \
     > "$OUT/$stem.log" 2>&1 || echo "FAILED: $1 (see $OUT/$stem.log)"
 }
 

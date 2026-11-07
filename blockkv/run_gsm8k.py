@@ -105,8 +105,10 @@ def main():
     ap.add_argument("--subset", type=int,
                     help="a fixed random subset of N problems (same N and --seed: same problems)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--kv-bits", type=int, choices=[2, 3, 4, 8],
-                    help="quantize the KV cache of committed blocks (default: no quantization)")
+    ap.add_argument("--kv-bits", type=int, choices=[2, 3, 4, 8, 16],
+                    help="quantize the KV cache of committed blocks (default: no quantization; "
+                         "16: the hook runs but rounds nothing, a check that it changes nothing)")
+    ap.add_argument("--kv-only", choices=["k", "v"], help="quantize the keys or the values alone")
     ap.add_argument("--kv-group", type=int, default=32, help="tokens (keys) / channels (values) per group")
     ap.add_argument("--kv-window", type=int, default=0, help="newest tokens always kept in 16 bit")
     ap.add_argument("--kv-sink", type=int, default=0, help="first tokens never quantized")
@@ -147,7 +149,7 @@ def main():
     meta = dict(vars(args), family=family, repo=repo_id, path=path, threshold=threshold,
                 steps=steps, prompt_style=style, gen_length=gen_length, dtype=dtype,
                 mask_id=mid, stop_ids=stops,
-                kv_honest_bits=KVQuant(args.kv_bits, args.kv_group).honest_bits if args.kv_bits else 16)
+                kv_honest_bits=KVQuant(args.kv_bits, args.kv_group, only=args.kv_only).honest_bits if args.kv_bits else 16)
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     print(json.dumps(meta), flush=True)
 
@@ -162,7 +164,8 @@ def main():
                 tokenize=False, add_generation_prompt=True)
             ids = tok(text, return_tensors="pt", add_special_tokens=family != "sdar").input_ids.cuda()
             t0 = time.time()
-            quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode)
+            quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode,
+                             args.kv_only)
                      if args.kv_bits else None)
             if family == "sdar":
                 gen, st = decode.sdar_generate(model, ids, mid, args.block, steps, threshold,

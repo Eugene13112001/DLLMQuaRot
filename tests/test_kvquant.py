@@ -130,3 +130,29 @@ def test_sdar_loop_quantizes_committed_blocks(block):
     assert torch.equal(gen, ref)   # the fake model ignores the cache: decoding is unchanged
     assert st.cache_len == (stop_at // block + 1) * block
     assert quant.done == (st.cache_len // 32) * 32
+
+
+def test_16_bit_changes_nothing():
+    """Self-check 1: the hook runs but must return the cache bit for bit."""
+    quant = KVQuant(bits=16, group=32)
+    cache = stored(8, 200, quant)
+    assert quant.done == 192 and quant.honest_bits == 16
+    for layer, (k, v) in enumerate(cache_layers(cache)):
+        ref_k, ref_v = kv_at(0, 200, layer)
+        assert torch.equal(k, ref_k) and torch.equal(v, ref_v)
+    s = quant.summary(200)
+    assert s["kv_bits_avg"] == 16 and s["kv_relerr_k"] == 0 and s["kv_relerr_v"] == 0
+
+
+@pytest.mark.parametrize("only", ["k", "v"])
+def test_keys_or_values_alone(only):
+    quant = KVQuant(bits=2, group=32, only=only)
+    cache = stored(16, 128, quant)
+    both = stored(16, 128, KVQuant(bits=2, group=32))
+    for layer, ((k, v), (bk, bv)) in enumerate(zip(cache_layers(cache), cache_layers(both))):
+        ref_k, ref_v = kv_at(0, 128, layer)
+        assert torch.equal(k, bk if only == "k" else ref_k)
+        assert torch.equal(v, bv if only == "v" else ref_v)
+    assert quant.honest_bits == (3 + 16) / 2
+    s = quant.summary(128)
+    assert (s["kv_relerr_k"] > 0) == (only == "k") and (s["kv_relerr_v"] > 0) == (only == "v")
