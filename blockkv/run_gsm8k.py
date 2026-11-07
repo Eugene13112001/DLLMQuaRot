@@ -8,12 +8,14 @@ per_step, text. An existing output file is resumed: finished idx are skipped.
 import argparse
 import json
 import os
+import random
 import time
 from pathlib import Path
 
 import torch
 
 from blockkv import decode, gsm8k
+from blockkv.kvquant import KVQuant
 
 def repo(model, block):
     """(family, HF repo id). SDAR's unsuffixed release is the block-4 model."""
@@ -100,6 +102,15 @@ def main():
                     help="default: the model family's own evaluation prompt")
     ap.add_argument("--mask-id", type=int)
     ap.add_argument("--dtype", choices=["bfloat16", "float16"], help="default: float16 SDAR, bfloat16 Fast-dLLM v2")
+    ap.add_argument("--subset", type=int,
+                    help="a fixed random subset of N problems (same N and --seed: same problems)")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--kv-bits", type=int, choices=[2, 3, 4, 8],
+                    help="quantize the KV cache of committed blocks (default: no quantization)")
+    ap.add_argument("--kv-group", type=int, default=32, help="tokens (keys) / channels (values) per group")
+    ap.add_argument("--kv-window", type=int, default=0, help="newest tokens always kept in 16 bit")
+    ap.add_argument("--kv-sink", type=int, default=0, help="first tokens never quantized")
+    ap.add_argument("--key-mode", choices=["channel", "token"], default="channel")
     ap.add_argument("--check-native", type=int, default=0,
                     help="Fast-dLLM v2: also run model.generate() on the first N problems and assert identical tokens")
     args = ap.parse_args()
@@ -123,14 +134,20 @@ def main():
     mid, stops = mask_id(family, tok, args.mask_id), stop_ids(family, tok, model)
 
     problems = gsm8k.load(args.data)
-    idxs = list(range(len(problems)))[:args.limit][args.shard::args.num_shards]
+    idxs = list(range(len(problems)))
+    if args.subset:
+        idxs = sorted(random.Random(args.seed).sample(idxs, args.subset))
+    idxs = idxs[:args.limit][args.shard::args.num_shards]
+    if args.kv_bits and args.check_native:
+        raise SystemExit("--check-native compares the uncompressed loop only")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     done = read_done(out)
     meta = dict(vars(args), family=family, repo=repo_id, path=path, threshold=threshold,
                 steps=steps, prompt_style=style, gen_length=gen_length, dtype=dtype,
-                mask_id=mid, stop_ids=stops)
+                mask_id=mid, stop_ids=stops,
+                kv_honest_bits=KVQuant(args.kv_bits, args.kv_group).honest_bits if args.kv_bits else 16)
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     print(json.dumps(meta), flush=True)
 
@@ -145,12 +162,14 @@ def main():
                 tokenize=False, add_generation_prompt=True)
             ids = tok(text, return_tensors="pt", add_special_tokens=family != "sdar").input_ids.cuda()
             t0 = time.time()
+            quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode)
+                     if args.kv_bits else None)
             if family == "sdar":
                 gen, st = decode.sdar_generate(model, ids, mid, args.block, steps, threshold,
-                                               gen_length, stops)
+                                               gen_length, stops, on_store=quant)
             else:
                 gen, st = decode.fastdllm_generate(model, ids, mid, args.block, args.small_block,
-                                                   threshold, gen_length, stops)
+                                                   threshold, gen_length, stops, on_store=quant)
                 if n < args.check_native:
                     ref = model.generate(ids, tokenizer=tok, max_new_tokens=gen_length, mask_id=mid,
                                          threshold=threshold, small_block_size=args.small_block,
@@ -165,6 +184,8 @@ def main():
                        gen_tokens=len(gen), steps=st.steps, nfe=st.nfe, forced=st.forced,
                        blocks=st.blocks, per_step=st.per_step, sec=round(time.time() - t0, 2),
                        text=answer)
+            if quant is not None:
+                row.update(quant.summary(st.cache_len))
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()
             print(f"[{n + 1}/{len(idxs)}] idx={i} correct={row['correct']} tokens={row['gen_tokens']} "

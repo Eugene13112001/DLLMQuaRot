@@ -23,6 +23,7 @@ class Stats:
     nfe: int = 0            # all forwards: prefill + steps + block commits
     forced: int = 0         # tokens committed with confidence <= threshold
     blocks: int = 0         # generated blocks
+    cache_len: int = 0      # tokens in the KV cache at the end
     per_step: list = field(default_factory=list)  # tokens committed at each step
 
     def record(self, n_commit, n_forced):
@@ -68,8 +69,10 @@ def sdar_generate(model, prompt_ids, mask_id, block_length, denoising_steps,
         st.nfe += store
         out = model(cur, attention_mask=attn[:, lo:hi, :hi], position_ids=pos[:, lo:hi],
                     past_key_values=cache, use_cache=True, store_kv=store)
-        if store and on_store is not None:
-            on_store(cache, lo, hi)
+        if store:
+            st.cache_len = hi
+            if on_store is not None:
+                on_store(cache, lo, hi)
         return out
 
     # Split block_length into denoising_steps counts, remainder to the earliest steps.
@@ -120,9 +123,10 @@ def fastdllm_generate(model, prompt_ids, mask_id, block_size, small_block_size,
         st.nfe += store
         out = model(input_ids=window, use_cache=True, past_key_values=cache,
                     update_past_key_values=store)
-        if store and on_store is not None:
-            n = out.past_key_values.get_seq_length()
-            on_store(out.past_key_values, n - window.shape[1], n)
+        if store:
+            n = st.cache_len = out.past_key_values.get_seq_length()
+            if on_store is not None:
+                on_store(out.past_key_values, n - window.shape[1], n)
         return out
 
     x = prompt_ids

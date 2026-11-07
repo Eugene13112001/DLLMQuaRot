@@ -14,7 +14,8 @@ def read(path):
 
 
 def table(paths):
-    print(f"{'file':40s} {'n':>5s} {'acc':>6s} {'±95':>5s} {'tokens':>7s} {'steps':>7s} {'tok/step':>8s} {'forced%':>7s}")
+    print(f"{'file':40s} {'n':>5s} {'acc':>6s} {'±95':>5s} {'tokens':>7s} {'steps':>7s} {'tok/step':>8s} {'forced%':>7s}"
+          f" {'bits':>5s} {'errK':>7s} {'errV':>7s}")
     for p in paths:
         rows = list(read(p).values())
         n = len(rows)
@@ -27,7 +28,15 @@ def table(paths):
         committed = sum(sum(r["per_step"]) for r in rows)
         forced = sum(r["forced"] for r in rows) / max(committed, 1)
         print(f"{p[-40:]:40s} {n:5d} {100 * acc:6.1f} {100 * ci:5.1f} {tok:7.0f} {steps:7.0f} "
-              f"{committed / max(sum(r['steps'] for r in rows), 1):8.2f} {100 * forced:7.1f}")
+              f"{committed / max(sum(r['steps'] for r in rows), 1):8.2f} {100 * forced:7.1f}"
+              f" {kv(rows, 'kv_bits_avg', '5.2f')} {kv(rows, 'kv_relerr_k', '7.4f')} {kv(rows, 'kv_relerr_v', '7.4f')}")
+
+
+def kv(rows, key, fmt):
+    """Mean of a quantization column over the rows that have it ('-' for uncompressed runs)."""
+    vals = [r[key] for r in rows if key in r]
+    width = int(fmt.split(".")[0])
+    return format(sum(vals) / len(vals), fmt) if vals else "-".rjust(width)
 
 
 def compare(a, b):
