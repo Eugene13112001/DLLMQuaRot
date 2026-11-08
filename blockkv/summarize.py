@@ -6,6 +6,9 @@
 import argparse
 import json
 import math
+from statistics import median
+
+RUNAWAY = 2000   # tokens: such answers ran into the length limit, and they swamp the mean
 
 
 def read(path):
@@ -14,7 +17,7 @@ def read(path):
 
 
 def table(paths):
-    print(f"{'file':40s} {'n':>5s} {'acc':>6s} {'±95':>5s} {'tokens':>7s} {'steps':>7s} {'tok/step':>8s} {'forced%':>7s}"
+    print(f"{'file':40s} {'n':>5s} {'acc':>6s} {'±95':>5s} {'tokens':>7s} {'steps':>7s} {'med.st':>7s} {'runaw':>5s} {'tok/step':>8s} {'forced%':>7s}"
           f" {'bits':>5s} {'errK':>7s} {'errV':>7s}")
     for p in paths:
         rows = list(read(p).values())
@@ -27,9 +30,22 @@ def table(paths):
         steps = sum(r["steps"] for r in rows) / n
         committed = sum(sum(r["per_step"]) for r in rows)
         forced = sum(r["forced"] for r in rows) / max(committed, 1)
-        print(f"{p[-40:]:40s} {n:5d} {100 * acc:6.1f} {100 * ci:5.1f} {tok:7.0f} {steps:7.0f} "
+        print(f"{p[-40:]:40s} {n:5d} {100 * acc:6.1f} {100 * ci:5.1f} {tok:7.0f} {steps:7.0f} {median(r['steps'] for r in rows):7.0f} {runaways(rows):5d} "
               f"{committed / max(sum(r['steps'] for r in rows), 1):8.2f} {100 * forced:7.1f}"
               f" {kv(rows, 'kv_bits_avg', '5.2f')} {kv(rows, 'kv_relerr_k', '7.4f')} {kv(rows, 'kv_relerr_v', '7.4f')}")
+
+
+def runaways(rows):
+    return sum(r["gen_tokens"] >= RUNAWAY for r in rows)
+
+
+def change(key, ra, rb, common):
+    """One comparison line for `key`: medians, then means without the runaway answers."""
+    calm = [i for i in common if ra[i]["gen_tokens"] < RUNAWAY and rb[i]["gen_tokens"] < RUNAWAY]
+    mid_a, mid_b = (median(r[i][key] for i in common) for r in (ra, rb))
+    mean_a, mean_b = (sum(r[i][key] for i in calm) / max(len(calm), 1) for r in (ra, rb))
+    print(f"{key}: median a={mid_a:.0f} b={mid_b:.0f} ({100 * (mid_b / mid_a - 1):+.1f}%); "
+          f"mean without runaways a={mean_a:.1f} b={mean_b:.1f} ({100 * (mean_b / mean_a - 1):+.1f}%, n={len(calm)})")
 
 
 def kv(rows, key, fmt):
@@ -55,8 +71,11 @@ def compare(a, b):
     print(f"common problems: {n}, identical outputs: {same_text}")
     print(f"accuracy a={100 * acc_a:.1f} b={100 * acc_b:.1f} diff(b-a)={100 * (acc_b - acc_a):+.1f} ±{196 * se:.1f}")
     print(f"solved only by a: {only_a}, only by b: {only_b}")
+    print(f"runaway answers a={runaways([ra[i] for i in common])} b={runaways([rb[i] for i in common])}")
+    change("gen_tokens", ra, rb, common)
     if steps_a and steps_b:      # the batched runner does not count steps
         print(f"mean steps a={steps_a:.1f} b={steps_b:.1f} ({100 * (steps_b / steps_a - 1):+.1f}%)")
+        change("steps", ra, rb, common)
 
 
 if __name__ == "__main__":
