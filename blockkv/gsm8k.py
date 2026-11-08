@@ -1,5 +1,6 @@
 """GSM8K loading, prompting and scoring."""
 import json
+import math
 import re
 from pathlib import Path
 
@@ -43,6 +44,8 @@ def normalize(s):
     try:
         x = float(s)
     except ValueError:
+        return s
+    if not math.isfinite(x):      # a runaway answer: more digits than a float holds, or 'nan'
         return s
     return str(int(x)) if x == int(x) else str(x)
 

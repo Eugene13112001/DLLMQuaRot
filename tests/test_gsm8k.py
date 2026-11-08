@@ -30,3 +30,10 @@ def test_prompts_match_authors_evaluation():
     assert gsm8k.PROMPT_STYLES["fastdllm"].format(question=q) == (
         "Question: How many?\nPlease reason step by step, and put your final answer within \\boxed{{}}.")
     assert gsm8k.extract("so \\boxed{{72}}.") == "72"
+
+
+def test_number_too_long_for_a_float_is_just_wrong():
+    huge = "9" * 400
+    assert gsm8k.extract("\boxed{" + huge + "}") == huge
+    assert not gsm8k.is_correct(huge, "72")
+    assert gsm8k.normalize("nan") == "nan" and gsm8k.normalize("inf") == "inf"
