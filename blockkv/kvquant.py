@@ -32,16 +32,18 @@ def cache_layers(cache):
     return [(layer.keys, layer.values) for layer in cache.layers]
 
 
-def fake_quant(x, bits, dim):
+def fake_quant(x, bits, dim, shared=False):
     """Quantize-dequantize `x` with one (min, step) per slice along `dim`.
 
     Computed in float32; min and step are rounded to x's dtype first, as they
-    would be stored next to the codes.
+    would be stored next to the codes. `shared`: one (min, step) for the whole
+    batch instead of one per sample (official KIVI keeps them per sample).
     """
     xf = x.float()
     levels = 2 ** bits - 1
-    mn = xf.amin(dim, keepdim=True)
-    step = (xf.amax(dim, keepdim=True) - mn) / levels
+    dims = (0, dim) if shared else dim
+    mn = xf.amin(dims, keepdim=True)
+    step = (xf.amax(dims, keepdim=True) - mn) / levels
     mn = mn.to(x.dtype).float()
     step = step.to(x.dtype).float()
     step = torch.where(step > 0, step, torch.ones_like(step))   # constant slice: exact
@@ -49,19 +51,19 @@ def fake_quant(x, bits, dim):
     return (q * step + mn).to(x.dtype)
 
 
-def quant_keys(k, bits, group, mode):
+def quant_keys(k, bits, group, mode, shared=False):
     """k: (b, h, n * group, d) -> same shape, quantized."""
     b, h, t, d = k.shape
     if mode == "channel":
-        return fake_quant(k.reshape(b, h, t // group, group, d), bits, 3).reshape(b, h, t, d)
-    return quant_tokens(k, bits, group)
+        return fake_quant(k.reshape(b, h, t // group, group, d), bits, 3, shared).reshape(b, h, t, d)
+    return quant_tokens(k, bits, group, shared)
 
 
-def quant_tokens(v, bits, group):
+def quant_tokens(v, bits, group, shared=False):
     """v: (b, h, t, d), groups of `group` channels within each token."""
     b, h, t, d = v.shape
     assert d % group == 0, f"head_dim {d} is not a multiple of the group {group}"
-    return fake_quant(v.reshape(b, h, t, d // group, group), bits, 4).reshape(b, h, t, d)
+    return fake_quant(v.reshape(b, h, t, d // group, group), bits, 4, shared).reshape(b, h, t, d)
 
 
 @dataclass
@@ -74,6 +76,7 @@ class KVQuant:
     sink: int = 0
     key_mode: str = "channel"
     only: str = None                       # None: keys and values; "k" or "v": that one alone
+    shared: bool = False                   # one (min, step) per batch instead of per sample
     done: int = None                       # first position not yet quantized
     _err: dict = field(default_factory=dict)
 
@@ -89,8 +92,8 @@ class KVQuant:
         lo, hi = self.done, self.done + n * self.group
         for k, v in cache_layers(cache):
             ks, vs = k[:, :, lo:hi], v[:, :, lo:hi]
-            kq = quant_keys(ks, self.bits, self.group, self.key_mode) if self._does("k") else ks
-            vq = quant_tokens(vs, self.bits, self.group) if self._does("v") else vs
+            kq = quant_keys(ks, self.bits, self.group, self.key_mode, self.shared) if self._does("k") else ks
+            vq = quant_tokens(vs, self.bits, self.group, self.shared) if self._does("v") else vs
             self._acc("k", ks, kq)
             self._acc("v", vs, vq)
             k[:, :, lo:hi] = kq

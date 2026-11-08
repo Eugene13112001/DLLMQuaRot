@@ -156,3 +156,21 @@ def test_keys_or_values_alone(only):
     assert quant.honest_bits == (3 + 16) / 2
     s = quant.summary(128)
     assert (s["kv_relerr_k"] > 0) == (only == "k") and (s["kv_relerr_v"] > 0) == (only == "v")
+
+
+def test_shared_scale_spans_the_batch():
+    from blockkv.kvquant import quant_keys
+    a = torch.randn(1, 2, 32, 64) * 0.1
+    b = torch.randn(1, 2, 32, 64) * 10
+    x = torch.cat([a, b]).half()
+    alone = quant_keys(a.half(), 2, 32, "channel")
+    assert torch.equal(quant_keys(x, 2, 32, "channel")[:1], alone)   # per sample: the neighbour is irrelevant
+    shared = quant_keys(x, 2, 32, "channel", shared=True)[:1]
+    assert (shared.float() - a).pow(2).sum() > 10 * (alone.float() - a).pow(2).sum()
+
+
+def test_batches_follow_the_harness():
+    from blockkv.fastdllm_batch import make_batches, pad_right
+    assert make_batches([5, 1, 3, 2], 3) == [[1, 3, 2], [0]]
+    ids, seq = pad_right([[7, 8, 9], [4]], 99, "cpu")
+    assert ids.tolist() == [[7, 8, 9], [4, 99, 99]] and seq.tolist() == [3, 1]
