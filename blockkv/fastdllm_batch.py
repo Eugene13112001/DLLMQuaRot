@@ -10,6 +10,7 @@ This script checks whether that difference explains the gap to SoloQ's numbers.
 import argparse
 import importlib.util
 import json
+import sys
 import types
 from pathlib import Path
 
@@ -64,6 +65,7 @@ def main():
 
     spec = importlib.util.spec_from_file_location("generation_functions", args.gen_fn)
     gen_fn = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = gen_fn     # auto_docstring looks the class's file up there
     spec.loader.exec_module(gen_fn)
 
     tok = AutoTokenizer.from_pretrained(REPO, trust_remote_code=True)
