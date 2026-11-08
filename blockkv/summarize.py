@@ -55,7 +55,8 @@ def compare(a, b):
     print(f"common problems: {n}, identical outputs: {same_text}")
     print(f"accuracy a={100 * acc_a:.1f} b={100 * acc_b:.1f} diff(b-a)={100 * (acc_b - acc_a):+.1f} ±{196 * se:.1f}")
     print(f"solved only by a: {only_a}, only by b: {only_b}")
-    print(f"mean steps a={steps_a:.1f} b={steps_b:.1f} ({100 * (steps_b / steps_a - 1):+.1f}%)")
+    if steps_a and steps_b:      # the batched runner does not count steps
+        print(f"mean steps a={steps_a:.1f} b={steps_b:.1f} ({100 * (steps_b / steps_a - 1):+.1f}%)")
 
 
 if __name__ == "__main__":
