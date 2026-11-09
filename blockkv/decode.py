@@ -47,8 +47,13 @@ def _greedy(logits):
 
 @torch.no_grad()
 def sdar_generate(model, prompt_ids, mask_id, block_length, denoising_steps,
-                  threshold, gen_length, stop_ids, on_store=None):
-    """Returns (generated token ids up to and including the stop token, Stats)."""
+                  threshold, gen_length, stop_ids, on_store=None, prefill_chunk=None):
+    """Returns (generated token ids up to and including the stop token, Stats).
+
+    `prefill_chunk`: feed the prompt to the cache in pieces of about this many tokens
+    (whole blocks), so that a very long prompt fits in memory; `on_store` still sees
+    the whole prompt once, after the last piece, as with a single forward.
+    """
     from transformers.cache_utils import DynamicCache
 
     dev = prompt_ids.device
@@ -65,13 +70,13 @@ def sdar_generate(model, prompt_ids, mask_id, block_length, denoising_steps,
     cache = DynamicCache()
     st = Stats()
 
-    def fwd(lo, hi, cur, store):
+    def fwd(lo, hi, cur, store, hook=True):
         st.nfe += store
         out = model(cur, attention_mask=attn[:, lo:hi, :hi], position_ids=pos[:, lo:hi],
                     past_key_values=cache, use_cache=True, store_kv=store)
         if store:
             st.cache_len = hi
-            if on_store is not None:
+            if on_store is not None and hook:
                 on_store(cache, lo, hi)
         return out
 
@@ -81,7 +86,12 @@ def sdar_generate(model, prompt_ids, mask_id, block_length, denoising_steps,
 
     prefill = (P // B) * B
     if prefill > 0:
-        fwd(0, prefill, x[:, :prefill], True)
+        step = max(B, prefill_chunk // B * B) if prefill_chunk else prefill
+        for lo in range(0, prefill, step):
+            hi = min(lo + step, prefill)
+            fwd(lo, hi, x[:, lo:hi], True, hook=False)
+        if on_store is not None:
+            on_store(cache, 0, prefill)
 
     for nb in range(P // B, num_blocks):
         lo, hi = nb * B, (nb + 1) * B

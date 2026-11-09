@@ -70,6 +70,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int)
     ap.add_argument("--threshold", type=float, default=0.9)
+    ap.add_argument("--prefill-chunk", type=int, default=1024,
+                    help="feed the prompt in pieces of this many tokens (0: one forward, needs tens of GiB at 16K)")
     ap.add_argument("--kv-bits", type=int, choices=[2, 3, 4, 8, 16])
     ap.add_argument("--kv-only", choices=["k", "v"])
     ap.add_argument("--kv-group", type=int, default=32)
@@ -107,7 +109,7 @@ def main():
                      if args.kv_bits else None)
             t0 = time.time()
             gen, st = decode.sdar_generate(model, ids, mid, args.block, args.block, args.threshold, limit, stops,
-                                           on_store=quant)
+                                           on_store=quant, prefill_chunk=args.prefill_chunk or None)
             gen = gen[:limit]
             answer = tok.decode(gen, skip_special_tokens=True)
             s = score(r["task"], answer, r["answer"])

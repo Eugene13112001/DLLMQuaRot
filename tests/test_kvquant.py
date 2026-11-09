@@ -174,3 +174,24 @@ def test_batches_follow_the_harness():
     assert make_batches([5, 1, 3, 2], 3) == [[1, 3, 2], [0]]
     ids, seq = pad_right([[7, 8, 9], [4]], 99, "cpu")
     assert ids.tolist() == [[7, 8, 9], [4, 99, 99]] and seq.tolist() == [3, 1]
+
+
+@pytest.mark.parametrize("chunk", [8, 16, 30, 1000])
+def test_prefill_in_chunks_is_one_store_for_the_quantizer(chunk):
+    from tests.test_decode import target, MASK, STOP
+    P, stop_at = 40, 40 + 90
+    prompt = torch.tensor([[target(p) for p in range(P)]])
+    calls = []
+
+    def hook(cache, start, end):
+        calls.append((start, end, cache.get_seq_length()))
+    gen, st = decode.sdar_generate(FakeSDARWithKV(stop_at), prompt, MASK, 4, 4, 0.9, 256, [STOP],
+                                   on_store=hook, prefill_chunk=chunk)
+    ref_calls = []
+
+    def ref_hook(cache, start, end):
+        ref_calls.append((start, end, cache.get_seq_length()))
+    ref, _ = decode.sdar_generate(FakeSDARWithKV(stop_at), prompt, MASK, 4, 4, 0.9, 256, [STOP], on_store=ref_hook)
+    assert torch.equal(gen, ref)
+    assert calls == ref_calls and calls[0] == (0, 40, 40)     # the quantizer sees the same stores
+    assert st.nfe > _.nfe or chunk >= 40
