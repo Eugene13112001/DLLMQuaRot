@@ -39,15 +39,17 @@ def first_stop(tokens, stop_ids):
     return int(hits[0]) if len(hits) else None
 
 
-def _greedy(logits):
-    probs = torch.softmax(logits.float(), dim=-1)
+def _greedy(logits, temp=1.0):
+    """(argmax token, confidence). `temp` is DECAL's commit temperature: it rescales
+    the confidence the threshold reads, never the token that gets written."""
+    probs = torch.softmax(logits.float() / temp, dim=-1)
     conf, tok = probs.max(dim=-1)
     return tok, conf
 
 
 @torch.no_grad()
 def sdar_generate(model, prompt_ids, mask_id, block_length, denoising_steps,
-                  threshold, gen_length, stop_ids, on_store=None, prefill_chunk=None):
+                  threshold, gen_length, stop_ids, on_store=None, prefill_chunk=None, commit_temp=1.0):
     """Returns (generated token ids up to and including the stop token, Stats).
 
     `prefill_chunk`: feed the prompt to the cache in pieces of about this many tokens
@@ -103,7 +105,7 @@ def sdar_generate(model, prompt_ids, mask_id, block_length, denoising_steps,
                 fwd(lo, hi, cur, True)
                 break
             logits = fwd(lo, hi, cur, False).logits[0]
-            tok, conf = _greedy(logits)
+            tok, conf = _greedy(logits, commit_temp)
             conf = torch.where(masked, conf, -torch.inf)
             k = max(1, min(n_transfer[min(step, denoising_steps - 1)], int(masked.sum())))
             high = conf > threshold
@@ -123,7 +125,7 @@ def sdar_generate(model, prompt_ids, mask_id, block_length, denoising_steps,
 
 @torch.no_grad()
 def fastdllm_generate(model, prompt_ids, mask_id, block_size, small_block_size,
-                      threshold, max_new_tokens, stop_ids, on_store=None):
+                      threshold, max_new_tokens, stop_ids, on_store=None, commit_temp=1.0):
     """Returns (generated token ids up to and including the stop token, Stats)."""
     P, B = prompt_ids.shape[1], block_size
     assert P > B, "prompt shorter than one block: the reference generate() is not mirrored there"
@@ -162,7 +164,7 @@ def fastdllm_generate(model, prompt_ids, mask_id, block_size, small_block_size,
             while (x[0, start:end] == mask_id).any():
                 logits = fwd(x[:, -B:], False, cache).logits
                 logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)[0, start:end]
-                tok, conf = _greedy(logits)
+                tok, conf = _greedy(logits, commit_temp)
                 masked = x[0, start:end] == mask_id
                 conf = torch.where(masked, conf, -torch.inf)
                 high = conf > threshold

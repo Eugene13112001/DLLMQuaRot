@@ -7,7 +7,7 @@
 #      key_mode channel or token), GPUS (default "0";
 #      repeat a GPU to run several configurations on it), SUBSET (default 400),
 #      SEED (default 0), KV_GROUP (32), KV_WINDOW (0), KV_SINK (0), KEY_MODE
-#      (channel), STAGGER (seconds between queue starts, 90), GSM8K, MODELS_DIR.
+#      (channel), COMMIT_TEMP (1.0, DECAL's commit temperature), STAGGER (seconds between queue starts, 90), GSM8K, MODELS_DIR.
 # Compare each run with its uncompressed reference on the same problems:
 #   python -m blockkv.summarize --compare out/stage1/full/sdar8b_b16_t0.9.jsonl \
 #                                         out/stage1_kv/400/sdar8b_b16_t0.9_kv2.jsonl
@@ -23,7 +23,8 @@ G=${KV_GROUP:-32} W=${KV_WINDOW:-0} S=${KV_SINK:-0} KM=${KEY_MODE:-channel}
 OUT=out/stage1_kv/${SUBSET:-full}
 mkdir -p "$OUT"
 
-common=(--kv-group "$G" --kv-window "$W" --kv-sink "$S")
+CT=${COMMIT_TEMP:-1.0}
+common=(--kv-group "$G" --kv-window "$W" --kv-sink "$S" --commit-temp "$CT")
 [[ -n "$SUBSET" ]] && common+=(--subset "$SUBSET" --seed "${SEED:-0}")
 [[ -n "${GSM8K:-}" ]] && common+=(--data "$GSM8K")
 
@@ -36,6 +37,7 @@ name() {  # model:block:threshold:bits[:key_mode] -> file stem; non-default sett
   [[ $W != 0 ]] && s+="_w$W"
   [[ $S != 0 ]] && s+="_s$S"
   [[ $k != channel ]] && s+="_k$k"
+  [[ $CT != 1.0 ]] && s+="_T$CT"
   echo "$s"
 }
 

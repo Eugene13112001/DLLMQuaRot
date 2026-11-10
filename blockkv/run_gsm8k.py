@@ -113,6 +113,8 @@ def main():
     ap.add_argument("--kv-window", type=int, default=0, help="newest tokens always kept in 16 bit")
     ap.add_argument("--kv-sink", type=int, default=0, help="first tokens never quantized")
     ap.add_argument("--key-mode", choices=["channel", "token"], default="channel")
+    ap.add_argument("--commit-temp", type=float, default=1.0,
+                    help="DECAL commit temperature: confidence = softmax(logits / T) for the threshold test")
     ap.add_argument("--check-native", type=int, default=0,
                     help="Fast-dLLM v2: also run model.generate() on the first N problems and assert identical tokens")
     args = ap.parse_args()
@@ -140,7 +142,7 @@ def main():
     if args.subset:
         idxs = sorted(random.Random(args.seed).sample(idxs, args.subset))
     idxs = idxs[:args.limit][args.shard::args.num_shards]
-    if args.kv_bits and args.check_native:
+    if (args.kv_bits or args.commit_temp != 1.0) and args.check_native:
         raise SystemExit("--check-native compares the uncompressed loop only")
 
     out = Path(args.out)
@@ -169,10 +171,12 @@ def main():
                      if args.kv_bits else None)
             if family == "sdar":
                 gen, st = decode.sdar_generate(model, ids, mid, args.block, steps, threshold,
-                                               gen_length, stops, on_store=quant)
+                                               gen_length, stops, on_store=quant,
+                                               commit_temp=args.commit_temp)
             else:
                 gen, st = decode.fastdllm_generate(model, ids, mid, args.block, args.small_block,
-                                                   threshold, gen_length, stops, on_store=quant)
+                                                   threshold, gen_length, stops, on_store=quant,
+                                               commit_temp=args.commit_temp)
                 if n < args.check_native:
                     ref = model.generate(ids, tokenizer=tok, max_new_tokens=gen_length, mask_id=mid,
                                          threshold=threshold, small_block_size=args.small_block,
