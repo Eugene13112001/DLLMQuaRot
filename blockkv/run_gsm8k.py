@@ -113,6 +113,8 @@ def main():
     ap.add_argument("--kv-window", type=int, default=0, help="newest tokens always kept in 16 bit")
     ap.add_argument("--kv-sink", type=int, default=0, help="first tokens never quantized")
     ap.add_argument("--key-mode", choices=["channel", "token"], default="channel")
+    ap.add_argument("--kv-impl", choices=["ours", "kivi"], default="ours",
+                    help="kivi: round with the official KIVI code (quant/new_pack.py under KIVI_PATH)")
     ap.add_argument("--commit-temp", type=float, default=1.0,
                     help="DECAL commit temperature: confidence = softmax(logits / T) for the threshold test")
     ap.add_argument("--check-native", type=int, default=0,
@@ -167,7 +169,7 @@ def main():
             ids = tok(text, return_tensors="pt", add_special_tokens=family != "sdar").input_ids.cuda()
             t0 = time.time()
             quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode,
-                             args.kv_only)
+                             args.kv_only, impl=args.kv_impl)
                      if args.kv_bits else None)
             if family == "sdar":
                 gen, st = decode.sdar_generate(model, ids, mid, args.block, steps, threshold,

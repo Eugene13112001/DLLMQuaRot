@@ -19,10 +19,51 @@ tokens are never quantized. `only="k"` or `"v"` quantizes the keys or the values
 alone. `bits=16` runs the hook without rounding anything: the cache must come
 out bit-identical, which checks the hook itself. The current block is never in the cache, so it is
 never quantized either.
+
+`impl="kivi"` rounds with the official KIVI code instead of `fake_quant`: the
+functions `quant_and_pack_kcache` / `quant_and_pack_vcache` and their unpacking
+counterparts from `quant/new_pack.py` of github.com/jy-yuan/KIVI (path in the
+KIVI_PATH environment variable, default ~/third_party/KIVI). They pack real 2/4/8-bit
+codes and unpack them; the arithmetic is theirs (in the model's dtype, no guard
+for a constant group). Entries that come out non-finite (a constant group divides
+by zero there) keep their original value and are counted in `kv_nonfinite`.
 """
+import importlib.util
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
+
+_KIVI = None
+
+
+def kivi_ops():
+    """The official KIVI module `quant/new_pack.py`, loaded once from KIVI_PATH."""
+    global _KIVI
+    if _KIVI is None:
+        root = Path(os.environ.get("KIVI_PATH", "~/third_party/KIVI")).expanduser()
+        src = root / "quant" / "new_pack.py"
+        if not src.exists():
+            raise FileNotFoundError(f"official KIVI code not found: {src} (set KIVI_PATH)")
+        spec = importlib.util.spec_from_file_location("kivi_new_pack", src)
+        _KIVI = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_KIVI)
+    return _KIVI
+
+
+def kivi_keys(k, bits, group):
+    """Official KIVI: keys per channel over `group` tokens. k: (b, h, n * group, d)."""
+    ops = kivi_ops()
+    code, scale, mn = ops.quant_and_pack_kcache(k.contiguous(), group, bits)
+    return ops.unpack_and_dequant_kcache(code, scale, mn, group, bits).to(k.dtype)
+
+
+def kivi_values(v, bits, group):
+    """Official KIVI: values per token over `group` channels. v: (b, h, t, d)."""
+    ops = kivi_ops()
+    code, scale, mn = ops.quant_and_pack_vcache(v.contiguous(), group, bits)
+    return ops.unpack_and_dequant_vcache(code, scale, mn, group, bits).to(v.dtype)
 
 
 def cache_layers(cache):
@@ -77,13 +118,37 @@ class KVQuant:
     key_mode: str = "channel"
     only: str = None                       # None: keys and values; "k" or "v": that one alone
     shared: bool = False                   # one (min, step) per batch instead of per sample
+    impl: str = "ours"                     # "ours": fake_quant; "kivi": the official KIVI code
     done: int = None                       # first position not yet quantized
+    nonfinite: int = 0                     # impl="kivi": entries that came out non-finite and were kept
     _err: dict = field(default_factory=dict)
 
     def __post_init__(self):
         assert self.key_mode in ("channel", "token")
         assert self.only in (None, "k", "v")
+        assert self.impl in ("ours", "kivi")
+        if self.impl == "kivi":
+            assert self.key_mode == "channel" and not self.shared, "official KIVI: keys per channel, per sample"
+            assert self.bits in (2, 4, 8, 16), "official KIVI packs 2, 4 or 8 bits"
         self.done = self.sink
+
+    def _keys(self, ks):
+        if self.impl == "kivi":
+            return self._kept(ks, kivi_keys(ks, self.bits, self.group))
+        return quant_keys(ks, self.bits, self.group, self.key_mode, self.shared)
+
+    def _values(self, vs):
+        if self.impl == "kivi":
+            return self._kept(vs, kivi_values(vs, self.bits, self.group))
+        return quant_tokens(vs, self.bits, self.group, self.shared)
+
+    def _kept(self, x, xq):
+        bad = ~torch.isfinite(xq)
+        n = int(bad.sum())
+        if n:
+            self.nonfinite += n
+            xq = torch.where(bad, x, xq)
+        return xq
 
     def __call__(self, cache, start, end):
         n = (end - self.window - self.done) // self.group
@@ -92,8 +157,8 @@ class KVQuant:
         lo, hi = self.done, self.done + n * self.group
         for k, v in cache_layers(cache):
             ks, vs = k[:, :, lo:hi], v[:, :, lo:hi]
-            kq = quant_keys(ks, self.bits, self.group, self.key_mode, self.shared) if self._does("k") else ks
-            vq = quant_tokens(vs, self.bits, self.group, self.shared) if self._does("v") else vs
+            kq = self._keys(ks) if self._does("k") else ks
+            vq = self._values(vs) if self._does("v") else vs
             self._acc("k", ks, kq)
             self._acc("v", vs, vq)
             k[:, :, lo:hi] = kq
@@ -122,4 +187,6 @@ class KVQuant:
                    kv_bits_avg=round((q * self.honest_bits + (cache_len - q) * 16) / max(cache_len, 1), 3))
         for name, e in self._err.items():
             out[f"kv_relerr_{name}"] = round(float(e[0] / e[1].clamp_min(1e-30)), 6)
+        if self.impl == "kivi":
+            out["kv_nonfinite"] = self.nonfinite
         return out
