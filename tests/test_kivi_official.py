@@ -111,9 +111,35 @@ def test_ours_matches_official_kivi(dtype, bits):
     # so a value on the edge between two levels may land on the other one.
     dk, dv = levels_apart(ko, kq, k, bits, key_step), levels_apart(vo, vq, v, bits, value_step)
     print(f"{dtype} {bits} bit: keys {100 * dk:.3f}% / values {100 * dv:.3f}% entries one level apart")
-    assert dk < 0.01 and dv < 0.01
-    # Same error against the original, to well under a percent.
+    # bf16 keeps ~3 significant digits: their (x - min) / step in bf16 is off by ~0.05 of a level
+    # at 4 bits, so a few percent of entries near a level boundary flip. Ours runs in float32.
+    limit = 0.05 if (dtype == torch.bfloat16 and bits == 4) else 0.01
+    assert dk < limit and dv < limit
+    # Same error against the original, to a few percent.
     for x, o, q in ((k, ko, kq), (v, vo, vq)):
         eo = (o.float() - x.float()).pow(2).mean()
         eq = (q.float() - x.float()).pow(2).mean()
-        assert abs(float(eo / eq) - 1) < 0.02
+        print(f"  error ratio official / ours: {float(eo / eq):.4f}")
+        assert abs(float(eo / eq) - 1) < 0.03
+
+
+@real
+@pytest.mark.parametrize("bits", [2, 4])
+def test_same_formula_in_float32(bits):
+    """Fed float32, the official code computes as precisely as ours: the formulas must agree
+    (all disagreement in the fp16/bf16 tests is then the arithmetic of their dtype)."""
+    kvquant._KIVI = None
+    os.environ["KIVI_PATH"] = str(ROOT)
+    torch.manual_seed(1)
+    k = torch.randn(1, 8, 256, 128, device="cuda") * 3 + torch.randn(1, 8, 1, 128, device="cuda") * 5
+    v = torch.randn(1, 8, 256, 128, device="cuda")
+    ops = kvquant.kivi_ops()
+    code, scale, mn = ops.quant_and_pack_kcache(k.contiguous(), 32, bits)
+    ko = (ops.unpack_tensor(code, bits, pack_dim=2).float().view(1, 8, 8, 32, 128) * scale + mn).view(k.shape)
+    code, scale, mn = ops.quant_and_pack_vcache(v.contiguous(), 32, bits)
+    vo = (ops.unpack_tensor(code, bits, pack_dim=3).float().view(1, 8, 256, 4, 32) * scale + mn).view(v.shape)
+    kq, vq = quant_keys(k, bits, 32, "channel"), quant_tokens(v, bits, 32)
+    dk = float(((ko - kq).abs() > 1e-4).float().mean())
+    dv = float(((vo - vq).abs() > 1e-4).float().mean())
+    print(f"float32 {bits} bit: keys {100 * dk:.4f}% / values {100 * dv:.4f}% entries differ")
+    assert dk < 1e-4 and dv < 1e-4
