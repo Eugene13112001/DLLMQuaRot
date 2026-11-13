@@ -113,8 +113,9 @@ def main():
     ap.add_argument("--kv-window", type=int, default=0, help="newest tokens always kept in 16 bit")
     ap.add_argument("--kv-sink", type=int, default=0, help="first tokens never quantized")
     ap.add_argument("--key-mode", choices=["channel", "token"], default="channel")
-    ap.add_argument("--kv-impl", choices=["ours", "kivi"], default="ours",
-                    help="kivi: round with the official KIVI code (quant/new_pack.py under KIVI_PATH)")
+    ap.add_argument("--kv-impl", choices=["ours", "kivi", "noise"], default="ours",
+                    help="kivi: round with the official KIVI code (quant/new_pack.py under KIVI_PATH); "
+                         "noise: control, uniform noise of the same per-group step instead of rounding")
     ap.add_argument("--commit-temp", type=float, default=1.0,
                     help="DECAL commit temperature: confidence = softmax(logits / T) for the threshold test")
     ap.add_argument("--check-native", type=int, default=0,

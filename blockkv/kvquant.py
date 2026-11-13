@@ -73,12 +73,16 @@ def cache_layers(cache):
     return [(layer.keys, layer.values) for layer in cache.layers]
 
 
-def fake_quant(x, bits, dim, shared=False):
+def fake_quant(x, bits, dim, shared=False, noise=None):
     """Quantize-dequantize `x` with one (min, step) per slice along `dim`.
 
     Computed in float32; min and step are rounded to x's dtype first, as they
     would be stored next to the codes. `shared`: one (min, step) for the whole
     batch instead of one per sample (official KIVI keeps them per sample).
+    `noise` (a torch.Generator): instead of rounding, add uniform noise in
+    [-step/2, step/2) with the same per-slice step. The error has the size of
+    the rounding error (variance step^2 / 12) but is random, unbiased and not
+    tied to levels: the "noise of the same magnitude" control.
     """
     xf = x.float()
     levels = 2 ** bits - 1
@@ -87,24 +91,27 @@ def fake_quant(x, bits, dim, shared=False):
     step = (xf.amax(dims, keepdim=True) - mn) / levels
     mn = mn.to(x.dtype).float()
     step = step.to(x.dtype).float()
+    if noise is not None:
+        u = torch.rand(xf.shape, generator=noise, device=xf.device, dtype=torch.float32)
+        return (xf + (u - 0.5) * step).to(x.dtype)
     step = torch.where(step > 0, step, torch.ones_like(step))   # constant slice: exact
     q = ((xf - mn) / step).round().clamp(0, levels)
     return (q * step + mn).to(x.dtype)
 
 
-def quant_keys(k, bits, group, mode, shared=False):
+def quant_keys(k, bits, group, mode, shared=False, noise=None):
     """k: (b, h, n * group, d) -> same shape, quantized."""
     b, h, t, d = k.shape
     if mode == "channel":
-        return fake_quant(k.reshape(b, h, t // group, group, d), bits, 3, shared).reshape(b, h, t, d)
-    return quant_tokens(k, bits, group, shared)
+        return fake_quant(k.reshape(b, h, t // group, group, d), bits, 3, shared, noise).reshape(b, h, t, d)
+    return quant_tokens(k, bits, group, shared, noise)
 
 
-def quant_tokens(v, bits, group, shared=False):
+def quant_tokens(v, bits, group, shared=False, noise=None):
     """v: (b, h, t, d), groups of `group` channels within each token."""
     b, h, t, d = v.shape
     assert d % group == 0, f"head_dim {d} is not a multiple of the group {group}"
-    return fake_quant(v.reshape(b, h, t, d // group, group), bits, 4, shared).reshape(b, h, t, d)
+    return fake_quant(v.reshape(b, h, t, d // group, group), bits, 4, shared, noise).reshape(b, h, t, d)
 
 
 @dataclass
@@ -118,29 +125,39 @@ class KVQuant:
     key_mode: str = "channel"
     only: str = None                       # None: keys and values; "k" or "v": that one alone
     shared: bool = False                   # one (min, step) per batch instead of per sample
-    impl: str = "ours"                     # "ours": fake_quant; "kivi": the official KIVI code
+    impl: str = "ours"                     # "ours": fake_quant; "kivi": the official KIVI code;
+                                           # "noise": uniform noise of the rounding step instead of rounding
+    seed: int = 0                          # impl="noise": the noise generator's seed (same seed, same noise)
     done: int = None                       # first position not yet quantized
     nonfinite: int = 0                     # impl="kivi": entries that came out non-finite and were kept
     _err: dict = field(default_factory=dict)
+    _gen: object = None
 
     def __post_init__(self):
         assert self.key_mode in ("channel", "token")
         assert self.only in (None, "k", "v")
-        assert self.impl in ("ours", "kivi")
+        assert self.impl in ("ours", "kivi", "noise")
         if self.impl == "kivi":
             assert self.key_mode == "channel" and not self.shared, "official KIVI: keys per channel, per sample"
             assert self.bits in (2, 4, 8, 16), "official KIVI packs 2, 4 or 8 bits"
         self.done = self.sink
 
+    def _noise(self, x):
+        if self.impl != "noise":
+            return None
+        if self._gen is None:
+            self._gen = torch.Generator(device=x.device).manual_seed(self.seed)
+        return self._gen
+
     def _keys(self, ks):
         if self.impl == "kivi":
             return self._kept(ks, kivi_keys(ks, self.bits, self.group))
-        return quant_keys(ks, self.bits, self.group, self.key_mode, self.shared)
+        return quant_keys(ks, self.bits, self.group, self.key_mode, self.shared, self._noise(ks))
 
     def _values(self, vs):
         if self.impl == "kivi":
             return self._kept(vs, kivi_values(vs, self.bits, self.group))
-        return quant_tokens(vs, self.bits, self.group, self.shared)
+        return quant_tokens(vs, self.bits, self.group, self.shared, self._noise(vs))
 
     def _kept(self, x, xq):
         bad = ~torch.isfinite(xq)
