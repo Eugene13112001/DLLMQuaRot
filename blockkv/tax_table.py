@@ -15,6 +15,15 @@ from pathlib import Path
 from blockkv.summarize import kv, paired, read
 
 
+def effective(rows, name):
+    """Error over the whole cache: the quantizer's relative error (measured on the quantized
+    tokens only) times the share of the cache that is quantized, averaged over answers.
+    A window keeps the newest tokens exact, so its error is spread over fewer tokens."""
+    vals = [r[f"kv_relerr_{name}"] * r["kv_quantized"] / max(r["kv_tokens"], 1)
+            for r in rows if f"kv_relerr_{name}" in r and "kv_quantized" in r]
+    return f"{sum(vals) / len(vals):.4f}" if vals else "-"
+
+
 def row(ref, run):
     ra, rb = read(ref), read(run)
     p = paired(ra, rb)
@@ -23,6 +32,7 @@ def row(ref, run):
     out = dict(run=Path(run).stem, ref=Path(ref).stem, n=p["n"],
                bits=kv(rows, "kv_bits_avg", "5.2f").strip(),
                err_k=kv(rows, "kv_relerr_k", "7.4f").strip(), err_v=kv(rows, "kv_relerr_v", "7.4f").strip(),
+               eff_k=effective(rows, "k"), eff_v=effective(rows, "v"),
                acc=f"{d:+.1f} ±{196 * p['se']:.1f}")
     if "steps_a" in p:
         out.update(steps=f"{100 * (p['calm_steps_b'] / p['calm_steps_a'] - 1):+.1f}% "
@@ -33,7 +43,7 @@ def row(ref, run):
     return out
 
 
-COLS = [("run", 34), ("n", 5), ("bits", 5), ("err_k", 7), ("err_v", 7), ("acc", 11), ("steps", 18),
+COLS = [("run", 34), ("n", 5), ("bits", 5), ("err_k", 7), ("err_v", 7), ("eff_k", 7), ("eff_v", 7), ("acc", 11), ("steps", 18),
         ("tps", 11), ("runaway", 7), ("runaway_steps", 13)]
 
 
@@ -50,10 +60,10 @@ def main():
             raise SystemExit(f"{item}: no reference (use --ref or REF::RUN)")
         rows.append(row(ref, run))
     if args.markdown:
-        print("| Прогон | Опора | Задач | Честные биты | Ошибка K / V | Точность | Шаги (медиана) | Токенов за шаг | Зацикл. | Доля лишних шагов в зацикл. |")
-        print("|---|---|---|---|---|---|---|---|---|---|")
+        print("| Прогон | Опора | Задач | Честные биты | Ошибка K / V | По всему кэшу K / V | Точность | Шаги (медиана) | Токенов за шаг | Зацикл. | Доля лишних шагов в зацикл. |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
         for r in rows:
-            print(f"| `{r['run']}` | `{r['ref']}` | {r['n']} | {r['bits']} | {r['err_k']} / {r['err_v']} | {r['acc']} | "
+            print(f"| `{r['run']}` | `{r['ref']}` | {r['n']} | {r['bits']} | {r['err_k']} / {r['err_v']} | {r['eff_k']} / {r['eff_v']} | {r['acc']} | "
                   f"{r.get('steps', '-')} | {r.get('tps', '-')} | {r.get('runaway', '-')} | {r.get('runaway_steps', '-')} |")
         return
     print(" ".join(f"{c:>{w}s}" if c != "run" else f"{c:{w}s}" for c, w in COLS))

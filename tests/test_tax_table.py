@@ -32,9 +32,11 @@ def test_paired_tokens_per_step_and_runaway_share(tmp_path):
 def test_tax_table_row_and_markdown(tmp_path, capsys):
     ref, run = tmp_path / "ref.jsonl", tmp_path / "run_kv2.jsonl"
     write(ref, rows([10] * 4, [1, 1, 1, 1]))
-    write(run, rows([12] * 4, [1, 1, 1, 0], extra=dict(kv_bits_avg=3.0, kv_relerr_k=0.1, kv_relerr_v=0.2)))
+    write(run, rows([12] * 4, [1, 1, 1, 0], extra=dict(kv_bits_avg=3.0, kv_relerr_k=0.1, kv_relerr_v=0.2,
+                                                          kv_quantized=50, kv_tokens=100)))
     r = tax_table.row(str(ref), str(run))
     assert r["bits"] == "3.00" and r["err_k"] == "0.1000" and r["steps"].startswith("+20.0%")
+    assert r["eff_k"] == "0.0500" and r["eff_v"] == "0.1000"     # half of the cache is quantized
     assert r["acc"].startswith("-25.0") and r["runaway"] == "0→0"
     import sys
     sys.argv = ["tax_table", "--markdown", f"{ref}::{run}"]
