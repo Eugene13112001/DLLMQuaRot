@@ -55,27 +55,57 @@ def kv(rows, key, fmt):
     return format(sum(vals) / len(vals), fmt) if vals else "-".rjust(width)
 
 
+def committed(r):
+    """Tokens committed in this answer's blocks (whole blocks, not only up to the stop token)."""
+    return sum(r["per_step"]) if "per_step" in r else r["gen_tokens"]
+
+
+def paired(ra, rb):
+    """Paired numbers of run b against run a over their common problems."""
+    common = sorted(ra.keys() & rb.keys())
+    n = len(common)
+    calm = [i for i in common if ra[i]["gen_tokens"] < RUNAWAY and rb[i]["gen_tokens"] < RUNAWAY]
+    wild = [i for i in common if i not in set(calm)]
+    only_a = sum(ra[i]["correct"] and not rb[i]["correct"] for i in common)
+    only_b = sum(rb[i]["correct"] and not ra[i]["correct"] for i in common)
+    out = dict(n=n, calm=len(calm), same_text=sum(ra[i]["text"] == rb[i]["text"] for i in common),
+               only_a=only_a, only_b=only_b,
+               acc_a=sum(ra[i]["correct"] for i in common) / n, acc_b=sum(rb[i]["correct"] for i in common) / n,
+               # McNemar-style standard error of the paired difference.
+               se=math.sqrt(only_a + only_b - (only_a - only_b) ** 2 / n) / n,
+               runaway_a=runaways([ra[i] for i in common]), runaway_b=runaways([rb[i] for i in common]))
+    sa, sb = (sum(r[i]["steps"] for i in common) for r in (ra, rb))
+    if sa and sb:                # the batched runner does not count steps
+        ca, cb = (sum(r[i]["steps"] for i in calm) for r in (ra, rb))
+        out.update(
+            steps_a=sa / n, steps_b=sb / n,
+            calm_steps_a=ca / max(len(calm), 1), calm_steps_b=cb / max(len(calm), 1),
+            med_steps_a=median(ra[i]["steps"] for i in common), med_steps_b=median(rb[i]["steps"] for i in common),
+            # parallelism: committed tokens per step, without runaway answers
+            tps_a=sum(committed(ra[i]) for i in calm) / max(ca, 1),
+            tps_b=sum(committed(rb[i]) for i in calm) / max(cb, 1),
+            # extra steps per problem, and the part of them spent in runaway answers
+            extra=(sb - sa) / n,
+            extra_runaway=sum(rb[i]["steps"] - ra[i]["steps"] for i in wild) / n)
+    return out
+
+
 def compare(a, b):
     ra, rb = read(a), read(b)
     common = sorted(ra.keys() & rb.keys())
-    n = len(common)
-    same_text = sum(ra[i]["text"] == rb[i]["text"] for i in common)
-    only_a = sum(ra[i]["correct"] and not rb[i]["correct"] for i in common)
-    only_b = sum(rb[i]["correct"] and not ra[i]["correct"] for i in common)
-    acc_a = sum(ra[i]["correct"] for i in common) / n
-    acc_b = sum(rb[i]["correct"] for i in common) / n
-    # McNemar-style standard error of the paired difference.
-    se = math.sqrt(only_a + only_b - (only_a - only_b) ** 2 / n) / n
-    steps_a = sum(ra[i]["steps"] for i in common) / n
-    steps_b = sum(rb[i]["steps"] for i in common) / n
-    print(f"common problems: {n}, identical outputs: {same_text}")
-    print(f"accuracy a={100 * acc_a:.1f} b={100 * acc_b:.1f} diff(b-a)={100 * (acc_b - acc_a):+.1f} ±{196 * se:.1f}")
-    print(f"solved only by a: {only_a}, only by b: {only_b}")
-    print(f"runaway answers a={runaways([ra[i] for i in common])} b={runaways([rb[i] for i in common])}")
+    p = paired(ra, rb)
+    print(f"common problems: {p['n']}, identical outputs: {p['same_text']}")
+    print(f"accuracy a={100 * p['acc_a']:.1f} b={100 * p['acc_b']:.1f} diff(b-a)={100 * (p['acc_b'] - p['acc_a']):+.1f} ±{196 * p['se']:.1f}")
+    print(f"solved only by a: {p['only_a']}, only by b: {p['only_b']}")
+    print(f"runaway answers a={p['runaway_a']} b={p['runaway_b']}")
     change("gen_tokens", ra, rb, common)
-    if steps_a and steps_b:      # the batched runner does not count steps
-        print(f"mean steps a={steps_a:.1f} b={steps_b:.1f} ({100 * (steps_b / steps_a - 1):+.1f}%)")
+    if "steps_a" in p:
+        print(f"mean steps a={p['steps_a']:.1f} b={p['steps_b']:.1f} ({100 * (p['steps_b'] / p['steps_a'] - 1):+.1f}%)")
         change("steps", ra, rb, common)
+        print(f"tokens per step without runaways a={p['tps_a']:.2f} b={p['tps_b']:.2f} "
+              f"({p['tps_b'] - p['tps_a']:+.2f}, {100 * (p['tps_b'] / p['tps_a'] - 1):+.1f}%)")
+        share = p["extra_runaway"] / p["extra"] if p["extra"] else float("nan")
+        print(f"extra steps per problem {p['extra']:+.2f}, of them in runaway answers {p['extra_runaway']:+.2f} ({100 * share:.0f}%)")
 
 
 if __name__ == "__main__":
