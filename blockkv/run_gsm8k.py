@@ -41,6 +41,31 @@ def make_deterministic():
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 
 
+def torch_rms_norm(x, weight, bias=None, residual=None, eps=1e-6, dropout_p=0.0, rowscale=None,
+                   prenorm=False, residual_in_fp32=False, **unused):
+    """Plain-PyTorch stand-in for flash_attn's Triton `rms_norm_fn`, for the plain call
+    (no residual, dropout or prenorm). Same math in float32, cast back to x's dtype;
+    no autotuned kernel, so the result does not depend on which config won the timing."""
+    assert residual is None and not prenorm and dropout_p == 0.0 and rowscale is None, \
+        "torch_rms_norm covers the plain rms_norm_fn call only"
+    xf = x.float()
+    y = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps) * weight.float()
+    if bias is not None:
+        y = y + bias.float()
+    return y.to(x.dtype)
+
+
+def patch_rmsnorm(model):
+    """Swap flash_attn's autotuned Triton RMSNorm in the model's own modeling module
+    (SDAR imports it as `flash_rms_norm`) for `torch_rms_norm`. Returns True if patched."""
+    import sys
+    mod = sys.modules.get(type(model).__module__)
+    if mod is None or not hasattr(mod, "flash_rms_norm"):
+        return False
+    mod.flash_rms_norm = torch_rms_norm
+    return True
+
+
 def device_info():
     """What the run actually ran on, for the meta file."""
     if not torch.cuda.is_available():
@@ -141,6 +166,9 @@ def main():
                          "noise: control, uniform noise of the same per-group step instead of rounding")
     ap.add_argument("--commit-temp", type=float, default=1.0,
                     help="DECAL commit temperature: confidence = softmax(logits / T) for the threshold test")
+    ap.add_argument("--torch-rmsnorm", action="store_true",
+                    help="SDAR: replace flash_attn's autotuned Triton RMSNorm with plain PyTorch "
+                         "(the autotuned kernel makes runs differ between GPUs and over time)")
     ap.add_argument("--deterministic", action="store_true",
                     help="deterministic kernels, fixed cuBLAS workspace, no TF32 / reduced-precision reductions")
     ap.add_argument("--check-native", type=int, default=0,
@@ -166,6 +194,9 @@ def main():
         path, torch_dtype=getattr(torch, dtype), trust_remote_code=True,
         device_map="cuda", low_cpu_mem_usage=True).eval()
     mid, stops = mask_id(family, tok, args.mask_id), stop_ids(family, tok, model)
+    rmsnorm_patched = patch_rmsnorm(model) if args.torch_rmsnorm else False
+    if args.torch_rmsnorm and not rmsnorm_patched:
+        raise SystemExit("--torch-rmsnorm: no flash_rms_norm in this model's code")
 
     problems = gsm8k.load(args.data)
     idxs = list(range(len(problems)))
@@ -182,7 +213,7 @@ def main():
                 steps=steps, prompt_style=style, gen_length=gen_length, dtype=dtype,
                 mask_id=mid, stop_ids=stops,
                 kv_honest_bits=KVQuant(args.kv_bits, args.kv_group, only=args.kv_only).honest_bits if args.kv_bits else 16,
-                **device_info())
+                rmsnorm_patched=rmsnorm_patched, **device_info())
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     print(json.dumps(meta), flush=True)
 
