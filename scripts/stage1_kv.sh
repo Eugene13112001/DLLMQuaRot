@@ -8,7 +8,8 @@
 #      repeat a GPU to run several configurations on it), SUBSET (default 400),
 #      SEED (default 0), KV_GROUP (32), KV_WINDOW (0), KV_SINK (0), KEY_MODE
 #      (channel), COMMIT_TEMP (1.0, DECAL's commit temperature), KV_IMPL (ours; "kivi": the
-#      official KIVI code under KIVI_PATH, file suffix _kivi), STAGGER (seconds between queue starts, 90), GSM8K, MODELS_DIR.
+#      official KIVI code under KIVI_PATH, file suffix _kivi), TORCH_RMSNORM (1: plain-PyTorch
+#      RMSNorm instead of the autotuned Triton one, SDAR only, reproducible across GPUs, suffix _rms), STAGGER (seconds between queue starts, 90), GSM8K, MODELS_DIR.
 # Compare each run with its uncompressed reference on the same problems:
 #   python -m blockkv.summarize --compare out/stage1/full/sdar8b_b16_t0.9.jsonl \
 #                                         out/stage1_kv/400/sdar8b_b16_t0.9_kv2.jsonl
@@ -26,7 +27,9 @@ mkdir -p "$OUT"
 
 CT=${COMMIT_TEMP:-1.0}
 IMPL=${KV_IMPL:-ours}
+RMS=${TORCH_RMSNORM:-0}
 common=(--kv-group "$G" --kv-window "$W" --kv-sink "$S" --commit-temp "$CT" --kv-impl "$IMPL")
+[[ $RMS == 1 ]] && common+=(--torch-rmsnorm)
 [[ -n "$SUBSET" ]] && common+=(--subset "$SUBSET" --seed "${SEED:-0}")
 [[ -n "${GSM8K:-}" ]] && common+=(--data "$GSM8K")
 
@@ -41,6 +44,7 @@ name() {  # model:block:threshold:bits[:key_mode] -> file stem; non-default sett
   [[ $k != channel ]] && s+="_k$k"
   [[ $CT != 1.0 ]] && s+="_T$CT"
   [[ $IMPL != ours ]] && s+="_$IMPL"
+  [[ $RMS == 1 ]] && s+="_rms"
   echo "$s"
 }
 

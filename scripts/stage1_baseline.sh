@@ -7,7 +7,8 @@
 #      GSM8K (test.jsonl/.parquet; default HF openai/gsm8k), GPUS (default "0"),
 #      RUNS (model:block[:threshold], default below), REPEAT=1 to rerun the first
 #      configuration into *_rep.jsonl for the determinism check, STAGGER (seconds
-#      between queue starts, default 90).
+#      between queue starts, default 90), COMMIT_TEMP (1.0; suffix _T<t>), TORCH_RMSNORM
+#      (1: plain-PyTorch RMSNorm, SDAR only, reproducible across GPUs; suffix _rms).
 # Threshold 1.0 (the default) is the authors' evaluation, for checking against their
 # numbers (and, for Fast-dLLM v2, with SoloQ's); the 0.9 runs are the reference
 # every compressed run is compared with.
@@ -22,13 +23,19 @@ RUNS=${RUNS:-"sdar8b:4 sdar8b:8 sdar8b:16 sdar8b:32 sdar8b:64
 OUT=out/stage1/${N:-full}
 mkdir -p "$OUT"
 
-common=()
+CT=${COMMIT_TEMP:-1.0}
+RMS=${TORCH_RMSNORM:-0}
+common=(--commit-temp "$CT")
 [[ -n "$N" ]] && common+=(--limit "$N")
 [[ -n "${GSM8K:-}" ]] && common+=(--data "$GSM8K")
+[[ $RMS == 1 ]] && common+=(--torch-rmsnorm)
 
 name() {  # model:block[:threshold] -> file stem
   IFS=: read -r m b t <<< "$1"
-  echo "${m}_b${b}${t:+_t$t}"
+  local s="${m}_b${b}${t:+_t$t}"
+  [[ $CT != 1.0 ]] && s+="_T$CT"
+  [[ $RMS == 1 ]] && s+="_rms"
+  echo "$s"
 }
 
 run() {  # spec gpu suffix

@@ -20,7 +20,7 @@ import torch
 
 from blockkv import decode
 from blockkv.kvquant import KVQuant
-from blockkv.run_gsm8k import mask_id, read_done, repo, resolve_path, stop_ids
+from blockkv.run_gsm8k import device_info, mask_id, patch_rmsnorm, read_done, repo, resolve_path, stop_ids
 
 CONTROL = re.compile(r"[\x00-\x1f]")
 
@@ -78,6 +78,8 @@ def main():
     ap.add_argument("--kv-window", type=int, default=0)
     ap.add_argument("--kv-sink", type=int, default=0)
     ap.add_argument("--key-mode", choices=["channel", "token"], default="channel")
+    ap.add_argument("--torch-rmsnorm", action="store_true",
+                    help="replace flash_attn's autotuned Triton RMSNorm with plain PyTorch (reproducible across GPUs)")
     args = ap.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -89,13 +91,17 @@ def main():
         path, torch_dtype=torch.float16, trust_remote_code=True,
         device_map="cuda", low_cpu_mem_usage=True).eval()
     mid, stops = mask_id(family, tok, None), stop_ids(family, tok, model)
+    rmsnorm_patched = patch_rmsnorm(model) if args.torch_rmsnorm else False
+    if args.torch_rmsnorm and not rmsnorm_patched:
+        raise SystemExit("--torch-rmsnorm: no flash_rms_norm in this model's code")
 
     rows = load(args.data, args.length)
     idxs = pick(rows, args.per_task, args.seed)[:args.limit]
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     done = read_done(out)
-    out.with_suffix(".meta.json").write_text(json.dumps(dict(vars(args), repo=repo_id, mask_id=mid, stop_ids=stops), indent=1),
+    out.with_suffix(".meta.json").write_text(json.dumps(dict(vars(args), repo=repo_id, mask_id=mid, stop_ids=stops,
+                                                                  rmsnorm_patched=rmsnorm_patched, **device_info()), indent=1),
                                              encoding="utf-8")
 
     with open(out, "a", encoding="utf-8") as f:

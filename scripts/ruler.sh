@@ -4,7 +4,8 @@
 # Env: DATA (required), RUNS (block:bits, bits "-" = uncompressed; default blocks
 #      4, 16, 64, uncompressed and 2 bit), LENGTHS (default "4096 16384"), GPUS
 #      (one queue per entry, repeat a GPU for two queues), PER_TASK (30), LIMIT,
-#      THRESHOLD (0.9), KV_WINDOW (0), STAGGER (90).
+#      THRESHOLD (0.9), KV_WINDOW (0), STAGGER (90), TORCH_RMSNORM (1: plain-PyTorch
+#      RMSNorm, reproducible across GPUs; suffix _rms).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -33,6 +34,7 @@ run() {  # length:block:bits gpu
   mkdir -p "$dir"
   local extra=()
   [[ -n "${LIMIT:-}" ]] && extra=(--limit "$LIMIT")
+  if [[ ${TORCH_RMSNORM:-0} == 1 ]]; then extra+=(--torch-rmsnorm); stem+="_rms"; fi
   CUDA_VISIBLE_DEVICES=$2 python -m blockkv.run_ruler --block "$b" --length "$len" --data "$DATA" \
     --per-task "${PER_TASK:-30}" --threshold "${THRESHOLD:-0.9}" --out "$dir/$stem.jsonl" "${kv[@]}" "${extra[@]}" \
     > "$dir/$stem.log" 2>&1 || echo "FAILED: $1 (see $dir/$stem.log)"
