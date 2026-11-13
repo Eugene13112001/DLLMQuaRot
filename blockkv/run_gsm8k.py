@@ -28,6 +28,29 @@ def repo(model, block):
     raise ValueError(model)
 
 
+def make_deterministic():
+    """Deterministic kernels where PyTorch has them (warn where it has not), a fixed
+    cuBLAS workspace, no TF32 and no reduced-precision reductions. Call before CUDA starts."""
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+
+
+def device_info():
+    """What the run actually ran on, for the meta file."""
+    if not torch.cuda.is_available():
+        return {}
+    p = torch.cuda.get_device_properties(0)
+    return dict(gpu_name=p.name, gpu_uuid=str(getattr(p, "uuid", "")), gpu_sms=p.multi_processor_count,
+                torch_version=torch.__version__, cuda_version=torch.version.cuda,
+                cublas_workspace=os.environ.get("CUBLAS_WORKSPACE_CONFIG"))
+
+
 def resolve_path(repo_id, override):
     if override:
         return override
@@ -118,9 +141,13 @@ def main():
                          "noise: control, uniform noise of the same per-group step instead of rounding")
     ap.add_argument("--commit-temp", type=float, default=1.0,
                     help="DECAL commit temperature: confidence = softmax(logits / T) for the threshold test")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="deterministic kernels, fixed cuBLAS workspace, no TF32 / reduced-precision reductions")
     ap.add_argument("--check-native", type=int, default=0,
                     help="Fast-dLLM v2: also run model.generate() on the first N problems and assert identical tokens")
     args = ap.parse_args()
+    if args.deterministic:
+        make_deterministic()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -154,7 +181,8 @@ def main():
     meta = dict(vars(args), family=family, repo=repo_id, path=path, threshold=threshold,
                 steps=steps, prompt_style=style, gen_length=gen_length, dtype=dtype,
                 mask_id=mid, stop_ids=stops,
-                kv_honest_bits=KVQuant(args.kv_bits, args.kv_group, only=args.kv_only).honest_bits if args.kv_bits else 16)
+                kv_honest_bits=KVQuant(args.kv_bits, args.kv_group, only=args.kv_only).honest_bits if args.kv_bits else 16,
+                **device_info())
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     print(json.dumps(meta), flush=True)
 
