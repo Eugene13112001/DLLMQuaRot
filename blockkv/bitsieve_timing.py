@@ -97,14 +97,23 @@ def wait_idle(cards, uuids, max_util, need_gb, checks, sleep, only=None):
     """First card that is idle `checks` times in a row (or wait for `only`)."""
     count = {c: 0 for c in cards}
     watch = [only] if only is not None else cards
+    rounds, last_report = 0, 0.0
     while True:
+        states = []
         for c in watch:
             util, mem = gpu_state(uuids[c])
             free = free_gb(c) if util <= max_util else -1
+            before = count[c]
             count[c] = count[c] + 1 if util <= max_util and free >= need_gb else 0
-            log(f"card {c}: util {util}% used {mem} MiB free {free:.0f} GiB idle {count[c]}/{checks}")
+            states.append(f"{c}:{util}%")
+            if count[c] != before and (count[c] == 1 or before > 0):   # became idle, or stopped being idle
+                log(f"card {c}: util {util}% used {mem} MiB free {free:.0f} GiB idle {count[c]}/{checks}")
             if count[c] >= checks:
                 return c
+        rounds += 1
+        if time.time() - last_report >= 600:                           # a short summary every 10 minutes
+            log(f"waiting ({'card ' + str(only) if only is not None else 'cards'}): " + " ".join(states))
+            last_report = time.time()
         time.sleep(sleep)
 
 
