@@ -181,13 +181,22 @@ def run_point(args, card, uuid, cfg, batch, context, attempt, base_pids):
                 rows=rows)
 
 
-def median_tpob(rows):
+def tpob(rows, stat="median"):
+    """Time per block over the repeats: "min" (closest to an idle GPU: a neighbour can only
+    slow a block down) or "median"."""
     vals = [float(r["mean_tpob_ms"]) for r in rows if r.get("mean_tpob_ms") is not None]
-    return statistics.median(vals) if vals else None
+    if not vals:
+        return None
+    return min(vals) if stat == "min" else statistics.median(vals)
 
 
-def summarize(runs, configs=CONFIGS):
-    """One line per (batch, context): median time per block of the last clean run of each config."""
+def median_tpob(rows):
+    return tpob(rows, "median")
+
+
+def summarize(runs, configs=CONFIGS, stat="min"):
+    """One line per (batch, context) from the last clean run of each config: time per block
+    by `stat` (the main numbers, `<cfg>_tpob_ms`, and `speedup`) and by median too."""
     best = {}
     for r in runs:
         key = (r["batch"], r["context"], r["config"])
@@ -195,13 +204,17 @@ def summarize(runs, configs=CONFIGS):
             best[key] = r
     out = []
     for batch, context in sorted({(b, c) for b, c, _ in best}):
-        row = dict(batch=batch, context=context)
+        row = dict(batch=batch, context=context, stat=stat)
         for cfg in configs:
             r = best.get((batch, context, cfg))
-            row[f"{cfg}_tpob_ms"] = round(median_tpob(r["rows"]), 3) if r and median_tpob(r["rows"]) else None
+            main, med = (tpob(r["rows"], stat), tpob(r["rows"], "median")) if r else (None, None)
+            row[f"{cfg}_tpob_ms"] = round(main, 3) if main else None
+            row[f"{cfg}_tpob_median_ms"] = round(med, 3) if med else None
             row[f"{cfg}_clean"] = bool(r and r["clean"])
-        a, b = row.get(f"{configs[0]}_tpob_ms"), row.get(f"{configs[1]}_tpob_ms")
-        row["speedup"] = round(a / b, 4) if a and b else None
+            row[f"{cfg}_util_median"] = r.get("util_median") if r else None
+        for suffix, key in (("", "_tpob_ms"), ("_median", "_tpob_median_ms")):
+            a, b = row.get(f"{configs[0]}{key}"), row.get(f"{configs[1]}{key}")
+            row[f"speedup{suffix}"] = round(a / b, 4) if a and b else None
         out.append(row)
     return out
 
@@ -225,6 +238,8 @@ def main():
     ap.add_argument("--poll", type=int, default=5)
     ap.add_argument("--foreign-gb", type=float, default=1.0)
     ap.add_argument("--retries", type=int, default=2)
+    ap.add_argument("--stat", choices=["min", "median"], default="min",
+                    help="time per block over the repeats in the summary (min: closest to an idle GPU)")
     args = ap.parse_args()
     args.bitsieve = str(Path(args.bitsieve).expanduser())
     out = Path(args.out)
@@ -250,12 +265,13 @@ def main():
                     with open(out / "runs.jsonl", "a", encoding="utf-8") as f:
                         f.write(json.dumps(r) + "\n")
                     log(f"{cfg} batch {batch} ctx {context} attempt {attempt}: rc {r['rc']}, "
-                        f"tpob {median_tpob(r['rows'])}, clean {r['clean']}, foreign +{r['foreign_extra_mib']} MiB, "
+                        f"tpob min {tpob(r['rows'], 'min')} median {median_tpob(r['rows'])}, util {r['util_median']}%, "
+                        f"clean {r['clean']}, foreign +{r['foreign_extra_mib']} MiB, "
                         f"new foreign pids {r['new_foreign_pids']}")
                     if r["clean"] or r["rc"] != 0 and not r["rows"]:
                         break                            # clean, or a hard failure (e.g. OOM): no retry
 
-    summary = summarize(runs, args.configs)
+    summary = summarize(runs, args.configs, args.stat)
     with open(out / "summary.jsonl", "w", encoding="utf-8") as f:
         for s in summary:
             f.write(json.dumps(s) + "\n")
