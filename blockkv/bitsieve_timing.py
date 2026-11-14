@@ -151,8 +151,19 @@ def cache_tokens(context, new_tokens, block=32):
     return -(-(context + new_tokens) // block) * block
 
 
+def raw_name(cfg, batch, context, attempt):
+    return f"{cfg}_ctx{context}_b{batch}_a{attempt}.jsonl"
+
+
+def is_clean(run, rows, foreign_gb):
+    """A run counts if it finished, wrote rows, and nothing foreign appeared on the card."""
+    return (run["rc"] == 0 and bool(rows) and run["foreign_extra_mib"] <= foreign_gb * 1024
+            and not run["new_foreign_pids"])
+
+
 def run_point(args, card, uuid, cfg, batch, context, attempt, base_pids):
-    raw = Path(args.out) / "raw" / f"{cfg}_ctx{context}_b{batch}_a{attempt}.jsonl"
+    # Absolute: BitSieve runs with its own folder as the working directory.
+    raw = Path(args.out).resolve() / "raw" / raw_name(cfg, batch, context, attempt)
     raw.parent.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-m", "bitsieve_fastdllm.eval.performance",
            "--config", str(Path(args.bitsieve) / "configs" / f"{cfg}.yaml"),
@@ -172,13 +183,13 @@ def run_point(args, card, uuid, cfg, batch, context, attempt, base_pids):
         w.stop.set()
         w.join()
     rows = [json.loads(l) for l in open(raw, encoding="utf-8") if l.strip()] if raw.exists() else []
-    new_foreign = sorted(w.foreign_pids - base_pids)
-    clean = rc == 0 and bool(rows) and w.max_extra_mib <= args.foreign_gb * 1024 and not new_foreign
-    return dict(card=card, uuid=uuid[:8], config=cfg, batch=batch, context=context, attempt=attempt,
-                rc=rc, seconds=round(time.time() - t0, 1), clean=clean,
-                foreign_extra_mib=w.max_extra_mib, new_foreign_pids=new_foreign,
-                util_samples=w.samples, util_median=statistics.median(w.utils) if w.utils else None,
-                rows=rows)
+    out = dict(card=card, uuid=uuid[:8], config=cfg, batch=batch, context=context, attempt=attempt,
+               rc=rc, seconds=round(time.time() - t0, 1),
+               foreign_extra_mib=w.max_extra_mib, new_foreign_pids=sorted(w.foreign_pids - base_pids),
+               util_samples=w.samples, util_median=statistics.median(w.utils) if w.utils else None,
+               rows=rows)
+    out["clean"] = is_clean(out, rows, args.foreign_gb)
+    return out
 
 
 def tpob(rows, stat="median"):
@@ -195,28 +206,60 @@ def median_tpob(rows):
 
 
 def summarize(runs, configs=CONFIGS, stat="min"):
-    """One line per (batch, context) from the last clean run of each config: time per block
-    by `stat` (the main numbers, `<cfg>_tpob_ms`, and `speedup`) and by median too."""
-    best = {}
+    """One line per (batch, context): the repeats of all clean runs of each config pooled
+    (or of the last run if none is clean); time per block by `stat` (the main numbers,
+    `<cfg>_tpob_ms`, and `speedup`) and by median too."""
+    by = {}
     for r in runs:
-        key = (r["batch"], r["context"], r["config"])
-        if r["clean"] or key not in best or not best[key]["clean"]:
-            best[key] = r
+        by.setdefault((r["batch"], r["context"], r["config"]), []).append(r)
     out = []
-    for batch, context in sorted({(b, c) for b, c, _ in best}):
+    for batch, context in sorted({(b, c) for b, c, _ in by}):
         row = dict(batch=batch, context=context, stat=stat)
         for cfg in configs:
-            r = best.get((batch, context, cfg))
-            main, med = (tpob(r["rows"], stat), tpob(r["rows"], "median")) if r else (None, None)
+            rs = by.get((batch, context, cfg), [])
+            clean = [r for r in rs if r["clean"]]
+            use = clean or rs[-1:]
+            rows = [x for r in use for x in r["rows"]]
+            main, med = tpob(rows, stat), tpob(rows, "median")
             row[f"{cfg}_tpob_ms"] = round(main, 3) if main else None
             row[f"{cfg}_tpob_median_ms"] = round(med, 3) if med else None
-            row[f"{cfg}_clean"] = bool(r and r["clean"])
-            row[f"{cfg}_util_median"] = r.get("util_median") if r else None
+            row[f"{cfg}_clean"] = bool(clean)
+            row[f"{cfg}_repeats"] = len(rows)
+            utils = [r["util_median"] for r in use if r.get("util_median") is not None]
+            row[f"{cfg}_util_median"] = statistics.median(utils) if utils else None
         for suffix, key in (("", "_tpob_ms"), ("_median", "_tpob_median_ms")):
             a, b = row.get(f"{configs[0]}{key}"), row.get(f"{configs[1]}{key}")
             row[f"speedup{suffix}"] = round(a / b, 4) if a and b else None
         out.append(row)
     return out
+
+
+def resummarize(out, raw_dir, args):
+    """Re-read BitSieve's rows from `raw_dir` for every run in out/runs.jsonl, recompute
+    `clean`, and write runs_fixed.jsonl and summary.jsonl."""
+    runs = [json.loads(l) for l in open(out / "runs.jsonl", encoding="utf-8") if l.strip()]
+    missing = 0
+    for r in runs:
+        f = raw_dir / raw_name(r["config"], r["batch"], r["context"], r["attempt"])
+        r["rows"] = [json.loads(l) for l in open(f, encoding="utf-8") if l.strip()] if f.exists() else []
+        missing += not r["rows"]
+        r["clean"] = is_clean(r, r["rows"], args.foreign_gb)
+    with open(out / "runs_fixed.jsonl", "w", encoding="utf-8") as f:
+        for r in runs:
+            f.write(json.dumps(r) + "\n")
+    summary = summarize(runs, args.configs, args.stat)
+    with open(out / "summary.jsonl", "w", encoding="utf-8") as f:
+        for s in summary:
+            f.write(json.dumps(s) + "\n")
+    log(f"{len(runs)} runs, {sum(r['clean'] for r in runs)} clean, {missing} without rows")
+    a, b = args.configs[0], args.configs[1]
+    print(f"{'batch':>5s} {'ctx':>6s} {'16bit ms':>9s} {'2bit ms':>9s} {'speedup':>8s} {'(median)':>8s} "
+          f"{'reps':>5s} {'util16':>6s} {'util2':>6s} clean")
+    for s in summary:
+        print(f"{s['batch']:5d} {s['context']:6d} {s[a + '_tpob_ms'] or 0:9.1f} {s[b + '_tpob_ms'] or 0:9.1f} "
+              f"{s['speedup'] or 0:8.3f} {s['speedup_median'] or 0:8.3f} "
+              f"{s[a + '_repeats']:>2d}/{s[b + '_repeats']:<2d} {str(s[a + '_util_median']):>6s} "
+              f"{str(s[b + '_util_median']):>6s} {s[a + '_clean']}/{s[b + '_clean']}")
 
 
 def main():
@@ -240,10 +283,17 @@ def main():
     ap.add_argument("--retries", type=int, default=2)
     ap.add_argument("--stat", choices=["min", "median"], default="min",
                     help="time per block over the repeats in the summary (min: closest to an idle GPU)")
+    ap.add_argument("--resummarize", metavar="RAW_DIR",
+                    help="no measuring: rebuild runs and summary from --out/runs.jsonl with BitSieve's rows "
+                         "read from RAW_DIR (where they were written), and exit")
     args = ap.parse_args()
     args.bitsieve = str(Path(args.bitsieve).expanduser())
-    out = Path(args.out)
+    out = Path(args.out).resolve()
+    args.out = str(out)
     out.mkdir(parents=True, exist_ok=True)
+    if args.resummarize:
+        resummarize(out, Path(args.resummarize).expanduser(), args)
+        return
 
     uuids = {c: card_uuid(c) for c in args.cards}
     for c, u in uuids.items():
