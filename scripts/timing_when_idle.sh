@@ -5,14 +5,14 @@
 # <= MAX_UTIL % and at most MAX_PROCS compute processes on it (matched to our CUDA index
 # by UUID), and torch sees at least NEED_GB free. nvidia-smi here misses processes of
 # other containers, so the free memory is the real check that nobody else is on the card.
-# Env: CARDS (our CUDA indices to watch, default "0 1 2 3"; card 4 is left out on purpose),
+# Env: CARDS (our CUDA indices to watch, default "0 1 2 3 4"),
 #      MAX_UTIL (5), MAX_PROCS (0), NEED_GB (120 of 140), CHECKS (3), SLEEP (60 s between checks),
 #      BLOCKS ("32 4 64"), LENGTHS ("1024 2048 4096 8192 16384"), BATCH ("1 4 16"),
 #      ROUNDS (5), REPS (30), OUT (out/timing/idle).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-CARDS=${CARDS:-"0 1 2 3"}
+CARDS=${CARDS:-"0 1 2 3 4"}
 MAX_UTIL=${MAX_UTIL:-5} MAX_PROCS=${MAX_PROCS:-0} NEED_GB=${NEED_GB:-120} CHECKS=${CHECKS:-3} SLEEP=${SLEEP:-60}
 BLOCKS=${BLOCKS:-"32 4 64"} LENGTHS=${LENGTHS:-"1024 2048 4096 8192 16384"} BATCH=${BATCH:-"1 4 16"}
 ROUNDS=${ROUNDS:-5} REPS=${REPS:-30} OUT=${OUT:-out/timing/idle}
