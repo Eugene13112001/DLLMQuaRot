@@ -37,3 +37,14 @@ def test_middle_cut_keeps_head_and_tail():
 def test_score_is_best_reference():
     assert longbench.score("the cat sat", ["a dog", "the cat sat"]) == 1.0
     assert 0 < longbench.score("the cat", ["the cat sat on"]) < 1
+
+
+def test_rescore_adds_both_scores(tmp_path):
+    z = tmp_path / "data.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("data/qmsum.jsonl", json.dumps(dict(context="c", input="q", answers=["the cat sat"])) + "\n")
+    f = tmp_path / "run.jsonl"
+    f.write_text(json.dumps(dict(idx="qmsum:0", text="the cat sat", score=0.0)) + "\n")
+    longbench.rescore(z, [f])
+    r = json.loads(f.read_text())
+    assert r["score"] == 1.0 and r["score_bs"] == 1.0 and r["correct"] == 1.0

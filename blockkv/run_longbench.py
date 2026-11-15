@@ -80,8 +80,9 @@ def main():
                                                    prefill_chunk=args.prefill_chunk or None)
             gen = gen[:limit]
             answer = tok.decode(gen, skip_special_tokens=True)
-            s = longbench.score(answer, [str(a) for a in r["answers"]])
-            row = dict(idx=i, task=task, score=s, correct=s, gen_tokens=len(gen), prompt_tokens=ids.shape[1],
+            sc = longbench.scores(answer, [str(a) for a in r["answers"]])
+            s = sc["score"]
+            row = dict(idx=i, task=task, **sc, correct=s, gen_tokens=len(gen), prompt_tokens=ids.shape[1],
                        steps=st.steps, nfe=st.nfe, forced=st.forced, blocks=st.blocks, per_step=st.per_step,
                        sec=round(time.time() - t0, 2), text=answer)
             if quant is not None:

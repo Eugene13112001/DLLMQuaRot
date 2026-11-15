@@ -136,8 +136,8 @@ def items_longbench(tok, args):
     out = []
     for i, task, r in longbench.items(args.lb_tasks, args.lb_data, tok, args.length, args.per_task_lb)[:args.limit]:
         def grade(answer, r=r, task=task):
-            sc = longbench.score(answer, [str(a) for a in r["answers"]])
-            return dict(task=task, score=sc, correct=sc)
+            sc = longbench.scores(answer, [str(a) for a in r["answers"]])
+            return dict(task=task, **sc, correct=sc["score"])
         out.append((i, longbench.chat_prompt(task, r, tok, args.length), longbench.MAX_NEW[task], grade))
     return out
 
