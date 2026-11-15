@@ -125,24 +125,39 @@ def sdar_generate(model, prompt_ids, mask_id, block_length, denoising_steps,
 
 @torch.no_grad()
 def fastdllm_generate(model, prompt_ids, mask_id, block_size, small_block_size,
-                      threshold, max_new_tokens, stop_ids, on_store=None, commit_temp=1.0):
-    """Returns (generated token ids up to and including the stop token, Stats)."""
+                      threshold, max_new_tokens, stop_ids, on_store=None, commit_temp=1.0, prefill_chunk=None):
+    """Returns (generated token ids up to and including the stop token, Stats).
+
+    `prefill_chunk`: feed the prompt in pieces of about this many tokens (whole blocks), for very
+    long prompts; `on_store` then sees the whole prompt once, after the last piece, as with one forward.
+    Whether a chunked prefill gives the same tokens as one forward must be checked on the GPU
+    (the model's own code builds the block mask)."""
     P, B = prompt_ids.shape[1], block_size
     assert P > B, "prompt shorter than one block: the reference generate() is not mirrored there"
     st = Stats()
 
-    def fwd(window, store, cache):
+    def fwd(window, store, cache, hook=True):
         st.nfe += store
         out = model(input_ids=window, use_cache=True, past_key_values=cache,
                     update_past_key_values=store)
         if store:
             n = st.cache_len = out.past_key_values.get_seq_length()
-            if on_store is not None:
+            if on_store is not None and hook:
                 on_store(out.past_key_values, n - window.shape[1], n)
         return out
 
     x = prompt_ids
-    out = fwd(x[:, :(P // B) * B], True, None)
+    prefill = (P // B) * B
+    if prefill_chunk and prefill > prefill_chunk:
+        step = max(B, prefill_chunk // B * B)
+        cache = None
+        for lo in range(0, prefill, step):
+            out = fwd(x[:, lo:min(lo + step, prefill)], True, cache, hook=False)
+            cache = out.past_key_values
+        if on_store is not None:
+            on_store(cache, 0, prefill)
+    else:
+        out = fwd(x[:, :prefill], True, None)
     cache = out.past_key_values
     if P % B == 0:
         x = torch.cat([x, out.logits[:, -1:].argmax(-1)], dim=1)

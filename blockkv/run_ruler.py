@@ -60,7 +60,8 @@ def prompt_text(tok, row):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="sdar8b", choices=["sdar8b", "sdar30b"])
+    ap.add_argument("--model", default="sdar8b", choices=["sdar8b", "sdar30b", "fastdllm"])
+    ap.add_argument("--small-block", type=int, default=8, help="Fast-dLLM v2 sub-block")
     ap.add_argument("--block", type=int, required=True)
     ap.add_argument("--length", type=int, required=True, help="input length: a folder of the dataset (4096, 8192, 16384)")
     ap.add_argument("--data", required=True)
@@ -87,8 +88,9 @@ def main():
     family, repo_id = repo(args.model, args.block)
     path = resolve_path(repo_id, args.model_path)
     tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    # dtype as in each family's own evaluation (run_gsm8k.DEFAULTS): float16 SDAR, bfloat16 Fast-dLLM v2
     model = AutoModelForCausalLM.from_pretrained(
-        path, torch_dtype=torch.float16, trust_remote_code=True,
+        path, torch_dtype=torch.float16 if family == "sdar" else torch.bfloat16, trust_remote_code=True,
         device_map="cuda", low_cpu_mem_usage=True).eval()
     mid, stops = mask_id(family, tok, None), stop_ids(family, tok, model)
     rmsnorm_patched = patch_rmsnorm(model) if args.torch_rmsnorm else False
@@ -109,13 +111,19 @@ def main():
             if i in done:
                 continue
             r = rows[i]
-            ids = tok(prompt_text(tok, r), return_tensors="pt", add_special_tokens=False).input_ids.cuda()
+            ids = tok(prompt_text(tok, r), return_tensors="pt", add_special_tokens=family != "sdar").input_ids.cuda()
             limit = int(r["max_new_tokens"])
             quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode, args.kv_only)
                      if args.kv_bits else None)
             t0 = time.time()
-            gen, st = decode.sdar_generate(model, ids, mid, args.block, args.block, args.threshold, limit, stops,
-                                           on_store=quant, prefill_chunk=args.prefill_chunk or None)
+            if family == "sdar":
+                gen, st = decode.sdar_generate(model, ids, mid, args.block, args.block, args.threshold, limit, stops,
+                                               on_store=quant, prefill_chunk=args.prefill_chunk or None)
+            else:
+                # the decoder fills whole blocks: ask for at least one block, the answer is cut to `limit` below
+                gen, st = decode.fastdllm_generate(model, ids, mid, args.block, args.small_block, args.threshold,
+                                                   max(limit, args.block), stops, on_store=quant,
+                                                   prefill_chunk=args.prefill_chunk or None)
             gen = gen[:limit]
             answer = tok.decode(gen, skip_special_tokens=True)
             s = score(r["task"], answer, r["answer"])

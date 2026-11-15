@@ -5,7 +5,9 @@
 #      4, 16, 64, uncompressed and 2 bit), LENGTHS (default "4096 16384"), GPUS
 #      (one queue per entry, repeat a GPU for two queues), PER_TASK (30), LIMIT,
 #      THRESHOLD (0.9), KV_WINDOW (0), STAGGER (90), TORCH_RMSNORM (1: plain-PyTorch
-#      RMSNorm, reproducible across GPUs; suffix _rms).
+#      RMSNorm, reproducible across GPUs; suffix _rms), MODEL (sdar8b | fastdllm; Fast-dLLM v2
+#      has block 32 only: RUNS="32:- 32:2"), PREFILL_CHUNK (tokens per prompt piece, default
+#      1024; 0 = one forward; suffix _pc<N> when set, for the chunked-vs-whole check).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -23,7 +25,8 @@ done
 run() {  # length:block:bits gpu
   local len b q stem
   IFS=: read -r len b q <<< "$1"
-  stem="sdar8b_b${b}"
+  local model=${MODEL:-sdar8b}
+  stem="${model}_b${b}"
   local kv=()
   if [[ $q != - ]]; then
     stem+="_kv${q}"
@@ -35,7 +38,8 @@ run() {  # length:block:bits gpu
   local extra=()
   [[ -n "${LIMIT:-}" ]] && extra=(--limit "$LIMIT")
   if [[ ${TORCH_RMSNORM:-0} == 1 ]]; then extra+=(--torch-rmsnorm); stem+="_rms"; fi
-  CUDA_VISIBLE_DEVICES=$2 python -m blockkv.run_ruler --block "$b" --length "$len" --data "$DATA" \
+  if [[ -n "${PREFILL_CHUNK:-}" ]]; then extra+=(--prefill-chunk "$PREFILL_CHUNK"); stem+="_pc$PREFILL_CHUNK"; fi
+  CUDA_VISIBLE_DEVICES=$2 python -m blockkv.run_ruler --model "$model" --block "$b" --length "$len" --data "$DATA" \
     --per-task "${PER_TASK:-30}" --threshold "${THRESHOLD:-0.9}" --out "$dir/$stem.jsonl" "${kv[@]}" "${extra[@]}" \
     > "$dir/$stem.log" 2>&1 || echo "FAILED: $1 (see $dir/$stem.log)"
 }

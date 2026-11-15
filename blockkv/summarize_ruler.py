@@ -41,9 +41,15 @@ def block_of(path):
     return int(re.search(r"_b(\d+)", path.name).group(1))
 
 
+def ref_key(path):
+    """(model, block, rms): a compressed run is paired with the uncompressed run of the same model,
+    block and RMSNorm variant; prefill-chunk checks (_pc) are not references."""
+    return path.name.split("_b")[0], block_of(path), "_rms" in path.name
+
+
 def table(folder):
     files = sorted(Path(folder).glob("*.jsonl"), key=lambda p: (block_of(p), p.name))
-    refs = {block_of(p): read(p) for p in files if "_kv" not in p.name}
+    refs = {ref_key(p): read(p) for p in files if "_kv" not in p.name and "_pc" not in p.name}
     print(f"{'file':34s} {'n':>4s} {'prompt':>6s} {'score':>6s} {'diff':>6s} {'±95':>5s} {'steps':>6s} {'d.steps%':>8s}")
     for p in files:
         rows = read(p)
@@ -52,7 +58,7 @@ def table(folder):
         vals = list(rows.values())
         line = (f"{p.stem[-34:]:34s} {len(vals):4d} {median(r['prompt_tokens'] for r in vals):6.0f} "
                 f"{100 * task_mean(vals):6.1f}")
-        ref = refs.get(block_of(p))
+        ref = refs.get(ref_key(p))
         if ref and "_kv" in p.name and ref.keys() & rows.keys():
             common = ref.keys() & rows.keys()
             diff, ci = paired(ref, rows)
