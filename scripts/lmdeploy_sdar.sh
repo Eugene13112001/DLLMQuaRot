@@ -9,6 +9,8 @@
 # BENCH=ruler LENGTH=4096|16384 RULER_DATA=~/data/ruler: RULER (the 390 problems of run_ruler) instead
 # of GSM8K, output in out/lmdeploy/ruler<LENGTH>[_<N>][_bs<B>]/. CACHE_FRAC: share of free memory for
 # the KV cache (default 0.3; raise it for big batches at 16K).
+# BENCH=longbench LENGTH=16384 LB_DATA=~/data/longbench/data.zip: LongBench qmsum + gov_report (long input,
+# answers up to 512 tokens), prompts cut to LENGTH, out/lmdeploy/longbench<LENGTH>[_<N>][_bs<B>]/.
 # EXTRA: more arguments for blockkv.lmdeploy_gsm8k (e.g. "--eager --gen-length 512"), with TAG
 # appended to the file stem (e.g. TAG=_eager_g512).
 # Without CARD, each policy waits for an empty card among CARDS (default "0 1 2 3 4"):
@@ -23,7 +25,10 @@ BATCH=${BATCH:-1}
 REPO=JetLM/SDAR-8B-Chat
 [[ $BLOCK != 4 ]] && REPO+="-b$BLOCK"
 BENCH=${BENCH:-gsm8k}
-if [[ $BENCH == ruler ]]; then
+if [[ $BENCH == longbench ]]; then
+  OUT=out/lmdeploy/longbench${LENGTH:-16384}${N:+_$N}
+  BARGS=(--bench longbench --length "${LENGTH:-16384}" --lb-data "${LB_DATA:-$HOME/data/longbench/data.zip}")
+elif [[ $BENCH == ruler ]]; then
   OUT=out/lmdeploy/ruler${LENGTH:-4096}${N:+_$N}
   BARGS=(--bench ruler --length "${LENGTH:-4096}" --ruler-data "${RULER_DATA:-$HOME/data/ruler}")
 else

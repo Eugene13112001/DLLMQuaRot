@@ -130,6 +130,18 @@ def items_ruler(tok, args):
     return out
 
 
+def items_longbench(tok, args):
+    """LongBench qmsum + gov_report, prompts cut to --length tokens, as blockkv.run_longbench."""
+    from blockkv import longbench
+    out = []
+    for i, task, r in longbench.items(args.lb_tasks, args.lb_data, tok, args.length, args.per_task_lb)[:args.limit]:
+        def grade(answer, r=r, task=task):
+            sc = longbench.score(answer, [str(a) for a in r["answers"]])
+            return dict(task=task, score=sc, correct=sc)
+        out.append((i, longbench.chat_prompt(task, r, tok, args.length), longbench.MAX_NEW[task], grade))
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", required=True)
@@ -137,10 +149,13 @@ def main(argv=None):
     ap.add_argument("--threshold", type=float, default=0.9)
     ap.add_argument("--quant-policy", type=int, default=0, choices=[0, 4, 8, 16, 17, 42])
     ap.add_argument("--out", required=True)
-    ap.add_argument("--bench", choices=["gsm8k", "ruler"], default="gsm8k")
+    ap.add_argument("--bench", choices=["gsm8k", "ruler", "longbench"], default="gsm8k")
+    ap.add_argument("--lb-data", help="LongBench data.zip or folder of <task>.jsonl")
+    ap.add_argument("--lb-tasks", nargs="+", default=["qmsum", "gov_report"])
+    ap.add_argument("--per-task-lb", type=int, help="first N problems of each LongBench task (default all)")
     ap.add_argument("--data", help="GSM8K test .jsonl or .parquet (default: HF openai/gsm8k)")
     ap.add_argument("--ruler-data", help="folder with the simonjegou/ruler parquet files (as for run_ruler)")
-    ap.add_argument("--length", type=int, default=4096, help="RULER input length")
+    ap.add_argument("--length", type=int, default=4096, help="RULER input length / LongBench prompt cut")
     ap.add_argument("--per-task", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int)
@@ -162,7 +177,7 @@ def main(argv=None):
     out.parent.mkdir(parents=True, exist_ok=True)
     tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     stops = stop_ids(tok, args.model_path)
-    items = items_gsm8k(tok, args) if args.bench == "gsm8k" else items_ruler(tok, args)
+    items = dict(gsm8k=items_gsm8k, ruler=items_ruler, longbench=items_longbench)[args.bench](tok, args)
     session_len = args.session_len or (8192 if args.bench == "gsm8k" else args.length + 4096)
 
     cfg = PytorchEngineConfig(dtype=args.dtype, quant_policy=args.quant_policy, max_batch_size=args.batch,
