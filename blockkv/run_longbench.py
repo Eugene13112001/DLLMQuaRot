@@ -40,6 +40,8 @@ def main():
     ap.add_argument("--key-mode", choices=["channel", "token"], default="channel")
     ap.add_argument("--kv-rotate", action="store_true",
                     help="QuaRot-like Hadamard rotation of keys and values before rounding (use --key-mode token)")
+    ap.add_argument("--kv-k-bits", type=int, choices=[2, 3, 4, 8, 16], help="bits of the keys (default --kv-bits)")
+    ap.add_argument("--kv-v-bits", type=int, choices=[2, 3, 4, 8, 16], help="bits of the values (default --kv-bits)")
     ap.add_argument("--torch-rmsnorm", action="store_true")
     args = ap.parse_args()
 
@@ -70,7 +72,8 @@ def main():
             text = longbench.chat_prompt(task, r, tok, args.max_input)
             ids = tok(text, return_tensors="pt", add_special_tokens=family != "sdar").input_ids.cuda()
             limit = longbench.MAX_NEW[task]
-            quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode, args.kv_only, rotate=args.kv_rotate)
+            quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode, args.kv_only, rotate=args.kv_rotate,
+                             k_bits=args.kv_k_bits, v_bits=args.kv_v_bits)
                      if args.kv_bits else None)
             t0 = time.time()
             if family == "sdar":

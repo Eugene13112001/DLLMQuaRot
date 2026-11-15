@@ -4,6 +4,7 @@
 #   SUBSET= bash scripts/stage1_kv.sh         # final: all 1319
 # Env: RUNS (model:block:threshold:bits[:key_mode], default: the 15 runs of stage 1.4;
 #      bits 2/3/4/8/16, "2k" / "2v" quantize the keys / the values alone,
+#      "k4v2" gives the keys and the values their own bits (16 = left in 16 bit), file suffix _kvk4v2,
 #      key_mode channel or token), GPUS (default "0";
 #      repeat a GPU to run several configurations on it), SUBSET (default 400),
 #      SEED (default 0), KV_GROUP (32), KV_WINDOW (0), KV_SINK (0), KEY_MODE
@@ -57,10 +58,16 @@ run() {  # spec gpu
   IFS=: read -r m b t q k <<< "$1"
   k=${k:-$KM}
   stem=$(name "$1")
-  local only=()
-  [[ $q == *[kv] ]] && only=(--kv-only "${q: -1}")
+  local only=() bits
+  if [[ $q =~ ^k([0-9]+)v([0-9]+)$ ]]; then          # k4v2: keys and values with their own bits
+    bits=${BASH_REMATCH[1]}
+    only=(--kv-k-bits "${BASH_REMATCH[1]}" --kv-v-bits "${BASH_REMATCH[2]}")
+  else
+    bits=${q%[kv]}
+    [[ $q == *[kv] ]] && only=(--kv-only "${q: -1}")
+  fi
   CUDA_VISIBLE_DEVICES=$2 python -m blockkv.run_gsm8k --model "$m" --block "$b" --threshold "$t" \
-    --kv-bits "${q%[kv]}" "${only[@]}" --key-mode "$k" --out "$OUT/$stem.jsonl" "${common[@]}" \
+    --kv-bits "$bits" "${only[@]}" --key-mode "$k" --out "$OUT/$stem.jsonl" "${common[@]}" \
     > "$OUT/$stem.log" 2>&1 || echo "FAILED: $1 (see $OUT/$stem.log)"
 }
 

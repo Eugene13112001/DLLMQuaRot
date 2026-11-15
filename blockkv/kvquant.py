@@ -28,6 +28,9 @@ back gives exactly what the model would read. The rotation spreads channel outli
 channels, which is why rotated schemes quantize per token (use key_mode="token"). The error
 (kv_relerr_*) is always measured in the original basis.
 
+`k_bits` / `v_bits` give the keys and the values their own bit widths (default: `bits` for
+both; 16 leaves that part in 16 bit), e.g. k_bits=4, v_bits=2 as TurboQuant spends its budget.
+
 `impl="kivi"` rounds with the official KIVI code instead of `fake_quant`: the
 functions `quant_and_pack_kcache` / `quant_and_pack_vcache` and their unpacking
 counterparts from `quant/new_pack.py` of github.com/jy-yuan/KIVI (path in the
@@ -161,6 +164,8 @@ class KVQuant:
                                            # "noise": uniform noise of the rounding step instead of rounding
     seed: int = 0                          # impl="noise": the noise generator's seed (same seed, same noise)
     rotate: bool = False                   # QuaRot-like Hadamard rotation before rounding (see module doc)
+    k_bits: int = None                     # bits of the keys / the values (None: `bits`)
+    v_bits: int = None
     done: int = None                       # first position not yet quantized
     nonfinite: int = 0                     # impl="kivi": entries that came out non-finite and were kept
     _err: dict = field(default_factory=dict)
@@ -170,9 +175,11 @@ class KVQuant:
         assert self.key_mode in ("channel", "token")
         assert self.only in (None, "k", "v")
         assert self.impl in ("ours", "kivi", "noise")
+        self.k_bits = self.bits if self.k_bits is None else self.k_bits
+        self.v_bits = self.bits if self.v_bits is None else self.v_bits
         if self.impl == "kivi":
             assert self.key_mode == "channel" and not self.shared, "official KIVI: keys per channel, per sample"
-            assert self.bits in (2, 4, 8, 16), "official KIVI packs 2, 4 or 8 bits"
+            assert {self.k_bits, self.v_bits} <= {2, 4, 8, 16}, "official KIVI packs 2, 4 or 8 bits"
         if self.rotate:
             assert self.impl == "ours", "rotation goes with our rounding only"
         self.done = self.sink
@@ -186,14 +193,14 @@ class KVQuant:
 
     def _keys(self, ks):
         if self.impl == "kivi":
-            return self._kept(ks, kivi_keys(ks, self.bits, self.group))
-        f = lambda x: quant_keys(x, self.bits, self.group, self.key_mode, self.shared, self._noise(x))
+            return self._kept(ks, kivi_keys(ks, self.k_bits, self.group))
+        f = lambda x: quant_keys(x, self.k_bits, self.group, self.key_mode, self.shared, self._noise(x))
         return rotated(f, ks) if self.rotate else f(ks)
 
     def _values(self, vs):
         if self.impl == "kivi":
-            return self._kept(vs, kivi_values(vs, self.bits, self.group))
-        f = lambda x: quant_tokens(x, self.bits, self.group, self.shared, self._noise(x))
+            return self._kept(vs, kivi_values(vs, self.v_bits, self.group))
+        f = lambda x: quant_tokens(x, self.v_bits, self.group, self.shared, self._noise(x))
         return rotated(f, vs) if self.rotate else f(vs)
 
     def _kept(self, x, xq):
@@ -219,8 +226,11 @@ class KVQuant:
             v[:, :, lo:hi] = vq
         self.done = hi
 
+    def _bits(self, name):
+        return self.k_bits if name == "k" else self.v_bits
+
     def _does(self, name):
-        return self.bits < 16 and self.only in (None, name)
+        return self._bits(name) < 16 and self.only in (None, name)
 
     def _acc(self, name, x, xq):
         x = x.float()
@@ -231,7 +241,7 @@ class KVQuant:
     @property
     def honest_bits(self):
         """Bits per cached number, keys and values averaged; 16 for what stays 16 bit."""
-        per = [self.bits + 32 / self.group if self._does(n) else 16 for n in ("k", "v")]
+        per = [self._bits(n) + 32 / self.group if self._does(n) else 16 for n in ("k", "v")]
         return sum(per) / 2
 
     def summary(self, cache_len):
