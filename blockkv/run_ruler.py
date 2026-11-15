@@ -79,6 +79,8 @@ def main():
     ap.add_argument("--kv-window", type=int, default=0)
     ap.add_argument("--kv-sink", type=int, default=0)
     ap.add_argument("--key-mode", choices=["channel", "token"], default="channel")
+    ap.add_argument("--kv-rotate", action="store_true",
+                    help="QuaRot-like Hadamard rotation of keys and values before rounding (use --key-mode token)")
     ap.add_argument("--torch-rmsnorm", action="store_true",
                     help="replace flash_attn's autotuned Triton RMSNorm with plain PyTorch (reproducible across GPUs)")
     args = ap.parse_args()
@@ -113,7 +115,7 @@ def main():
             r = rows[i]
             ids = tok(prompt_text(tok, r), return_tensors="pt", add_special_tokens=family != "sdar").input_ids.cuda()
             limit = int(r["max_new_tokens"])
-            quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode, args.kv_only)
+            quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode, args.kv_only, rotate=args.kv_rotate)
                      if args.kv_bits else None)
             t0 = time.time()
             if family == "sdar":

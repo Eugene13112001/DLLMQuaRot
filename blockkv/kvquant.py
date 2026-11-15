@@ -20,6 +20,14 @@ alone. `bits=16` runs the hook without rounding anything: the cache must come
 out bit-identical, which checks the hook itself. The current block is never in the cache, so it is
 never quantized either.
 
+`rotate=True` (QuaRot-like): keys and values are first multiplied by a random orthogonal
+Hadamard matrix along head_dim (sign flips then the normalized Sylvester Hadamard, fixed seed),
+quantized in the rotated basis, then rotated back. A real system keeps the cache rotated and
+rotates the queries / folds R into W_o; q.k and the attention output are the same, so rotating
+back gives exactly what the model would read. The rotation spreads channel outliers over all
+channels, which is why rotated schemes quantize per token (use key_mode="token"). The error
+(kv_relerr_*) is always measured in the original basis.
+
 `impl="kivi"` rounds with the official KIVI code instead of `fake_quant`: the
 functions `quant_and_pack_kcache` / `quant_and_pack_vcache` and their unpacking
 counterparts from `quant/new_pack.py` of github.com/jy-yuan/KIVI (path in the
@@ -64,6 +72,30 @@ def kivi_values(v, bits, group):
     ops = kivi_ops()
     code, scale, mn = ops.quant_and_pack_vcache(v.contiguous(), group, bits)
     return ops.unpack_and_dequant_vcache(code, scale, mn, group, bits).to(v.dtype)
+
+
+_ROT = {}
+
+
+def hadamard(d, device, seed=0):
+    """Random orthogonal Hadamard rotation R (d x d, float32): R = diag(signs) @ H / sqrt(d)."""
+    key = (d, str(device), seed)
+    if key not in _ROT:
+        assert d & (d - 1) == 0, f"head_dim {d} is not a power of 2"
+        h = torch.ones(1, 1)
+        while h.shape[0] < d:
+            h = torch.cat([torch.cat([h, h], 1), torch.cat([h, -h], 1)], 0)
+        g = torch.Generator().manual_seed(seed)
+        signs = torch.randint(0, 2, (d,), generator=g).float() * 2 - 1
+        _ROT[key] = (signs[:, None] * h / d ** 0.5).to(device)
+    return _ROT[key]
+
+
+def rotated(fn, x, seed=0):
+    """fn applied in the rotated basis: R^T-rotate back fn((x R) in x's dtype)."""
+    r = hadamard(x.shape[-1], x.device, seed)
+    xr = (x.float() @ r).to(x.dtype)
+    return (fn(xr).float() @ r.T).to(x.dtype)
 
 
 def cache_layers(cache):
@@ -128,6 +160,7 @@ class KVQuant:
     impl: str = "ours"                     # "ours": fake_quant; "kivi": the official KIVI code;
                                            # "noise": uniform noise of the rounding step instead of rounding
     seed: int = 0                          # impl="noise": the noise generator's seed (same seed, same noise)
+    rotate: bool = False                   # QuaRot-like Hadamard rotation before rounding (see module doc)
     done: int = None                       # first position not yet quantized
     nonfinite: int = 0                     # impl="kivi": entries that came out non-finite and were kept
     _err: dict = field(default_factory=dict)
@@ -140,6 +173,8 @@ class KVQuant:
         if self.impl == "kivi":
             assert self.key_mode == "channel" and not self.shared, "official KIVI: keys per channel, per sample"
             assert self.bits in (2, 4, 8, 16), "official KIVI packs 2, 4 or 8 bits"
+        if self.rotate:
+            assert self.impl == "ours", "rotation goes with our rounding only"
         self.done = self.sink
 
     def _noise(self, x):
@@ -152,12 +187,14 @@ class KVQuant:
     def _keys(self, ks):
         if self.impl == "kivi":
             return self._kept(ks, kivi_keys(ks, self.bits, self.group))
-        return quant_keys(ks, self.bits, self.group, self.key_mode, self.shared, self._noise(ks))
+        f = lambda x: quant_keys(x, self.bits, self.group, self.key_mode, self.shared, self._noise(x))
+        return rotated(f, ks) if self.rotate else f(ks)
 
     def _values(self, vs):
         if self.impl == "kivi":
             return self._kept(vs, kivi_values(vs, self.bits, self.group))
-        return quant_tokens(vs, self.bits, self.group, self.shared, self._noise(vs))
+        f = lambda x: quant_tokens(x, self.bits, self.group, self.shared, self._noise(x))
+        return rotated(f, vs) if self.rotate else f(vs)
 
     def _kept(self, x, xq):
         bad = ~torch.isfinite(xq)
