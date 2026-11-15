@@ -128,8 +128,19 @@ def rescore(data, files):
               file=sys.stdout)
 
 
+def require_metrics():
+    """Real runs need both packages: the fallbacks above are for the tests only."""
+    try:
+        import rouge  # noqa: F401
+        import rouge_score  # noqa: F401
+    except ImportError as e:
+        raise SystemExit(f"{e}: pip install rouge rouge-score (LongBench's and BitSieve's ROUGE-L)")
+
+
 def items(tasks, path, tok, max_tokens, per_task=None):
     """[(idx, task, row)]; idx = "<task>:<line>" so both tasks share one output file."""
+    if tok is not None:
+        require_metrics()
     out = []
     for t in tasks:
         rows = load(t, path)[:per_task]
@@ -141,4 +152,5 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) < 4 or sys.argv[1] != "rescore":
         raise SystemExit("python -m blockkv.longbench rescore DATA FILE.jsonl...")
+    require_metrics()
     rescore(sys.argv[2], sys.argv[3:])
