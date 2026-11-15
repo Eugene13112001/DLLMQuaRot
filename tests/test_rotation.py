@@ -39,3 +39,20 @@ def test_kvquant_rotate_hook_measures_error_in_original_basis():
     s = q.summary(64)
     assert 0 < s["kv_relerr_k"] < 0.5 and not torch.equal(c.layers[0].keys, k0)
     assert q.honest_bits == 3.0
+
+
+def test_rotate_values_only_keeps_kivi_keys():
+    class Layer:
+        def __init__(self):
+            g = torch.Generator().manual_seed(1)
+            self.keys = torch.randn(1, 2, 64, 128, generator=g)
+            self.values = torch.randn(1, 2, 64, 128, generator=g)
+
+    class Cache:
+        def __init__(self):
+            self.layers = [Layer()]
+    a, b = Cache(), Cache()
+    KVQuant(2, 32, rotate="v")(a, 0, 64)
+    KVQuant(2, 32)(b, 0, 64)
+    assert torch.equal(a.layers[0].keys, b.layers[0].keys)          # keys: plain KIVI
+    assert not torch.equal(a.layers[0].values, b.layers[0].values)  # values: rotated first

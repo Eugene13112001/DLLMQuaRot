@@ -45,6 +45,8 @@ def main():
     ap.add_argument("--kv-key-boost", type=float, default=0.0,
                     help="Kitty-like: fraction of key channels per group (widest range) kept at --kv-key-boost-bits")
     ap.add_argument("--kv-key-boost-bits", type=int, default=8)
+    ap.add_argument("--kv-rotate-values", action="store_true",
+                    help="Hadamard rotation of the values only, keys stay KIVI per channel (as SoloQ)")
     ap.add_argument("--torch-rmsnorm", action="store_true")
     args = ap.parse_args()
 
@@ -75,7 +77,7 @@ def main():
             text = longbench.chat_prompt(task, r, tok, args.max_input)
             ids = tok(text, return_tensors="pt", add_special_tokens=family != "sdar").input_ids.cuda()
             limit = longbench.MAX_NEW[task]
-            quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode, args.kv_only, rotate=args.kv_rotate,
+            quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode, args.kv_only, rotate="v" if args.kv_rotate_values else args.kv_rotate,
                              k_bits=args.kv_k_bits, v_bits=args.kv_v_bits,
                              key_boost=args.kv_key_boost, key_boost_bits=args.kv_key_boost_bits)
                      if args.kv_bits else None)

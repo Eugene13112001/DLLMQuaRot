@@ -185,7 +185,8 @@ class KVQuant:
     impl: str = "ours"                     # "ours": fake_quant; "kivi": the official KIVI code;
                                            # "noise": uniform noise of the rounding step instead of rounding
     seed: int = 0                          # impl="noise": the noise generator's seed (same seed, same noise)
-    rotate: bool = False                   # QuaRot-like Hadamard rotation before rounding (see module doc)
+    rotate: object = False                 # True: QuaRot-like Hadamard rotation of keys and values before
+                                           # rounding; "v": values only, keys stay KIVI per channel (as SoloQ)
     k_bits: int = None                     # bits of the keys / the values (None: `bits`)
     v_bits: int = None
     key_boost: float = 0.0                 # Kitty-like: fraction of key channels per group kept at key_boost_bits
@@ -205,10 +206,11 @@ class KVQuant:
         if self.impl == "kivi":
             assert self.key_mode == "channel" and not self.shared, "official KIVI: keys per channel, per sample"
             assert {self.k_bits, self.v_bits} <= {2, 4, 8, 16}, "official KIVI packs 2, 4 or 8 bits"
+        assert self.rotate in (False, True, "v")
         if self.rotate:
             assert self.impl == "ours", "rotation goes with our rounding only"
         if self.key_boost:
-            assert self.impl == "ours" and not self.rotate and self.key_mode == "channel" and not self.shared,                 "key boost: KIVI-layout keys with our rounding"
+            assert self.impl == "ours" and self.rotate is not True and self.key_mode == "channel" and not self.shared,                 "key boost: KIVI-layout keys with our rounding"
         self.done = self.sink
 
     def _noise(self, x):
@@ -224,7 +226,7 @@ class KVQuant:
         if self.key_boost:
             return boosted_keys(ks, self.k_bits, self.group, self.key_boost, self.key_boost_bits)
         f = lambda x: quant_keys(x, self.k_bits, self.group, self.key_mode, self.shared, self._noise(x))
-        return rotated(f, ks) if self.rotate else f(ks)
+        return rotated(f, ks) if self.rotate is True else f(ks)
 
     def _values(self, vs):
         if self.impl == "kivi":

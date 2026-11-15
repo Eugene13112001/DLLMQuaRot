@@ -21,7 +21,7 @@ on identical states. Per scheme, averaged over the probed masked positions:
   kl                       KL(exact || compressed) of the next-token distribution
 
 Schemes are written like the stage1_kv.sh specs: "2", "3", "4", "2k", "2v", "k4v2", "k2v4",
-"2rot" (Hadamard, keys per token), "2kb0.0625" (Kitty-like boost of key channels to 8 bits).
+"2rot" (Hadamard, keys per token), "2rotv" (values rotated, keys KIVI), "2kb0.0625" (Kitty-like boost of key channels to 8 bits).
 """
 import argparse
 import copy
@@ -38,7 +38,7 @@ from blockkv import decode, gsm8k
 from blockkv.kvquant import KVQuant, cache_layers
 from blockkv.run_gsm8k import DEFAULTS, mask_id, repo, resolve_path, stop_ids
 
-SCHEMES = ["2", "3", "4", "2k", "2v", "k4v2", "k2v4", "2rot", "3rot", "4rot",
+SCHEMES = ["2", "3", "4", "2k", "2v", "k4v2", "k2v4", "2rot", "3rot", "4rot", "2rotv", "3rotv",
            "2kb0.0625", "2kb0.125", "2kb0.25"]
 
 
@@ -47,6 +47,9 @@ def make_quant(spec, group=32, head_dim=128):
     m = re.fullmatch(r"k(\d+)v(\d+)", spec)
     if m:
         return KVQuant(int(m[1]), group, k_bits=int(m[1]), v_bits=int(m[2]), head_dim=head_dim)
+    m = re.fullmatch(r"(\d+)rotv", spec)
+    if m:
+        return KVQuant(int(m[1]), group, rotate="v", head_dim=head_dim)
     m = re.fullmatch(r"(\d+)rot", spec)
     if m:
         return KVQuant(int(m[1]), group, key_mode="token", rotate=True, head_dim=head_dim)
