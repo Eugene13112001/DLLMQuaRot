@@ -114,6 +114,8 @@ def main(argv=None):
     ap.add_argument("--cache-frac", type=float, default=0.3,
                     help="share of free GPU memory for the KV cache (the cards are shared)")
     ap.add_argument("--eager", action="store_true", help="no CUDA graphs")
+    ap.add_argument("--dtype", default="float16", choices=["float16", "bfloat16", "auto"],
+                    help="float16 as in our runs (the SDAR authors' evaluation)")
     args = ap.parse_args(argv)
 
     from lmdeploy import GenerationConfig, PytorchEngineConfig, pipeline
@@ -129,7 +131,7 @@ def main(argv=None):
         [{"role": "user", "content": gsm8k.PROMPT_STYLES["sdar"].format(question=p["question"])}],
         tokenize=False, add_generation_prompt=True) for p in problems]
 
-    cfg = PytorchEngineConfig(dtype="float16", quant_policy=args.quant_policy, max_batch_size=args.batch,
+    cfg = PytorchEngineConfig(dtype=args.dtype, quant_policy=args.quant_policy, max_batch_size=args.batch,
                               session_len=8192, cache_max_entry_count=args.cache_frac, eager_mode=args.eager,
                               dllm_block_length=args.block, dllm_unmasking_strategy="low_confidence_dynamic",
                               dllm_confidence_threshold=args.threshold)
@@ -137,7 +139,7 @@ def main(argv=None):
                            stop_token_ids=stops, skip_special_tokens=True)
     import lmdeploy
     meta = dict(vars(args), lmdeploy=lmdeploy.__version__, stop_ids=stops, prompt_style="sdar",
-                dtype="float16", strategy="low_confidence_dynamic")
+                strategy="low_confidence_dynamic")
     t_start = time.time()
     with pipeline(args.model_path, backend_config=cfg) as pipe:
         if args.batch == 1:
