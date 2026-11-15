@@ -1,4 +1,4 @@
-"""SDAR on GSM8K inside LMDeploy's PyTorch engine, with its real (packed) KV-cache quantization.
+"""SDAR on GSM8K or RULER (--bench ruler) inside LMDeploy's PyTorch engine, with its real (packed) KV-cache quantization.
 
     python -m blockkv.lmdeploy_gsm8k --model-path $MODELS_DIR/SDAR-8B-Chat-b16 --block 16 \
         --threshold 0.9 --quant-policy 8 --out out/lmdeploy/sdar8b_b16_t0.9_q8.jsonl
@@ -100,6 +100,36 @@ def read_done(out):
     return done
 
 
+def items_gsm8k(tok, args):
+    problems = gsm8k.load(args.data)[:args.limit]
+    out = []
+    for i, p in enumerate(problems):
+        text = tok.apply_chat_template(
+            [{"role": "user", "content": gsm8k.PROMPT_STYLES["sdar"].format(question=p["question"])}],
+            tokenize=False, add_generation_prompt=True)
+
+        def grade(answer, p=p):
+            pred, ref = gsm8k.extract(answer), gsm8k.gold(p["answer"])
+            return dict(correct=gsm8k.is_correct(pred, ref), pred=pred, gold=ref)
+        out.append((i, text, args.gen_length, grade))
+    return out
+
+
+def items_ruler(tok, args):
+    """The same RULER problems, prompt and scoring as blockkv.run_ruler (30 per task, seed 0)."""
+    from blockkv.run_ruler import load, pick, prompt_text, score
+    rows = load(args.ruler_data, args.length)
+    out = []
+    for i in pick(rows, args.per_task, args.seed)[:args.limit]:
+        r = rows[i]
+
+        def grade(answer, r=r):
+            sc = score(r["task"], answer, r["answer"])
+            return dict(task=r["task"], score=sc, correct=sc == 1.0)
+        out.append((i, prompt_text(tok, r), int(r["max_new_tokens"]), grade))
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", required=True)
@@ -107,10 +137,16 @@ def main(argv=None):
     ap.add_argument("--threshold", type=float, default=0.9)
     ap.add_argument("--quant-policy", type=int, default=0, choices=[0, 4, 8, 16, 17, 42])
     ap.add_argument("--out", required=True)
+    ap.add_argument("--bench", choices=["gsm8k", "ruler"], default="gsm8k")
     ap.add_argument("--data", help="GSM8K test .jsonl or .parquet (default: HF openai/gsm8k)")
+    ap.add_argument("--ruler-data", help="folder with the simonjegou/ruler parquet files (as for run_ruler)")
+    ap.add_argument("--length", type=int, default=4096, help="RULER input length")
+    ap.add_argument("--per-task", type=int, default=30)
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int)
-    ap.add_argument("--gen-length", type=int, default=4096)
+    ap.add_argument("--gen-length", type=int, default=4096, help="GSM8K answer limit (RULER: the task's own)")
     ap.add_argument("--batch", type=int, default=1, help="requests served together (1: per-problem steps)")
+    ap.add_argument("--session-len", type=int, help="default: 8192 GSM8K, length + 4096 RULER")
     ap.add_argument("--cache-frac", type=float, default=0.3,
                     help="share of free GPU memory for the KV cache (the cards are shared)")
     ap.add_argument("--eager", action="store_true", help="no CUDA graphs")
@@ -124,59 +160,59 @@ def main(argv=None):
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    problems = gsm8k.load(args.data)[:args.limit]
     tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     stops = stop_ids(tok, args.model_path)
-    prompts = [tok.apply_chat_template(
-        [{"role": "user", "content": gsm8k.PROMPT_STYLES["sdar"].format(question=p["question"])}],
-        tokenize=False, add_generation_prompt=True) for p in problems]
+    items = items_gsm8k(tok, args) if args.bench == "gsm8k" else items_ruler(tok, args)
+    session_len = args.session_len or (8192 if args.bench == "gsm8k" else args.length + 4096)
 
     cfg = PytorchEngineConfig(dtype=args.dtype, quant_policy=args.quant_policy, max_batch_size=args.batch,
-                              session_len=8192, cache_max_entry_count=args.cache_frac, eager_mode=args.eager,
+                              session_len=session_len, cache_max_entry_count=args.cache_frac, eager_mode=args.eager,
                               dllm_block_length=args.block, dllm_unmasking_strategy="low_confidence_dynamic",
                               dllm_confidence_threshold=args.threshold)
-    gen = GenerationConfig(max_new_tokens=args.gen_length, do_sample=False, top_k=1,
-                           stop_token_ids=stops, skip_special_tokens=True)
+
+    def gen(n):
+        return GenerationConfig(max_new_tokens=n, do_sample=False, top_k=1, stop_token_ids=stops,
+                                skip_special_tokens=True)
+
     import lmdeploy
     meta = dict(vars(args), lmdeploy=lmdeploy.__version__, stop_ids=stops, prompt_style="sdar",
-                strategy="low_confidence_dynamic")
+                strategy="low_confidence_dynamic", session_len_used=session_len, n_items=len(items))
     t_start = time.time()
     with pipeline(args.model_path, backend_config=cfg) as pipe:
         if args.batch == 1:
             done = read_done(out)
             with open(out, "a", encoding="utf-8") as f:
-                for i, (p, text) in enumerate(zip(problems, prompts)):
+                for i, text, n_new, grade in items:
                     if i in done:
                         continue
                     c0, s0, n0 = COUNTER.snapshot()
                     t0 = time.time()
-                    r = pipe(text, gen_config=gen, do_preprocess=False)
+                    r = pipe(text, gen_config=gen(n_new), do_preprocess=False)
                     dt = time.time() - t0
                     c1, s1, n1 = COUNTER.snapshot()
                     if c1 == c0:
                         raise SystemExit("step counter did not move: the engine runs the unmasking outside "
                                          "this process, so the patch is not seen. Report this.")
-                    pred, ref = gsm8k.extract(r.text), gsm8k.gold(p["answer"])
-                    f.write(json.dumps(dict(idx=i, correct=gsm8k.is_correct(pred, ref), pred=pred, gold=ref,
-                                            gen_tokens=r.generate_token_len, steps=s1 - s0, calls=c1 - c0,
-                                            committed=n1 - n0, time_s=round(dt, 4), finish=r.finish_reason,
-                                            text=r.text), ensure_ascii=False) + "\n")
+                    row = dict(idx=i, **grade(r.text), gen_tokens=r.generate_token_len,
+                               prompt_tokens=r.input_token_len, steps=s1 - s0, calls=c1 - c0,
+                               committed=n1 - n0, time_s=round(dt, 4), finish=r.finish_reason, text=r.text)
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
                     f.flush()
         else:
             c0, s0, n0 = COUNTER.snapshot()
             t0 = time.time()
-            rs = pipe(prompts, gen_config=gen, do_preprocess=False)
+            rs = pipe([t for _, t, _, _ in items], gen_config=[gen(n) for _, _, n, _ in items], do_preprocess=False)
             dt = time.time() - t0
             c1, s1, n1 = COUNTER.snapshot()
             with open(out, "w", encoding="utf-8") as f:
-                for i, (p, r) in enumerate(zip(problems, rs)):
-                    pred, ref = gsm8k.extract(r.text), gsm8k.gold(p["answer"])
-                    f.write(json.dumps(dict(idx=i, correct=gsm8k.is_correct(pred, ref), pred=pred, gold=ref,
-                                            gen_tokens=r.generate_token_len, steps=0, finish=r.finish_reason,
+                for (i, _, _, grade), r in zip(items, rs):
+                    f.write(json.dumps(dict(idx=i, **grade(r.text), gen_tokens=r.generate_token_len,
+                                            prompt_tokens=r.input_token_len, steps=0, finish=r.finish_reason,
                                             text=r.text), ensure_ascii=False) + "\n")
             tokens = sum(r.generate_token_len for r in rs)
             meta.update(total_time_s=round(dt, 3), total_calls=c1 - c0, total_steps=s1 - s0,
-                        total_gen_tokens=tokens, tokens_per_s=round(tokens / dt, 2))
+                        total_gen_tokens=tokens, tokens_per_s=round(tokens / dt, 2),
+                        requests_per_s=round(len(rs) / dt, 4))
     meta["wall_s"] = round(time.time() - t_start, 1)
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
 

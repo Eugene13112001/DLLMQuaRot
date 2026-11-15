@@ -6,6 +6,9 @@
 # Policies: 0 none, 4 int4, 8 int8, 16 fp8 e4m3, 17 fp8 e5m2, 42 TurboQuant (K4 V2).
 # Output: out/lmdeploy/<N|full>/sdar8b_b<B>_t<T>_q<P>.jsonl (+ .meta.json, .log); reruns resume.
 # A policy that fails is logged and the queue goes on.
+# BENCH=ruler LENGTH=4096|16384 RULER_DATA=~/data/ruler: RULER (the 390 problems of run_ruler) instead
+# of GSM8K, output in out/lmdeploy/ruler<LENGTH>[_<N>][_bs<B>]/. CACHE_FRAC: share of free memory for
+# the KV cache (default 0.3; raise it for big batches at 16K).
 # EXTRA: more arguments for blockkv.lmdeploy_gsm8k (e.g. "--eager --gen-length 512"), with TAG
 # appended to the file stem (e.g. TAG=_eager_g512).
 # Without CARD, each policy waits for an empty card among CARDS (default "0 1 2 3 4"):
@@ -19,7 +22,14 @@ N=${N:-}
 BATCH=${BATCH:-1}
 REPO=JetLM/SDAR-8B-Chat
 [[ $BLOCK != 4 ]] && REPO+="-b$BLOCK"
-OUT=out/lmdeploy/${N:-full}
+BENCH=${BENCH:-gsm8k}
+if [[ $BENCH == ruler ]]; then
+  OUT=out/lmdeploy/ruler${LENGTH:-4096}${N:+_$N}
+  BARGS=(--bench ruler --length "${LENGTH:-4096}" --ruler-data "${RULER_DATA:-$HOME/data/ruler}")
+else
+  OUT=out/lmdeploy/${N:-full}
+  BARGS=(--bench gsm8k)
+fi
 [[ $BATCH != 1 ]] && OUT+="_bs$BATCH"
 mkdir -p "$OUT"
 for P in ${POLICIES:-0 8}; do
@@ -34,7 +44,7 @@ for P in ${POLICIES:-0 8}; do
   CUDA_VISIBLE_DEVICES=$card HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
   HF_DATASETS_CACHE=${HF_DATASETS_CACHE_OWN:-/data/caches/evgeniystep/hf_datasets} \
   python -m blockkv.lmdeploy_gsm8k --model-path "${MODEL_PATH:-$REPO}" --block "$BLOCK" --threshold "$T" \
-    --quant-policy "$P" --batch "$BATCH" ${N:+--limit $N} ${EXTRA:-} --out "$OUT/$stem.jsonl" > "$OUT/$stem.log" 2>&1
+    --quant-policy "$P" --batch "$BATCH" ${N:+--limit $N} "${BARGS[@]}" --cache-frac "${CACHE_FRAC:-0.3}" ${EXTRA:-} --out "$OUT/$stem.jsonl" > "$OUT/$stem.log" 2>&1
   rc=$?
   echo "$(date '+%F %T') end $stem rc=$rc | $(state)" | tee -a "$OUT/queue.log"
 done
