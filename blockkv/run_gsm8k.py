@@ -165,6 +165,9 @@ def main():
                     help="QuaRot-like Hadamard rotation of keys and values before rounding (use --key-mode token)")
     ap.add_argument("--kv-k-bits", type=int, choices=[2, 3, 4, 8, 16], help="bits of the keys (default --kv-bits)")
     ap.add_argument("--kv-v-bits", type=int, choices=[2, 3, 4, 8, 16], help="bits of the values (default --kv-bits)")
+    ap.add_argument("--kv-key-boost", type=float, default=0.0,
+                    help="Kitty-like: fraction of key channels per group (widest range) kept at --kv-key-boost-bits")
+    ap.add_argument("--kv-key-boost-bits", type=int, default=8)
     ap.add_argument("--kv-impl", choices=["ours", "kivi", "noise"], default="ours",
                     help="kivi: round with the official KIVI code (quant/new_pack.py under KIVI_PATH); "
                          "noise: control, uniform noise of the same per-group step instead of rounding")
@@ -216,7 +219,8 @@ def main():
     meta = dict(vars(args), family=family, repo=repo_id, path=path, threshold=threshold,
                 steps=steps, prompt_style=style, gen_length=gen_length, dtype=dtype,
                 mask_id=mid, stop_ids=stops,
-                kv_honest_bits=KVQuant(args.kv_bits, args.kv_group, only=args.kv_only, k_bits=args.kv_k_bits, v_bits=args.kv_v_bits).honest_bits if args.kv_bits else 16,
+                kv_honest_bits=KVQuant(args.kv_bits, args.kv_group, only=args.kv_only, k_bits=args.kv_k_bits, v_bits=args.kv_v_bits,
+                             key_boost=args.kv_key_boost, key_boost_bits=args.kv_key_boost_bits).honest_bits if args.kv_bits else 16,
                 rmsnorm_patched=rmsnorm_patched, **device_info())
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     print(json.dumps(meta), flush=True)
@@ -234,7 +238,8 @@ def main():
             t0 = time.time()
             quant = (KVQuant(args.kv_bits, args.kv_group, args.kv_window, args.kv_sink, args.key_mode,
                              args.kv_only, impl=args.kv_impl, rotate=args.kv_rotate,
-                             k_bits=args.kv_k_bits, v_bits=args.kv_v_bits)
+                             k_bits=args.kv_k_bits, v_bits=args.kv_v_bits,
+                             key_boost=args.kv_key_boost, key_boost_bits=args.kv_key_boost_bits)
                      if args.kv_bits else None)
             if family == "sdar":
                 gen, st = decode.sdar_generate(model, ids, mid, args.block, steps, threshold,

@@ -31,6 +31,12 @@ channels, which is why rotated schemes quantize per token (use key_mode="token")
 `k_bits` / `v_bits` give the keys and the values their own bit widths (default: `bits` for
 both; 16 leaves that part in 16 bit), e.g. k_bits=4, v_bits=2 as TurboQuant spends its budget.
 
+`key_boost` (Kitty-like, arXiv 2511.18643): in every group of `group` tokens of every head, the
+`key_boost` fraction of key channels with the widest range (max - min over the group; dynamic, no
+calibration) is rounded with `key_boost_bits` instead of `k_bits`. Honest bits of the keys grow by
+key_boost * (key_boost_bits - k_bits) plus the channel indices (log2(head_dim) bits per boosted
+channel per group). Keys per channel only (KIVI's layout), our rounding, no rotation.
+
 `impl="kivi"` rounds with the official KIVI code instead of `fake_quant`: the
 functions `quant_and_pack_kcache` / `quant_and_pack_vcache` and their unpacking
 counterparts from `quant/new_pack.py` of github.com/jy-yuan/KIVI (path in the
@@ -40,6 +46,7 @@ for a constant group). Entries that come out non-finite (a constant group divide
 by zero there) keep their original value and are counted in `kv_nonfinite`.
 """
 import importlib.util
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -142,6 +149,21 @@ def quant_keys(k, bits, group, mode, shared=False, noise=None):
     return quant_tokens(k, bits, group, shared, noise)
 
 
+def boosted_keys(k, bits, group, frac, boost_bits):
+    """KIVI keys (per channel over `group` tokens) with the widest `frac` of channels of every
+    (head, group) rounded with `boost_bits`. k: (b, h, n * group, d)."""
+    b, h, t, d = k.shape
+    n = max(1, round(frac * d))
+    g = k.reshape(b, h, t // group, group, d)
+    gf = g.float()
+    width = gf.amax(3) - gf.amin(3)                                  # (b, h, groups, d)
+    top = width.topk(n, dim=-1).indices
+    mask = torch.zeros_like(width, dtype=torch.bool).scatter_(-1, top, True).unsqueeze(3)
+    low = fake_quant(g, bits, 3)
+    high = fake_quant(g, boost_bits, 3)
+    return torch.where(mask, high, low).reshape(b, h, t, d)
+
+
 def quant_tokens(v, bits, group, shared=False, noise=None):
     """v: (b, h, t, d), groups of `group` channels within each token."""
     b, h, t, d = v.shape
@@ -166,6 +188,9 @@ class KVQuant:
     rotate: bool = False                   # QuaRot-like Hadamard rotation before rounding (see module doc)
     k_bits: int = None                     # bits of the keys / the values (None: `bits`)
     v_bits: int = None
+    key_boost: float = 0.0                 # Kitty-like: fraction of key channels per group kept at key_boost_bits
+    key_boost_bits: int = 8
+    head_dim: int = 128                    # for the honest-bits count of the channel indices
     done: int = None                       # first position not yet quantized
     nonfinite: int = 0                     # impl="kivi": entries that came out non-finite and were kept
     _err: dict = field(default_factory=dict)
@@ -182,6 +207,8 @@ class KVQuant:
             assert {self.k_bits, self.v_bits} <= {2, 4, 8, 16}, "official KIVI packs 2, 4 or 8 bits"
         if self.rotate:
             assert self.impl == "ours", "rotation goes with our rounding only"
+        if self.key_boost:
+            assert self.impl == "ours" and not self.rotate and self.key_mode == "channel" and not self.shared,                 "key boost: KIVI-layout keys with our rounding"
         self.done = self.sink
 
     def _noise(self, x):
@@ -194,6 +221,8 @@ class KVQuant:
     def _keys(self, ks):
         if self.impl == "kivi":
             return self._kept(ks, kivi_keys(ks, self.k_bits, self.group))
+        if self.key_boost:
+            return boosted_keys(ks, self.k_bits, self.group, self.key_boost, self.key_boost_bits)
         f = lambda x: quant_keys(x, self.k_bits, self.group, self.key_mode, self.shared, self._noise(x))
         return rotated(f, ks) if self.rotate else f(ks)
 
@@ -242,6 +271,11 @@ class KVQuant:
     def honest_bits(self):
         """Bits per cached number, keys and values averaged; 16 for what stays 16 bit."""
         per = [self._bits(n) + 32 / self.group if self._does(n) else 16 for n in ("k", "v")]
+        if self.key_boost and self._does("k"):
+            # per group of `group` tokens x head_dim channels: nb channels carry wider codes
+            # (each channel already has its own min and step) plus nb channel indices
+            nb = max(1, round(self.key_boost * self.head_dim))
+            per[0] += nb / self.head_dim * (self.key_boost_bits - self.k_bits)                 + nb * math.log2(self.head_dim) / (self.group * self.head_dim)
         return sum(per) / 2
 
     def summary(self, cache_len):
