@@ -47,3 +47,13 @@ def test_step_metrics_counts_flips_and_threshold_falls():
     m = step_metrics(lc, lq, 0.9)
     assert m["n"] == 2 and m["flip"] == 1 and m["above"] == 1 and m["fall_below"] == 1
     assert m["conf_drop"] > 0 and m["kl"] > 0
+
+
+def test_block_mass_counts_masked_rows_on_the_last_q_keys():
+    from blockkv.kv_probe import block_mass
+    # 1 layer, 1 head, q_len 2, k_len 5 (3 cached + 2 block); row 0 masked, row 1 not
+    a = torch.tensor([[[[0.1, 0.1, 0.2, 0.3, 0.3],
+                        [0.5, 0.5, 0.0, 0.0, 0.0]]]])
+    masked = torch.tensor([True, False])
+    assert abs(block_mass((a,), masked) - 0.6) < 1e-6
+    assert block_mass(None, masked) is None and block_mass((None,), masked) is None

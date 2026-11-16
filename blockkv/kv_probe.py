@@ -19,6 +19,12 @@ on identical states. Per scheme, averaged over the probed masked positions:
   fall_below               share of positions above the threshold exactly that drop to or below it
   rise_above               the reverse
   kl                       KL(exact || compressed) of the next-token distribution
+  attn_block_exact / _quant  share of attention the masked positions of the current block give to the
+                           current block itself (vs the cache), averaged over layers and heads, with
+                           the exact and the compressed cache. "Quantized keys steal attention"
+                           (arXiv 2605.26266): zero-mean key noise inflates the softmax mass of the
+                           compressed positions through the convexity of exp, so the full-precision
+                           block loses attention. Needs eager attention (on by default; --no-attn-mass skips it).
 
 Schemes are written like the stage1_kv.sh specs: "2", "3", "4", "2k", "2v", "k4v2", "k2v4",
 "2rot" (Hadamard, keys per token), "2rotv" (values rotated, keys KIVI), "2kb0.0625" (Kitty-like boost of key channels to 8 bits).
@@ -73,6 +79,24 @@ def cache_errors(clean, quant):
     return out
 
 
+def block_mass(attentions, masked):
+    """Mean share of attention that the masked query rows give to the current block's own keys
+    (the last q_len key positions), over layers and heads. None when weights are unavailable."""
+    if not attentions:
+        return None
+    vals = []
+    for a in attentions:
+        if a is None:
+            return None
+        a = a[0].float()                                   # (heads, q_len, k_len)
+        q_len, k_len = a.shape[-2], a.shape[-1]
+        if k_len < q_len:
+            return None
+        rows = a[:, masked, :]                             # masked queries only
+        vals.append(rows[..., k_len - q_len:].sum(-1).mean().item())
+    return sum(vals) / len(vals)
+
+
 def step_metrics(lc, lq, threshold):
     """lc, lq: (n, vocab) logits of the probed masked positions, exact and compressed."""
     pc, pq = lc.float().softmax(-1), lq.float().softmax(-1)
@@ -94,8 +118,9 @@ def step_metrics(lc, lq, threshold):
 class Prober:
     """Wraps model.forward: on sampled non-storing forwards, reruns them on compressed cache copies."""
 
-    def __init__(self, model, family, mid, schemes, threshold, every, per_problem, head_dim):
+    def __init__(self, model, family, mid, schemes, threshold, every, per_problem, head_dim, attn=True):
         self.model, self.family, self.mid = model, family, mid
+        self.attn = attn
         self.schemes, self.threshold, self.every, self.per_problem = schemes, threshold, every, per_problem
         self.head_dim = head_dim
         self.orig = model.forward
@@ -124,12 +149,22 @@ class Prober:
         lc = self._masked_logits(out.logits, masked)
         length = cache_layers(cache)[0][0].shape[2]
         with torch.no_grad():
+            mass_exact = self._mass(args, kw, masked) if self.attn else None
             for s in self.schemes:
                 cq = copy.deepcopy(cache)
                 make_quant(s, head_dim=self.head_dim)(cq, 0, length)
                 kq = dict(kw, past_key_values=cq)
-                lq = self._masked_logits(self.orig(*args, **kq).logits, masked)
+                if mass_exact is not None:
+                    outq = self.orig(*args, **dict(kq, output_attentions=True))
+                    mass_q = block_mass(outq.attentions, masked)
+                else:
+                    outq, mass_q = self.orig(*args, **kq), None
+                lq = self._masked_logits(outq.logits, masked)
                 st = self.stats[s]
+                if mass_exact is not None and mass_q is not None:
+                    st["mass_exact"] += mass_exact
+                    st["mass_quant"] += mass_q
+                    st["mass_n"] += 1
                 for k, v in step_metrics(lc, lq, self.threshold).items():
                     st[k] += v
                 e = cache_errors(cache, cq)
@@ -140,6 +175,18 @@ class Prober:
                 st["probes"] += 1
                 del cq
         return out
+
+    def _mass(self, args, kw, masked):
+        """Block attention share with the exact cache; switches the measure off if the model
+        does not return attention weights (e.g. flash attention, or no output_attentions)."""
+        try:
+            m = block_mass(self.orig(*args, **dict(kw, output_attentions=True)).attentions, masked)
+        except TypeError:
+            m = None
+        if m is None:
+            print("attention weights unavailable: attn_block_* not measured", flush=True)
+            self.attn = False
+        return m
 
     def _masked_logits(self, logits, masked):
         lg = logits[0]
@@ -160,7 +207,9 @@ class Prober:
                           conf_drop=st["conf_drop"] / n, conf_at_exact=st["conf_at_exact"] / n,
                           gap_shrink=st["gap_shrink"] / n, flip=st["flip"] / n,
                           fall_below=st["fall_below"] / max(st["above"], 1),
-                          rise_above=st["rise_above"] / max(n - st["above"], 1), kl=st["kl"] / n)
+                          rise_above=st["rise_above"] / max(n - st["above"], 1), kl=st["kl"] / n,
+                          attn_block_exact=st["mass_exact"] / st["mass_n"] if st["mass_n"] else None,
+                          attn_block_quant=st["mass_quant"] / st["mass_n"] if st["mass_n"] else None)
         return res
 
 
@@ -179,19 +228,23 @@ def main():
     ap.add_argument("--data")
     ap.add_argument("--model-path")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--no-attn-mass", dest="attn_mass", action="store_false",
+                    help="skip the attention-share measure (then flash attention may be used)")
     args = ap.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     family, repo_id = repo(args.model, args.block)
     path = resolve_path(repo_id, args.model_path)
     tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    extra = dict(attn_implementation="eager") if args.attn_mass else {}   # attention weights need eager
     model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=getattr(torch, DEFAULTS[family]["dtype"]),
                                                  trust_remote_code=True, device_map="cuda",
-                                                 low_cpu_mem_usage=True).eval()
+                                                 low_cpu_mem_usage=True, **extra).eval()
     mid, stops = mask_id(family, tok, None), stop_ids(family, tok, model)
     head_dim = model.config.hidden_size // model.config.num_attention_heads
     head_dim = getattr(model.config, "head_dim", None) or head_dim
-    prober = Prober(model, family, mid, args.schemes, args.threshold, args.every, args.per_problem, head_dim)
+    prober = Prober(model, family, mid, args.schemes, args.threshold, args.every, args.per_problem, head_dim,
+                    attn=args.attn_mass)
 
     problems = gsm8k.load(args.data)
     idxs = sorted(random.Random(args.seed).sample(range(len(problems)), args.limit))
@@ -214,11 +267,12 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(res, indent=1), encoding="utf-8")
     print(f"{'scheme':12s} {'bits':>5s} {'relK':>7s} {'crelK':>7s} {'relV':>7s} {'crelV':>7s} {'conf':>7s} "
-          f"{'gap':>6s} {'flip':>6s} {'below':>6s} {'kl':>7s}")
+          f"{'gap':>6s} {'flip':>6s} {'below':>6s} {'kl':>7s} {'blk_ex':>7s} {'blk_q':>7s}")
     for s, r in res["schemes"].items():
         print(f"{s:12s} {r['honest_bits']:5.2f} {r['relerr_k']:7.4f} {r['crelerr_k']:7.4f} {r['relerr_v']:7.4f} "
               f"{r['crelerr_v']:7.4f} {r['conf_drop']:7.4f} {r['gap_shrink']:6.3f} {r['flip']:6.3f} "
-              f"{r['fall_below']:6.3f} {r['kl']:7.4f}")
+              f"{r['fall_below']:6.3f} {r['kl']:7.4f} "
+              f"{(r['attn_block_exact'] or float('nan')):7.4f} {(r['attn_block_quant'] or float('nan')):7.4f}")
 
 
 if __name__ == "__main__":
