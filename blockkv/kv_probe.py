@@ -226,6 +226,14 @@ def main():
     ap.add_argument("--small-block", type=int, default=8)
     ap.add_argument("--gen-length", type=int, default=512, help="answer limit (GSM8K answers are ~160-320 tokens)")
     ap.add_argument("--data")
+    ap.add_argument("--bench", choices=["gsm8k", "longproc"], default="gsm8k",
+                    help="longproc: long LongProc inputs (long cache); the answer is cut at --gen-length")
+    ap.add_argument("--longproc", help="LongProc repository folder (for --bench longproc)")
+    ap.add_argument("--datasets", nargs="+", default=["path_traversal_8k", "html_to_tsv_8k", "tom_tracking_8k",
+                                                       "countdown_8k", "travel_planning_8k"])
+    ap.add_argument("--max-input", type=int, default=24576, help="longproc: skip longer prompts")
+    ap.add_argument("--prefill-chunk", type=int, default=1024,
+                    help="feed long prompts in pieces (eager attention on a 24K prompt in one piece needs ~40 GB)")
     ap.add_argument("--model-path")
     ap.add_argument("--out", required=True)
     ap.add_argument("--no-attn-mass", dest="attn_mass", action="store_false",
@@ -246,23 +254,36 @@ def main():
     prober = Prober(model, family, mid, args.schemes, args.threshold, args.every, args.per_problem, head_dim,
                     attn=args.attn_mass)
 
-    problems = gsm8k.load(args.data)
-    idxs = sorted(random.Random(args.seed).sample(range(len(problems)), args.limit))
+    if args.bench == "gsm8k":
+        problems = gsm8k.load(args.data)
+        idxs = sorted(random.Random(args.seed).sample(range(len(problems)), args.limit))
+        work = [(str(i), gsm8k.PROMPT_STYLES[family].format(question=problems[i]["question"])) for i in idxs]
+    else:
+        from blockkv.run_longproc import load as load_longproc
+        per = max(1, args.limit // len(args.datasets))
+        work = [(i, prompt) for i, _, prompt, _, _, _ in load_longproc(args.longproc, args.datasets, per, args.seed)]
     t0 = time.time()
-    for n, i in enumerate(idxs):
+    skipped = []
+    for n, (i, prompt) in enumerate(work):
         prober.new_problem()
-        text = tok.apply_chat_template([{"role": "user", "content": gsm8k.PROMPT_STYLES[family].format(
-            question=problems[i]["question"])}], tokenize=False, add_generation_prompt=True)
-        ids = tok(text, return_tensors="pt", add_special_tokens=family != "sdar").input_ids.cuda()
+        text = tok.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False,
+                                       add_generation_prompt=True)
+        ids = tok(text, return_tensors="pt", add_special_tokens=family != "sdar").input_ids
+        if args.bench == "longproc" and ids.shape[1] > args.max_input:
+            skipped.append(i)
+            continue
+        ids = ids.cuda()
         with torch.no_grad():
             if family == "sdar":
-                decode.sdar_generate(model, ids, mid, args.block, args.block, args.threshold, args.gen_length, stops)
+                decode.sdar_generate(model, ids, mid, args.block, args.block, args.threshold, args.gen_length, stops,
+                                     prefill_chunk=args.prefill_chunk or None)
             else:
                 decode.fastdllm_generate(model, ids, mid, args.block, args.small_block, args.threshold,
-                                         args.gen_length, stops)
-        print(f"[{n + 1}/{len(idxs)}] idx={i} probes={prober.probed} {time.time() - t0:.0f}s", flush=True)
+                                         args.gen_length, stops, prefill_chunk=args.prefill_chunk or None)
+        print(f"[{n + 1}/{len(work)}] {i} prompt={ids.shape[1]} probes={prober.probed} {time.time() - t0:.0f}s",
+              flush=True)
 
-    res = dict(args=vars(args), head_dim=head_dim, schemes=prober.summary())
+    res = dict(args=vars(args), head_dim=head_dim, skipped=skipped, schemes=prober.summary())
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(res, indent=1), encoding="utf-8")
