@@ -30,3 +30,17 @@ def test_identity_holds():
     rb = rows({0: (160, 80), 1: (310, 120)})
     d = decompose(ra, rb, cap=512)
     assert math.isclose(d["steps"], d["length"] / d["tps"])
+
+
+def test_repetition_counts_as_a_loop_below_the_cap():
+    from blockkv.tax_decompose import repetitive
+    varied = " ".join(f"row {i} col {i * 7} value {i * 13}" for i in range(200))
+    looped = varied[:500] + " the answer is 42 and so" * 200
+    assert not repetitive(varied) and repetitive(looped)
+    ra = {0: dict(gen_tokens=100, steps=40, text=varied), 1: dict(gen_tokens=300, steps=100, text=varied)}
+    rb = {0: dict(gen_tokens=100, steps=50, text=varied), 1: dict(gen_tokens=400, steps=200, text=looped)}
+    rep = dict(n=10, tail=600, min_distinct=0.3)
+    d = decompose(ra, rb, cap=9216, repeat=rep)
+    assert d["loops_run"] == 1 and d["cap_run"] == 0 and d["n_clean"] == 1
+    assert abs(d["in_loops"] - 100 / 110) < 1e-9
+    assert decompose(ra, rb, cap=9216)["loops_run"] == 0          # cap only: not caught
