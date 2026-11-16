@@ -14,7 +14,9 @@ on identical states. Per scheme, averaged over the probed masked positions:
                            the same q.b to every logit of a query, so softmax ignores it; the first
                            measure counts it in the denominator, this one does not.
   conf_drop                mean drop of the top-1 probability
-  gap_shrink               mean relative change of the top-1 minus top-2 logit gap (DECAL's measure)
+  gap_shrink               1 - sum(top-1 minus top-2 logit gap, compressed) / sum(same, exact) over the
+                           probed positions (DECAL's measure; a ratio of sums, so near-tied positions
+                           cannot blow it up)
   flip                     share of positions whose argmax token changes
   fall_below               share of positions above the threshold exactly that drop to or below it
   rise_above               the reverse
@@ -24,7 +26,7 @@ on identical states. Per scheme, averaged over the probed masked positions:
                            the exact and the compressed cache. "Quantized keys steal attention"
                            (arXiv 2605.26266): zero-mean key noise inflates the softmax mass of the
                            compressed positions through the convexity of exp, so the full-precision
-                           block loses attention. Needs eager attention (on by default; --no-attn-mass skips it).
+                           block loses attention. Measured by wrapping the model's own flash_attn_func call (on by default; --no-attn-mass skips it).
 
 Schemes are written like the stage1_kv.sh specs: "2", "3", "4", "2k", "2v", "k4v2", "k2v4",
 "2rot" (Hadamard, keys per token), "2rotv" (values rotated, keys KIVI), "2kb0.0625" (Kitty-like boost of key channels to 8 bits).
@@ -79,6 +81,49 @@ def cache_errors(clean, quant):
     return out
 
 
+class AttnRecorder:
+    """Wraps the attention call of the model's module (SDAR decodes with flash_attn_func(q, k, v) where
+    k, v = cache + current block, after norm and RoPE). While `active`, each call adds, per layer, the
+    share of attention the masked query rows give to the current block's own keys (the last q_len),
+    computed here in float32 from q and k; the model's own output is untouched."""
+
+    def __init__(self):
+        self.active, self.masked, self.vals = False, None, []
+
+    def wrap(self, fn):
+        def wrapped(q, k, v, *a, softmax_scale=None, **kw):
+            if self.active and self.masked is not None:
+                self.vals.append(self.share(q, k, softmax_scale))
+            return fn(q, k, v, *a, softmax_scale=softmax_scale, **kw)
+        return wrapped
+
+    def share(self, q, k, scale):
+        # q: (b, q_len, Hq, d), k: (b, k_len, Hkv, d)
+        qf = q[0][self.masked].float()                    # (m, Hq, d)
+        kf = k[0].float()                                 # (k_len, Hkv, d)
+        hq, hkv = qf.shape[1], kf.shape[1]
+        kf = kf.repeat_interleave(hq // hkv, dim=1)       # (k_len, Hq, d)
+        scale = scale if scale is not None else qf.shape[-1] ** -0.5
+        p = torch.einsum("mhd,khd->hmk", qf, kf).mul_(scale).softmax(-1)
+        q_len = q.shape[1]
+        return p[..., -q_len:].sum(-1).mean().item()
+
+
+REC = AttnRecorder()
+
+
+def patch_attention(model):
+    """Wrap flash_attn_func in the model's own modeling module. True if found."""
+    import sys
+    for mod in model.modules():
+        m = sys.modules.get(type(mod).__module__)
+        if m is not None and hasattr(m, "flash_attn_func") and not getattr(m, "_kv_probe_wrapped", False):
+            m.flash_attn_func = REC.wrap(m.flash_attn_func)
+            m._kv_probe_wrapped = True
+            return True
+    return False
+
+
 def block_mass(attentions, masked):
     """Mean share of attention that the masked query rows give to the current block's own keys
     (the last q_len key positions), over layers and heads. None when weights are unavailable."""
@@ -107,7 +152,7 @@ def step_metrics(lc, lq, threshold):
     gap_c, gap_q = top_c[:, 0] - top_c[:, 1], top_q[:, 0] - top_q[:, 1]
     kl = (pc * (pc.clamp_min(1e-30).log() - pq.clamp_min(1e-30).log())).sum(-1)
     return dict(n=len(c1), conf_drop=(c1 - q1).sum().item(), conf_at_exact=(c1 - q_at).sum().item(),
-                gap_shrink=((gap_c - gap_q) / gap_c.clamp_min(1e-6)).sum().item(),
+                gap_c=gap_c.sum().item(), gap_q=gap_q.sum().item(),
                 flip=(ic != iq).sum().item(),
                 above=(c1 > threshold).sum().item(),
                 fall_below=((c1 > threshold) & (q1 <= threshold)).sum().item(),
@@ -155,8 +200,7 @@ class Prober:
                 make_quant(s, head_dim=self.head_dim)(cq, 0, length)
                 kq = dict(kw, past_key_values=cq)
                 if mass_exact is not None:
-                    outq = self.orig(*args, **dict(kq, output_attentions=True))
-                    mass_q = block_mass(outq.attentions, masked)
+                    outq, mass_q = self._run_mass(args, kq, masked)
                 else:
                     outq, mass_q = self.orig(*args, **kq), None
                 lq = self._masked_logits(outq.logits, masked)
@@ -176,15 +220,20 @@ class Prober:
                 del cq
         return out
 
-    def _mass(self, args, kw, masked):
-        """Block attention share with the exact cache; switches the measure off if the model
-        does not return attention weights (e.g. flash attention, or no output_attentions)."""
+    def _run_mass(self, args, kw, masked):
+        """(output, block attention share) of one forward, the share from the wrapped attention call."""
+        REC.active, REC.masked, REC.vals = True, masked, []
         try:
-            m = block_mass(self.orig(*args, **dict(kw, output_attentions=True)).attentions, masked)
-        except TypeError:
-            m = None
+            out = self.orig(*args, **kw)
+        finally:
+            REC.active = False
+        return out, (sum(REC.vals) / len(REC.vals) if REC.vals else None)
+
+    def _mass(self, args, kw, masked):
+        """Block attention share with the exact cache; switches the measure off if nothing was recorded."""
+        m = self._run_mass(args, kw, masked)[1]
         if m is None:
-            print("attention weights unavailable: attn_block_* not measured", flush=True)
+            print("attention call not intercepted: attn_block_* not measured", flush=True)
             self.attn = False
         return m
 
@@ -205,7 +254,7 @@ class Prober:
                           crelerr_k=st["err_k"] / max(st["spread_k"], 1e-30),
                           crelerr_v=st["err_v"] / max(st["spread_v"], 1e-30),
                           conf_drop=st["conf_drop"] / n, conf_at_exact=st["conf_at_exact"] / n,
-                          gap_shrink=st["gap_shrink"] / n, flip=st["flip"] / n,
+                          gap_shrink=1 - st["gap_q"] / st["gap_c"] if st["gap_c"] else None, flip=st["flip"] / n,
                           fall_below=st["fall_below"] / max(st["above"], 1),
                           rise_above=st["rise_above"] / max(n - st["above"], 1), kl=st["kl"] / n,
                           attn_block_exact=st["mass_exact"] / st["mass_n"] if st["mass_n"] else None,
@@ -244,10 +293,12 @@ def main():
     family, repo_id = repo(args.model, args.block)
     path = resolve_path(repo_id, args.model_path)
     tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
-    extra = dict(attn_implementation="eager") if args.attn_mass else {}   # attention weights need eager
     model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=getattr(torch, DEFAULTS[family]["dtype"]),
                                                  trust_remote_code=True, device_map="cuda",
-                                                 low_cpu_mem_usage=True, **extra).eval()
+                                                 low_cpu_mem_usage=True).eval()
+    if args.attn_mass and not patch_attention(model):
+        print("no flash_attn_func in the model's module: attn_block_* not measured", flush=True)
+        args.attn_mass = False
     mid, stops = mask_id(family, tok, None), stop_ids(family, tok, model)
     head_dim = model.config.hidden_size // model.config.num_attention_heads
     head_dim = getattr(model.config, "head_dim", None) or head_dim
@@ -291,7 +342,7 @@ def main():
           f"{'gap':>6s} {'flip':>6s} {'below':>6s} {'kl':>7s} {'blk_ex':>7s} {'blk_q':>7s}")
     for s, r in res["schemes"].items():
         print(f"{s:12s} {r['honest_bits']:5.2f} {r['relerr_k']:7.4f} {r['crelerr_k']:7.4f} {r['relerr_v']:7.4f} "
-              f"{r['crelerr_v']:7.4f} {r['conf_drop']:7.4f} {r['gap_shrink']:6.3f} {r['flip']:6.3f} "
+              f"{r['crelerr_v']:7.4f} {r['conf_drop']:7.4f} {(r['gap_shrink'] if r['gap_shrink'] is not None else float('nan')):6.3f} {r['flip']:6.3f} "
               f"{r['fall_below']:6.3f} {r['kl']:7.4f} "
               f"{(r['attn_block_exact'] or float('nan')):7.4f} {(r['attn_block_quant'] or float('nan')):7.4f}")
 

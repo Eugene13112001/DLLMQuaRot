@@ -57,3 +57,18 @@ def test_block_mass_counts_masked_rows_on_the_last_q_keys():
     masked = torch.tensor([True, False])
     assert abs(block_mass((a,), masked) - 0.6) < 1e-6
     assert block_mass(None, masked) is None and block_mass((None,), masked) is None
+
+
+def test_attention_recorder_uniform_share_and_passthrough():
+    from blockkv.kv_probe import AttnRecorder
+    rec = AttnRecorder()
+    calls = []
+    fn = rec.wrap(lambda q, k, v, softmax_scale=None, causal=False: calls.append(1) or "out")
+    q = torch.zeros(1, 4, 8, 16)                  # q_len 4, 8 query heads -> uniform attention
+    k = torch.randn(1, 20, 2, 16)                 # k_len 20 = 16 cached + 4 block, 2 kv heads (GQA)
+    rec.active, rec.masked = True, torch.tensor([True, True, False, True])
+    assert fn(q, k, k, softmax_scale=0.25) == "out" and calls == [1]
+    assert abs(rec.vals[0] - 4 / 20) < 1e-6
+    rec.active = False
+    fn(q, k, k)
+    assert len(rec.vals) == 1                     # inactive: nothing recorded
