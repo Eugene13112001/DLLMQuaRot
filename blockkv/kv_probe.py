@@ -27,6 +27,16 @@ on identical states. Per scheme, averaged over the probed masked positions:
                            (arXiv 2605.26266): zero-mean key noise inflates the softmax mass of the
                            compressed positions through the convexity of exp, so the full-precision
                            block loses attention. Measured by wrapping the model's own flash_attn_func call (on by default; --no-attn-mass skips it).
+  commit_exact / _quant    tokens a threshold step would commit on this state (>= 1), exact and
+                           compressed; commit_ratio = compressed / exact is the one-step tax
+  bins                     the damage split three ways, per bin: share of positions and fall_below /
+                           rise_above / flip / kl within the bin (fall_below here is per position in
+                           the bin, not per position above the threshold):
+                             conf  by the exact top-1 probability (<=.5, .5-.8, .8-.9, .9-.95,
+                                   .95-.99, >.99): is a larger block's damage just more masks near
+                                   the threshold, or the same masks hurt more?
+                             pos   by the mask's position in the block, in quarters
+                             fill  by the share of the block already committed at that step, in quarters
 
 Schemes are written like the stage1_kv.sh specs: "2", "3", "4", "2k", "2v", "k4v2", "k2v4",
 "2rot" (Hadamard, keys per token), "2rotv" (values rotated, keys KIVI), "2kb0.0625" (Kitty-like boost of key channels to 8 bits).
@@ -142,6 +152,40 @@ def block_mass(attentions, masked):
     return sum(vals) / len(vals)
 
 
+CONF_EDGES = (0.5, 0.8, 0.9, 0.95, 0.99)          # bins of the exact top-1 probability: <=0.5 ... >0.99
+CONF_LABELS = ("<=.5", ".5-.8", ".8-.9", ".9-.95", ".95-.99", ">.99")
+BIN_COLS = ("n", "fall_below", "rise_above", "flip", "kl")
+NQ = 4                                              # quarters of the block (position, fill)
+
+
+def binned(lc, lq, threshold, pos, fill):
+    """Per-bin sums for the probed positions: rows = bins, columns = BIN_COLS.
+    conf: by the exact top-1 probability (how close to the threshold a mask was);
+    pos: by the mask's position in the block, in quarters; fill: by the share of the block already
+    committed at this step, in quarters (one value per step). pos, fill: (n,) floats in [0, 1)."""
+    pc, pq = lc.float().softmax(-1), lq.float().softmax(-1)
+    c1, ic = pc.max(-1)
+    q1, iq = pq.max(-1)
+    kl = (pc * (pc.clamp_min(1e-30).log() - pq.clamp_min(1e-30).log())).sum(-1)
+    cols = torch.stack([torch.ones_like(c1), ((c1 > threshold) & (q1 <= threshold)).float(),
+                        ((c1 <= threshold) & (q1 > threshold)).float(), (ic != iq).float(), kl], 1).cpu()
+    edges = torch.tensor(CONF_EDGES, device=c1.device)
+    out = {}
+    for name, idx, nb in (("conf", torch.bucketize(c1, edges), len(CONF_LABELS)),
+                          ("pos", (pos * NQ).long().clamp(0, NQ - 1), NQ),
+                          ("fill", (fill * NQ).long().clamp(0, NQ - 1), NQ)):
+        out[name] = torch.zeros(nb, len(BIN_COLS), dtype=torch.float64).index_add_(
+            0, idx.cpu(), cols.double())
+    return out
+
+
+def commits(lc, lq, threshold):
+    """Tokens a threshold step would commit, exact and compressed (at least one, as the decoder does)."""
+    c = int((lc.float().softmax(-1).max(-1).values > threshold).sum())
+    q = int((lq.float().softmax(-1).max(-1).values > threshold).sum())
+    return max(c, 1), max(q, 1)
+
+
 def step_metrics(lc, lq, threshold):
     """lc, lq: (n, vocab) logits of the probed masked positions, exact and compressed."""
     pc, pq = lc.float().softmax(-1), lq.float().softmax(-1)
@@ -172,6 +216,7 @@ class Prober:
         self.calls = 0
         self.probed = 0
         self.stats = {s: defaultdict(float) for s in schemes}
+        self.bins = {s: {} for s in schemes}
         model.forward = self.forward
 
     def new_problem(self):
@@ -193,6 +238,9 @@ class Prober:
         self.probed += 1
         lc = self._masked_logits(out.logits, masked)
         length = cache_layers(cache)[0][0].shape[2]
+        q_len = masked.shape[0]
+        pos = torch.arange(q_len, device=masked.device)[masked].float() / q_len
+        fill = torch.full_like(pos, 1 - masked.float().mean().item())
         with torch.no_grad():
             mass_exact = self._mass(args, kw, masked) if self.attn else None
             for s in self.schemes:
@@ -211,6 +259,13 @@ class Prober:
                     st["mass_n"] += 1
                 for k, v in step_metrics(lc, lq, self.threshold).items():
                     st[k] += v
+                cc, cq_ = commits(lc, lq, self.threshold)
+                st["commit_c"] += cc
+                st["commit_q"] += cq_
+                st["masks"] += int(masked.sum())
+                for name, t in binned(lc, lq, self.threshold, pos, fill).items():
+                    b = self.bins[s]
+                    b[name] = t if name not in b else b[name] + t
                 e = cache_errors(cache, cq)
                 for name in "kv":
                     st[f"err_{name}"] += e[name][0].item()
@@ -258,8 +313,44 @@ class Prober:
                           fall_below=st["fall_below"] / max(st["above"], 1),
                           rise_above=st["rise_above"] / max(n - st["above"], 1), kl=st["kl"] / n,
                           attn_block_exact=st["mass_exact"] / st["mass_n"] if st["mass_n"] else None,
-                          attn_block_quant=st["mass_quant"] / st["mass_n"] if st["mass_n"] else None)
+                          attn_block_quant=st["mass_quant"] / st["mass_n"] if st["mass_n"] else None,
+                          commit_exact=st["commit_c"] / max(st["probes"], 1),
+                          commit_quant=st["commit_q"] / max(st["probes"], 1),
+                          commit_ratio=st["commit_q"] / st["commit_c"] if st["commit_c"] else None,
+                          masks_per_step=st["masks"] / max(st["probes"], 1),
+                          bins={name: bin_rows(t) for name, t in self.bins[s].items()})
         return res
+
+
+def bin_rows(t):
+    """Per bin: n, share of positions, and fall_below / rise_above / flip / kl rates within the bin."""
+    total = max(t[:, 0].sum().item(), 1)
+    rows = []
+    for r in t.tolist():
+        n = r[0]
+        rows.append(dict(n=int(n), share=n / total, **{c: (r[i] / n if n else None)
+                                                          for i, c in enumerate(BIN_COLS) if c != "n"}))
+    return rows
+
+
+def _f(x, w=6, p=3):
+    return f"{x:{w}.{p}f}" if x is not None else f"{'-':>{w}s}"
+
+
+def print_bins(res):
+    """Where the damage sits: by exact confidence, position in the block, block fill."""
+    for s, r in res.items():
+        print(f"\n{s}: commits/step exact {r['commit_exact']:.2f}, compressed {r['commit_quant']:.2f} "
+              f"(ratio {_f(r['commit_ratio'], 5, 3)}), masks/step {r['masks_per_step']:.1f}")
+        for name, labels in (("conf", CONF_LABELS), ("pos", [f"q{i + 1}" for i in range(NQ)]),
+                             ("fill", [f"f{i + 1}" for i in range(NQ)])):
+            rows = r["bins"].get(name)
+            if not rows:
+                continue
+            print(f"  {name:5s} {'bin':>8s} {'share':>6s} {'below':>6s} {'above':>6s} {'flip':>6s} {'kl':>7s}")
+            for lab, b in zip(labels, rows):
+                print(f"  {'':5s} {lab:>8s} {_f(b['share'])} {_f(b['fall_below'])} {_f(b['rise_above'])} "
+                      f"{_f(b['flip'])} {_f(b['kl'], 7, 4)}")
 
 
 def main():
@@ -345,6 +436,7 @@ def main():
               f"{r['crelerr_v']:7.4f} {r['conf_drop']:7.4f} {(r['gap_shrink'] if r['gap_shrink'] is not None else float('nan')):6.3f} {r['flip']:6.3f} "
               f"{r['fall_below']:6.3f} {r['kl']:7.4f} "
               f"{(r['attn_block_exact'] or float('nan')):7.4f} {(r['attn_block_quant'] or float('nan')):7.4f}")
+    print_bins(res["schemes"])
 
 
 if __name__ == "__main__":

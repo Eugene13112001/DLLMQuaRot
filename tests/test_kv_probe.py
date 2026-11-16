@@ -72,3 +72,20 @@ def test_attention_recorder_uniform_share_and_passthrough():
     rec.active = False
     fn(q, k, k)
     assert len(rec.vals) == 1                     # inactive: nothing recorded
+
+
+def test_binned_splits_damage_by_exact_confidence_and_position():
+    from blockkv.kv_probe import CONF_LABELS, NQ, bin_rows, binned, commits
+    # 3 masks: confident (falls below), near-threshold (stays above), unsure (flips)
+    lc = torch.tensor([[10.0, 0.0, 0.0], [3.0, 0.0, 0.0], [1.0, 0.9, 0.0]])
+    lq = torch.tensor([[2.0, 0.0, 0.0], [3.5, 0.0, 0.0], [0.9, 1.0, 0.0]])
+    pos = torch.tensor([0.0, 0.5, 0.9])
+    fill = torch.full((3,), 0.3)
+    b = binned(lc, lq, 0.9, pos, fill)
+    assert b["conf"].shape == (len(CONF_LABELS), 5) and b["pos"].shape == (NQ, 5)
+    assert b["conf"][:, 0].sum() == 3 and b["conf"][5, 0] == 1    # p(10, 0, 0) > 0.99
+    assert b["conf"][5, 1] == 1                                      # ... and it falls below 0.9
+    assert b["pos"][[0, 2, 3], 0].tolist() == [1, 1, 1] and b["fill"][1, 0] == 3
+    rows = bin_rows(b["conf"])
+    assert abs(sum(r["share"] for r in rows) - 1) < 1e-9 and rows[0]["flip"] == 1.0
+    assert commits(lc, lq, 0.9) == (2, 1)
