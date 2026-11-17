@@ -44,3 +44,20 @@ def test_repetition_counts_as_a_loop_below_the_cap():
     assert d["loops_run"] == 1 and d["cap_run"] == 0 and d["n_clean"] == 1
     assert abs(d["in_loops"] - 100 / 110) < 1e-9
     assert decompose(ra, rb, cap=9216)["loops_run"] == 0          # cap only: not caught
+
+
+def test_clean_tok_per_step_interval_and_task_filter():
+    from blockkv.tax_decompose import main
+    import json, tempfile, os
+    ra = {f"tom:{i}": dict(idx=f"tom:{i}", gen_tokens=100 + i, steps=40 + i % 3, text="a b") for i in range(10)}
+    rb = {f"tom:{i}": dict(idx=f"tom:{i}", gen_tokens=100 + i, steps=50 + i % 3, text="a b") for i in range(10)}
+    ra["path:0"] = dict(idx="path:0", gen_tokens=100, steps=40, text="a b")
+    rb["path:0"] = dict(idx="path:0", gen_tokens=100, steps=400, text="a b")
+    d = decompose(ra, rb, cap=3072)
+    lo, hi = d["clean_tps_ci"]
+    assert lo <= d["clean"]["tps"] - 1 <= hi
+    with tempfile.TemporaryDirectory() as t:
+        for name, r in (("a", ra), ("b", rb)):
+            with open(os.path.join(t, name + ".jsonl"), "w") as f:
+                f.write("\n".join(json.dumps(x) for x in r.values()))
+        main(["--cap", "3072", "--tasks", "tom", f"{t}/a.jsonl::{t}/b.jsonl"])

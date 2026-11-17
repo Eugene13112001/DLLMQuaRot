@@ -46,17 +46,17 @@ def ratios(ra, rb, ids):
     return dict(steps=steps, length=length, tps=length / steps)
 
 
-def bootstrap(ra, rb, ids, reps=2000, seed=0):
-    """95% interval of the clean step increase (ratio - 1), resampling problems."""
+def bootstrap(ra, rb, ids, reps=2000, seed=0, what="steps"):
+    """95% interval, resampling problems, of the step increase (what="steps": steps ratio - 1) or of
+    the change in tokens per step (what="tps": tok/step ratio - 1)."""
     if len(ids) < 2:
         return None
     rng = random.Random(seed)
     vals = []
     for _ in range(reps):
         s = [rng.choice(ids) for _ in ids]
-        sa = sum(ra[i]["steps"] for i in s)
-        sb = sum(rb[i]["steps"] for i in s)
-        vals.append(sb / sa - 1 if sa else 0.0)
+        r = ratios(ra, rb, s)
+        vals.append(r[what] - 1 if r else 0.0)
     vals.sort()
     return vals[int(0.025 * reps)], vals[int(0.975 * reps) - 1]
 
@@ -78,7 +78,8 @@ def decompose(ra, rb, cap, repeat=None):
     return dict(n=len(common), loops_ref=sum(loop(ra[i]) for i in common), loops_run=sum(loop(rb[i]) for i in common),
                 cap_ref=sum(tokens(ra[i]) >= cap for i in common), cap_run=sum(tokens(rb[i]) >= cap for i in common),
                 in_loops=in_loops, steps=allr["steps"], length=allr["length"], tps=allr["tps"], from_length=from_len,
-                n_clean=len(clean), clean=cl, clean_ci=bootstrap(ra, rb, clean))
+                n_clean=len(clean), clean=cl, clean_ci=bootstrap(ra, rb, clean),
+                clean_tps_ci=bootstrap(ra, rb, clean, what="tps"))
 
 
 def main(argv=None):
@@ -86,17 +87,22 @@ def main(argv=None):
     ap.add_argument("pairs", nargs="+", help="REF::RUN")
     ap.add_argument("--cap", type=int, required=True,
                     help="answer length counted as a runaway (LongBench 512, GSM8K 2000, LongProc 8K 9216)")
+    ap.add_argument("--tasks", nargs="+", help="only problems whose idx starts with one of these (e.g. tom_tracking travel_planning)")
     ap.add_argument("--no-repeat", action="store_true", help="runaways by --cap only, no text repetition test")
     ap.add_argument("--ngram", type=int, default=10)
     ap.add_argument("--tail", type=int, default=600)
     ap.add_argument("--min-distinct", type=float, default=0.3)
     args = ap.parse_args(argv)
     repeat = None if args.no_repeat else dict(n=args.ngram, tail=args.tail, min_distinct=args.min_distinct)
-    print("| run | n | runaways ref→run (at cap) | extra steps in loops | steps × | length × | tok/step × | share from length | clean n | clean steps × [95%] | clean tok/step × |")
+    print("| run | n | runaways ref→run (at cap) | extra steps in loops | steps × | length × | tok/step × | share from length | clean n | clean steps × [95%] | clean tok/step × [95%] |")
     print("|---|---|---|---|---|---|---|---|---|---|---|")
     for pair in args.pairs:
         ref, run = pair.split("::")
-        d = decompose(read(ref), read(run), args.cap, repeat)
+        ra, rb = read(ref), read(run)
+        if args.tasks:
+            keep = lambda r: {i: x for i, x in r.items() if str(i).startswith(tuple(args.tasks))}
+            ra, rb = keep(ra), keep(rb)
+        d = decompose(ra, rb, args.cap, repeat)
         name = run.replace("\\", "/").split("/")[-1].removesuffix(".jsonl")
         if d is None:
             print(f"| {name} | – | | | | | | | | | |")
@@ -104,10 +110,12 @@ def main(argv=None):
         c = d["clean"] or {}
         ci = d["clean_ci"]
         ci_s = f" [{100 * ci[0]:+.1f}; {100 * ci[1]:+.1f}]" if ci else ""
+        tci = d["clean_tps_ci"]
+        tci_s = f" [{100 * tci[0]:+.1f}; {100 * tci[1]:+.1f}]" if tci else ""
         print(f"| {name} | {d['n']} | {d['loops_ref']}→{d['loops_run']} ({d['cap_ref']}→{d['cap_run']}) | "
               f"{100 * d['in_loops']:.0f}% | {d['steps']:.3f} | {d['length']:.3f} | "
               f"{d['tps']:.3f} | {100 * d['from_length']:.0f}% | {d['n_clean']} | "
-              f"{c.get('steps', float('nan')):.3f}{ci_s} | {c.get('tps', float('nan')):.3f} |")
+              f"{c.get('steps', float('nan')):.3f}{ci_s} | {c.get('tps', float('nan')):.3f}{tci_s} |")
 
 
 if __name__ == "__main__":
