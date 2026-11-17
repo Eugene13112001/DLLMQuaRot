@@ -60,4 +60,4 @@ def test_clean_tok_per_step_interval_and_task_filter():
         for name, r in (("a", ra), ("b", rb)):
             with open(os.path.join(t, name + ".jsonl"), "w") as f:
                 f.write("\n".join(json.dumps(x) for x in r.values()))
-        main(["--cap", "3072", "--tasks", "tom", f"{t}/a.jsonl::{t}/b.jsonl"])
+        main([f"{t}/a.jsonl::{t}/b.jsonl", "--cap", "3072", "--tasks", "tom"])
