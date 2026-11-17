@@ -88,6 +88,8 @@ def main(argv=None):
     ap.add_argument("--cap", type=int, required=True,
                     help="answer length counted as a runaway (LongBench 512, GSM8K 2000, LongProc 8K 9216)")
     ap.add_argument("--tasks", nargs="+", help="only problems whose idx starts with one of these (e.g. tom_tracking travel_planning)")
+    ap.add_argument("--prompt-range", type=int, nargs=2, metavar=("MIN", "MAX"),
+                    help="only problems with MIN <= prompt_tokens < MAX (the input length of the reference row)")
     ap.add_argument("--no-repeat", action="store_true", help="runaways by --cap only, no text repetition test")
     ap.add_argument("--ngram", type=int, default=10)
     ap.add_argument("--tail", type=int, default=600)
@@ -102,6 +104,10 @@ def main(argv=None):
         if args.tasks:
             keep = lambda r: {i: x for i, x in r.items() if str(i).startswith(tuple(args.tasks))}
             ra, rb = keep(ra), keep(rb)
+        if args.prompt_range:
+            lo, hi = args.prompt_range
+            ok = {i for i, x in ra.items() if lo <= x.get("prompt_tokens", -1) < hi}
+            ra = {i: x for i, x in ra.items() if i in ok}
         d = decompose(ra, rb, args.cap, repeat)
         name = run.replace("\\", "/").split("/")[-1].removesuffix(".jsonl")
         if d is None:

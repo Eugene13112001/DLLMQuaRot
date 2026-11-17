@@ -59,6 +59,8 @@ def main(argv=None):
     ap.add_argument("--cap", type=int, required=True)
     ap.add_argument("--edges", type=int, nargs="+", default=[0, 256, 512, 1024, 2048, 4096])
     ap.add_argument("--no-repeat", action="store_true")
+    ap.add_argument("--prompt-range", type=int, nargs=2, metavar=("MIN", "MAX"),
+                    help="only problems with MIN <= prompt_tokens < MAX")
     args = ap.parse_args(argv)
     repeat = None if args.no_repeat else dict(n=10, tail=600, min_distinct=0.3)
     for pair in args.pairs:
@@ -66,7 +68,11 @@ def main(argv=None):
         name = run.replace("\\", "/").split("/")[-1].removesuffix(".jsonl")
         print(f"\n{name}")
         print(f"  {'segment':>11s} {'n':>4s} {'tok/step ref':>12s} {'run/ref':>8s} {'95%':>18s}")
-        for r in by_position(read(ref), read(run), args.cap, args.edges, repeat):
+        ra, rb = read(ref), read(run)
+        if args.prompt_range:
+            lo, hi = args.prompt_range
+            ra = {i: x for i, x in ra.items() if lo <= x.get("prompt_tokens", -1) < hi}
+        for r in by_position(ra, rb, args.cap, args.edges, repeat):
             ci = f"[{100 * (r['ci'][0] - 1):+.1f}; {100 * (r['ci'][1] - 1):+.1f}]" if r["ci"] else ""
             tps = f"{r['tps_ref']:.2f}" if r["tps_ref"] is not None else "-"
             rat = f"{r['ratio']:.3f}" if r["ratio"] is not None else "-"
