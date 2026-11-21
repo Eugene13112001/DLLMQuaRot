@@ -1,0 +1,20 @@
+# Environment used for SDAR-8B-Chat and TraDo-8B-Instruct (LongBench, RULER, calibration). Python 3.10, CUDA 12.1.
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1+cu121
+transformers==4.57.1
+tokenizers==0.22.2
+huggingface_hub==0.36.2
+accelerate==1.14.0
+datasets==5.0.0
+safetensors==0.8.0
+sentencepiece==0.2.1
+einops==0.8.2
+numpy==2.2.6
+pandas==2.3.3
+PyYAML==6.0.3
+flash_attn==2.7.4.post1   # used by SDAR's RMSNorm in the paper runs (Triton kernel); see README, Section 1
+# LongBench metrics (same packages as the official LongBench evaluation)
+rouge==1.0.1
+fuzzywuzzy==0.18.0
+python-Levenshtein==0.27.3
+rapidfuzz==3.14.5

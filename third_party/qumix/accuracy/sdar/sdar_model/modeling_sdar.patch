@@ -1,0 +1,131 @@
+--- a/modeling_sdar.py
++++ b/modeling_sdar.py
+@@ -29,10 +29,21 @@
+ from transformers.activations import ACT2FN
+ from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
+ from transformers.generation import GenerationMixin
+-from transformers.integrations import use_kernel_forward_from_hub
++try:
++    from transformers.integrations import use_kernel_forward_from_hub
++except Exception:
++    def use_kernel_forward_from_hub(*a, **k):
++        def _d(cls): return cls
++        return _d
+ from transformers.modeling_attn_mask_utils import AttentionMaskConverter
+-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+-from transformers.modeling_layers import GradientCheckpointingLayer
++try:
++    from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
++except Exception:
++    class FlashAttentionKwargs(dict): pass
++try:
++    from transformers.modeling_layers import GradientCheckpointingLayer
++except Exception:
++    GradientCheckpointingLayer = nn.Module
+ from transformers.modeling_outputs import (
+     BaseModelOutputWithPast,
+     CausalLMOutputWithPast,
+@@ -40,13 +51,33 @@
+     SequenceClassifierOutputWithPast,
+     TokenClassifierOutput,
+ )
+-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
++from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
++try:
++    from transformers.modeling_rope_utils import dynamic_rope_update
++except Exception:
++    def dynamic_rope_update(fn): return fn
+ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+ from transformers.processing_utils import Unpack
+-from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, is_torch_flex_attn_available, logging
++from transformers.utils import is_torch_flex_attn_available, logging
++try:
++    from transformers.utils import auto_docstring
++except Exception:
++    def auto_docstring(fn=None, **k):
++        return fn if callable(fn) else (lambda f: f)
++try:
++    from transformers.utils import LossKwargs
++except Exception:
++    class LossKwargs: pass
++try:
++    from transformers.utils import can_return_tuple
++except Exception:
++    def can_return_tuple(fn): return fn
+ from .configuration_sdar import SDARConfig
+ 
+-from flash_attn.ops.triton.layer_norm import rms_norm_fn as flash_rms_norm
++try:
++    from flash_attn.ops.triton.layer_norm import rms_norm_fn as flash_rms_norm
++except Exception:
++    flash_rms_norm = None
+ 
+ import torch.nn.functional as F
+ try:
+@@ -62,7 +93,7 @@
+     liger_kernel_is_available = False
+ 
+ 
+-if is_torch_flex_attn_available():
++if False:  # flex-attention path disabled (use sdpa); avoids version-specific imports
+     from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+     from transformers.integrations.flex_attention import make_flex_block_causal_mask
+ 
+@@ -81,16 +112,15 @@
+         self.variance_epsilon = eps
+ 
+     def forward(self, hidden_states):
+-        return flash_rms_norm(
+-            hidden_states, weight=self.weight, bias=None, eps=self.variance_epsilon)
+-        '''
++        if flash_rms_norm is not None:
++            return flash_rms_norm(
++                hidden_states, weight=self.weight, bias=None, eps=self.variance_epsilon)
+         input_dtype = hidden_states.dtype
+         hidden_states = hidden_states.to(torch.float32)
+         variance = hidden_states.pow(2).mean(-1, keepdim=True)
+         hidden_states = hidden_states * \
+             torch.rsqrt(variance + self.variance_epsilon)
+         return self.weight * hidden_states.to(input_dtype)
+-        '''
+ 
+     def extra_repr(self):
+         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+@@ -273,29 +303,15 @@
+                 [past_value_states, value_states], dim=-2)
+ 
+         attention_mask = attention_mask.bool() if attention_mask is not None else None
+-        if torch.all(attention_mask):  # decoding
+-            query_states = query_states.transpose(1, 2)
+-            key_states = key_states.transpose(1, 2)
+-            value_states = value_states.transpose(1, 2)
+-            attn_output = flash_attn_func(
+-                query_states,
+-                key_states,
+-                value_states,
+-                causal=False,
+-                softmax_scale=self.scaling
+-            )
+-
+-        else:  # prefilling
++        if attention_mask is None or bool(torch.all(attention_mask)):  # decoding: full bidirectional attention
++            attn_output = F.scaled_dot_product_attention(
++                query=query_states, key=key_states, value=value_states,
++                attn_mask=None, is_causal=False, scale=self.scaling, enable_gqa=True)
++        else:  # prefilling: masked
+             attn_output = F.scaled_dot_product_attention(
+-                query=query_states,
+-                key=key_states,
+-                value=value_states,
+-                attn_mask=attention_mask,
+-                is_causal=False,
+-                scale=self.scaling,
+-                enable_gqa=True
+-            )
+-            attn_output = attn_output.transpose(1, 2).contiguous()
++                query=query_states, key=key_states, value=value_states,
++                attn_mask=attention_mask, is_causal=False, scale=self.scaling, enable_gqa=True)
++        attn_output = attn_output.transpose(1, 2).contiguous()
+ 
+         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+         attn_output = self.o_proj(attn_output)
