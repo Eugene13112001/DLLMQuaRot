@@ -10,18 +10,20 @@ from pathlib import Path
 import torch
 
 from blockkv import decode, longbench, run_longproc
+from blockkv.kvquant import KVQuant
 from blockkv.run_gsm8k import device_info, mask_id, read_done, stop_ids
 from third_party.qumix.qumix.reference import entry_to_bits
 
 
 AUTHOR = Path(__file__).resolve().parents[1] / "third_party/qumix/accuracy/sdar/qumix_eval.py"
 ARMS = ("base", "kivis2r128", "qmxmatchkivi2ts")
+LONGBENCH_ARMS = ("base", "kivi_local2", "qmxmatchkivi2ts")
 TASKS = ("qmsum", "gov_report")
 PROCEDURES = ("path_traversal_2k", "html_to_tsv_2k", "tom_tracking_2k",
               "countdown_2k", "travel_planning_2k")
 
 
-def load_author(model, calibration):
+def load_author(model, calibration, block):
     # The supplied script initializes the model and installs its cache hooks
     # at module scope. Stop before its dataset and evaluation loop.
     source = AUTHOR.read_text(encoding="utf-8")
@@ -32,7 +34,7 @@ def load_author(model, calibration):
     argv = sys.argv
     try:
         sys.argv = [str(AUTHOR), "--model", model, "--loadcalib", str(calibration),
-                    "--block", "32", "--steps", "32", "--prerope", "--vbits", "2",
+                    "--block", str(block), "--steps", str(block), "--prerope", "--vbits", "2",
                     "--vsbits", "8", "--arms", ",".join(ARMS)]
         exec(compile(setup, str(AUTHOR), "exec"), namespace)
     finally:
@@ -55,13 +57,14 @@ def limit_store_logits(model):
 
 
 def evaluate(args):
+    arms = LONGBENCH_ARMS if args.bench == "longbench" else ARMS
     settings = dict(bench=args.bench, data=str(args.data.resolve()), model=args.model,
-                    block=32, threshold=0.9, dtype="bfloat16", limit=args.limit,
+                    block=args.block, threshold=0.9, dtype="bfloat16", limit=args.limit,
                     calibration_sha256=hashlib.sha256(args.calibration.read_bytes()).hexdigest())
     outputs = {}
     args.out.mkdir(parents=True, exist_ok=True)
-    for arm in ARMS:
-        path = args.out / f"sdar8b_b32_{arm}.jsonl"
+    for arm in arms:
+        path = args.out / f"sdar8b_b{args.block}_{arm}.jsonl"
         meta = path.with_suffix(".meta.json")
         fingerprint = dict(settings, arm=arm)
         if path.is_file() and path.stat().st_size:
@@ -75,7 +78,7 @@ def evaluate(args):
     else:
         work = run_longproc.load(args.data, PROCEDURES, 20, 0)[:args.limit]
 
-    author = load_author(args.model, args.calibration)
+    author = load_author(args.model, args.calibration, args.block)
     model, tok = author["model"], author["tok"]
     limit_store_logits(model)
     mid, stops = mask_id("sdar", tok, None), stop_ids("sdar", tok, model)
@@ -89,7 +92,7 @@ def evaluate(args):
         _, _, bits = entry_to_bits(proj[layer][tag])
         qmx_key_rates.append((bits + 0.5 * ((bits > 0) & (bits < 16))).mean().item())
     for arm, (path, meta, fingerprint) in outputs.items():
-        author["ARM"][0] = arm
+        author["ARM"][0] = "base" if arm == "kivi_local2" else arm
         done = read_done(path)
         meta.write_text(json.dumps(dict(run=fingerprint, device=device_info()), indent=2),
                         encoding="utf-8")
@@ -109,7 +112,11 @@ def evaluate(args):
                 if args.bench == "longproc" and ids.shape[1] > 24576:
                     print(f"{arm} {idx}: skipped, prompt={ids.shape[1]}", flush=True)
                     continue
-                gen, stats = decode.sdar_generate(model, ids.cuda(), mid, 32, 32, 0.9, limit, stops)
+                local_quant = KVQuant(2) if arm == "kivi_local2" else None
+                gen, stats = decode.sdar_generate(
+                    model, ids.cuda(), mid, args.block, args.block,
+                    0.9, limit, stops, on_store=local_quant,
+                )
                 gen = gen[:limit]
                 answer = tok.decode(gen, skip_special_tokens=True)
                 if args.bench == "longbench":
@@ -124,7 +131,7 @@ def evaluate(args):
                                                      if isinstance(v, (int, float))})
                 cache_len = stats.cache_len
                 saved = 0.0
-                if cache_len and arm != "base":
+                if cache_len and arm in ARMS[1:]:
                     for layer in range(layers):
                         keys = author["SEALED"].get(layer, 0)
                         if arm == "kivis2r128":
@@ -137,6 +144,8 @@ def evaluate(args):
                               prompt_tokens=ids.shape[1], gen_tokens=len(gen), steps=stats.steps,
                               per_step=stats.per_step, kv_tokens=cache_len,
                               kv_bits_avg=round(bits_avg, 4), text=answer)
+                if local_quant is not None:
+                    result.update(local_quant.summary(cache_len))
                 stream.write(json.dumps(result, ensure_ascii=False) + "\n")
                 stream.flush()
                 print(f"{arm} {idx}: steps={stats.steps} tokens={len(gen)} score={score:.3f}",
@@ -147,7 +156,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bench", required=True, choices=("longbench", "longproc"))
     parser.add_argument("--data", required=True, type=Path)
-    parser.add_argument("--model", required=True, help="SDAR-8B-Chat-b32 checkpoint")
+    parser.add_argument("--model", required=True, help="SDAR-8B checkpoint for the selected block")
+    parser.add_argument("--block", type=int, choices=(4, 8, 16, 32), default=32)
     parser.add_argument("--calibration", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--limit", type=int, help="limit total examples for a smoke run")

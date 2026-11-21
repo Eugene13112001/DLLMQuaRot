@@ -1,4 +1,4 @@
-"""SDAR or Fast-dLLM v2 on LongBench qmsum + gov_report (long input, long answer), with or
+"""SDAR or Fast-dLLM v2 on supported LongBench tasks, with or
 without KV quantization; one JSON line per problem, readable by blockkv.summarize_ruler.
 
     python -m blockkv.run_longbench --model sdar8b --block 16 --data ~/data/longbench/data.zip \
@@ -24,7 +24,7 @@ def main():
     ap.add_argument("--block", type=int, required=True)
     ap.add_argument("--small-block", type=int, default=8, help="Fast-dLLM v2 sub-block")
     ap.add_argument("--data", required=True, help="LongBench data.zip or a folder of <task>.jsonl")
-    ap.add_argument("--tasks", nargs="+", default=["qmsum", "gov_report"])
+    ap.add_argument("--tasks", nargs="+", choices=longbench.PROMPTS, default=["qmsum", "gov_report"])
     ap.add_argument("--max-input", type=int, default=16384, help="prompt cut in the middle to this many tokens")
     ap.add_argument("--per-task", type=int, help="first N problems of each task (default all: 200 + 200)")
     ap.add_argument("--out", required=True)
@@ -91,7 +91,7 @@ def main():
                                                    prefill_chunk=args.prefill_chunk or None)
             gen = gen[:limit]
             answer = tok.decode(gen, skip_special_tokens=True)
-            sc = longbench.scores(answer, [str(a) for a in r["answers"]])
+            sc = longbench.scores(answer, [str(a) for a in r["answers"]], task)
             s = sc["score"]
             row = dict(idx=i, task=task, **sc, correct=s, gen_tokens=len(gen), prompt_tokens=ids.shape[1],
                        steps=st.steps, nfe=st.nfe, forced=st.forced, blocks=st.blocks, per_step=st.per_step,
@@ -100,7 +100,8 @@ def main():
                 row.update(quant.summary(st.cache_len))
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()
-            print(f"[{n + 1}/{len(work)}] {i} rougeL={s:.3f} tokens={row['gen_tokens']} prompt={row['prompt_tokens']} "
+            metric = "f1" if task in longbench.QA_TASKS else "rougeL"
+            print(f"[{n + 1}/{len(work)}] {i} {metric}={s:.3f} tokens={row['gen_tokens']} prompt={row['prompt_tokens']} "
                   f"steps={row['steps']} {row['sec']}s", flush=True)
 
 

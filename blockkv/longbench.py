@@ -1,18 +1,22 @@
-"""LongBench summarization tasks (long input, answers of hundreds of tokens): qmsum, gov_report.
+"""LongBench summarization and question answering.
 
 Data: LongBench's `data.zip` (HF dataset zai-org/LongBench, formerly THUDM/LongBench) or a folder
 with its `<task>.jsonl` files. Prompts and answer limits are LongBench's own (config/dataset2prompt.json,
 dataset2maxlen.json). A prompt longer than `max_tokens` is cut in the middle, keeping the first and
 the last half, as LongBench's pred.py does.
 
-Two scores, best over the references, both ROUGE-L F:
+Scores are best over the references. Summarization reports two ROUGE-L scores:
   score       LongBench's own metric (metrics.rouge_score: the `rouge` package, no stemming), so the
               numbers compare with LongBench tables;
   score_bs    Google's rouge_score with stemming, as BitSieve scores qmsum.
+Question answering reports LongBench token F1 as score.
 Rescore saved answers: python -m blockkv.longbench rescore DATA FILE.jsonl...
 """
 import json
+import re
+import string
 import zipfile
+from collections import Counter
 from pathlib import Path
 
 PROMPTS = {
@@ -23,6 +27,26 @@ PROMPTS = {
                    "\n\nReport:\n{context}\n\nNow, write a one-page summary of the report.\n\nSummary:"),
 }
 MAX_NEW = {"qmsum": 512, "gov_report": 512}
+QA_TASKS = ("2wikimqa", "narrativeqa", "musique")
+# Official templates from LongBench (see third_party/longbench/LICENSE).
+_QA_PROMPT = (
+    "Answer the question based on the given passages. Only give me the answer and do not output any other words."
+    "\n\nThe following are given passages.\n{context}\n\n"
+    "Answer the question based on the given passages. Only give me the answer and do not output any other words."
+    "\n\nQuestion: {input}\nAnswer:"
+)
+PROMPTS.update({
+    "2wikimqa": _QA_PROMPT,
+    "narrativeqa": (
+        "You are given a story, which can be either a novel or a movie script, and a question. "
+        "Answer the question asconcisely as you can, using a single phrase if possible. "
+        "Do not provide any explanation.\n\nStory: {context}\n\n"
+        "Now, answer the question based on the story asconcisely as you can, using a single phrase "
+        "if possible. Do not provide any explanation.\n\nQuestion: {input}\n\nAnswer:"
+    ),
+    "musique": _QA_PROMPT,
+})
+MAX_NEW.update({"2wikimqa": 32, "narrativeqa": 128, "musique": 32})
 
 
 def load(task, path):
@@ -104,28 +128,51 @@ def score_bs(pred, refs):
     return max((rouge_l(pred, r) for r in refs), default=0.0)
 
 
-def scores(pred, refs):
+def qa_f1(pred, ref):
+    def tokens(text):
+        text = text.lower().translate(str.maketrans("", "", string.punctuation))
+        return re.sub(r"\b(a|an|the)\b", " ", text).split()
+
+    prediction, reference = tokens(pred), tokens(ref)
+    overlap = sum((Counter(prediction) & Counter(reference)).values())
+    return 2 * overlap / (len(prediction) + len(reference)) if overlap else 0.0
+
+
+def scores(pred, refs, task=None):
+    if task in QA_TASKS:
+        return dict(score=max((qa_f1(pred, ref) for ref in refs), default=0.0))
     return dict(score=score(pred, refs), score_bs=score_bs(pred, refs))
 
 
-def rescore(data, files):
-    """Recompute both scores of saved answers (rows keep `text` and `idx` = "<task>:<line>")."""
+def rescore(data, files, *, validate_metrics=False):
+    """Recompute the scores of saved answers (rows keep `text` and `idx` = "<task>:<line>")."""
     import sys
     cache = {}
     for f in files:
         f = Path(f)
         rows = [json.loads(l) for l in f.read_text(encoding="utf-8").splitlines() if l.strip()]
+        if validate_metrics and any(r["idx"].split(":", 1)[0] not in QA_TASKS for r in rows):
+            require_metrics()
         for r in rows:
             task, line = r["idx"].split(":")
             if task not in cache:
                 cache[task] = load(task, data)
             refs = [str(a) for a in cache[task][int(line)]["answers"]]
-            r.update(scores(r["text"], refs))
+            r.update(scores(r["text"], refs, task))
             r["correct"] = r["score"]
         f.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
-        mean = lambda k: sum(r[k] for r in rows) / max(len(rows), 1)
-        print(f"{f}: n={len(rows)} rougeL_longbench={mean('score'):.4f} rougeL_bitsieve={mean('score_bs'):.4f}",
-              file=sys.stdout)
+        tasks = dict.fromkeys(row["idx"].split(":", 1)[0] for row in rows)
+        if not any(task in QA_TASKS for task in tasks):
+            mean = lambda k: sum(r[k] for r in rows) / max(len(rows), 1)
+            print(f"{f}: n={len(rows)} rougeL_longbench={mean('score'):.4f} "
+                  f"rougeL_bitsieve={mean('score_bs'):.4f}", file=sys.stdout)
+            continue
+        for task in tasks:
+            subset = [row for row in rows if row["idx"].startswith(task + ":")]
+            mean = lambda k: sum(row[k] for row in subset) / len(subset)
+            metric = (f"f1={mean('score'):.4f}" if task in QA_TASKS else
+                      f"rougeL_longbench={mean('score'):.4f} rougeL_bitsieve={mean('score_bs'):.4f}")
+            print(f"{f}: {task} n={len(subset)} {metric}", file=sys.stdout)
 
 
 def require_metrics():
@@ -139,7 +186,7 @@ def require_metrics():
 
 def items(tasks, path, tok, max_tokens, per_task=None):
     """[(idx, task, row)]; idx = "<task>:<line>" so both tasks share one output file."""
-    if tok is not None:
+    if tok is not None and any(task not in QA_TASKS for task in tasks):
         require_metrics()
     out = []
     for t in tasks:
@@ -152,5 +199,4 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) < 4 or sys.argv[1] != "rescore":
         raise SystemExit("python -m blockkv.longbench rescore DATA FILE.jsonl...")
-    require_metrics()
-    rescore(sys.argv[2], sys.argv[3:])
+    rescore(sys.argv[2], sys.argv[3:], validate_metrics=True)

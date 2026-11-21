@@ -4,6 +4,7 @@
 #   DATA=... GPUS="3" MODEL=fastdllm RUNS="32:- 32:2" bash scripts/longbench.sh
 # Env: DATA (data.zip or folder), MODEL (sdar8b | fastdllm), RUNS (block:bits, "-" uncompressed),
 #      MAX_INPUT (prompt cut, default 16384), GPUS (one queue per entry), LIMIT, PER_TASK, THRESHOLD (0.9).
+# For a separate QA series, set TASKS="2wikimqa narrativeqa musique" and OUT_DIR=out/longbench/16384_qa.
 # Output: out/longbench/<MAX_INPUT>/<model>_b<B>[_kv<bits>].jsonl; summary: python -m blockkv.summarize_ruler DIR
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -12,7 +13,8 @@ GPUS=(${GPUS:-0})
 MODEL=${MODEL:-sdar8b}
 RUNS=(${RUNS:-16:- 16:2})
 L=${MAX_INPUT:-16384}
-dir=out/longbench/$L
+dir=${OUT_DIR:-out/longbench/$L}
+read -r -a tasks <<<"${TASKS:-qmsum gov_report}"
 mkdir -p "$dir"
 run() {  # block:bits gpu
   local b q stem
@@ -23,7 +25,7 @@ run() {  # block:bits gpu
   [[ -n "${LIMIT:-}" ]] && extra+=(--limit "$LIMIT")
   [[ -n "${PER_TASK:-}" ]] && extra+=(--per-task "$PER_TASK")
   CUDA_VISIBLE_DEVICES=$2 python -m blockkv.run_longbench --model "$MODEL" --block "$b" --data "$DATA" \
-    --max-input "$L" --threshold "${THRESHOLD:-0.9}" --out "$dir/$stem.jsonl" "${extra[@]}" \
+    --tasks "${tasks[@]}" --max-input "$L" --threshold "${THRESHOLD:-0.9}" --out "$dir/$stem.jsonl" "${extra[@]}" \
     > "$dir/$stem.log" 2>&1 || echo "FAILED: $1 (see $dir/$stem.log)"
 }
 i=0

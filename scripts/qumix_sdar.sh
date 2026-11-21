@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# SDAR b32 with the author QuMix code and a fresh checkpoint-specific calibration.
+# SDAR with the author QuMix code and a fresh checkpoint-specific calibration.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 author=third_party/qumix
-output=${OUT:-out/qumix/sdar8b_b32_t0.9}
+block=${BLOCK:-32}
+case "$block" in
+    4|8|16|32) ;;
+    *) echo "Unsupported SDAR block: $block" >&2; exit 2 ;;
+esac
+output=${OUT:-out/qumix/sdar8b_b${block}_t0.9}
 model=${SDAR_DIR:-$output/model}
 bench_data=${LONGBENCH_DATA:-$HOME/data/longbench/data.zip}
 proc_data=${LONGPROC:-$HOME/third_party/LongProc}
@@ -38,7 +43,7 @@ PY
 
 if [[ -z ${SDAR_DIR:-} ]]; then
     if [[ ! -f "$model/.qumix_prepared" ]]; then
-        python - "$model" <<'PY'
+        python - "$model" "$block" <<'PY'
 import json
 import os
 import sys
@@ -47,8 +52,11 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import LocalEntryNotFoundError
 
-repo = "JetLM/SDAR-8B-Chat-b32"
-revision = "76fd4333a0c7e14a92e9873f05c295fd6954991a"
+from blockkv.run_gsm8k import repo as model_repo
+
+block = int(sys.argv[2])
+_, repo = model_repo("sdar8b", block)
+revision = "76fd4333a0c7e14a92e9873f05c295fd6954991a" if block == 32 else "main"
 
 
 def complete(path):
@@ -77,11 +85,11 @@ if not complete(source):
         source = Path(snapshot_download(repo, revision=revision))
     except LocalEntryNotFoundError as error:
         raise SystemExit(
-            "SDAR-b32 weights unavailable. Point MODELS_DIR to a directory containing "
-            "SDAR-8B-Chat-b32 or populate the Hugging Face cache before retrying."
+            f"{repo} weights unavailable. Point MODELS_DIR to a directory containing "
+            f"{repo.split('/')[-1]} or populate the Hugging Face cache before retrying."
         ) from error
 if not complete(source):
-    raise SystemExit(f"SDAR-b32 checkpoint is incomplete: {source}")
+    raise SystemExit(f"SDAR checkpoint is incomplete: {source}")
 
 target = Path(sys.argv[1]).resolve()
 target.mkdir(parents=True, exist_ok=True)
@@ -106,7 +114,7 @@ calib="$output/calib"
 if [[ ! -s "$calib/same_kv.pt" ]]; then
     python -u "$author/accuracy/sdar/qumix_eval.py" --model "$model" \
         --calibonly --calibset wikitext --ncalib 64 --calibgen 128 --prerope \
-        --vbits 2 --block 32 --steps 32 --ladder --arms qmx2t --savecalib "$calib/raw.pt"
+        --vbits 2 --block "$block" --steps "$block" --ladder --arms qmx2t --savecalib "$calib/raw.pt"
     python "$author/calibration/build_po2q.py" "$calib/raw.pt" "$calib/po2q.pt"
     python "$author/calibration/add_scale_tags.py" "$calib/po2q.pt" "$calib/scales.pt"
     python "$author/calibration/build_same_kv.py" --model sdar --src "$calib/scales.pt" \
@@ -122,6 +130,6 @@ for bench in "${benches[@]}"; do
         longproc) data=$proc_data ;;
         *) echo "Unknown benchmark: $bench" >&2; exit 2 ;;
     esac
-    python -u -m blockkv.run_qumix --model "$model" --calibration "$calib/same_kv.pt" \
+    python -u -m blockkv.run_qumix --model "$model" --block "$block" --calibration "$calib/same_kv.pt" \
         --bench "$bench" --data "$data" --out "$output/$bench" "${extra[@]}"
 done
