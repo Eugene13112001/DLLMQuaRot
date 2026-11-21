@@ -4,7 +4,9 @@ import argparse
 import hashlib
 import inspect
 import json
+import runpy
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -23,6 +25,33 @@ PROCEDURES = ("path_traversal_2k", "html_to_tsv_2k", "tom_tracking_2k",
               "countdown_2k", "travel_planning_2k")
 
 
+@contextmanager
+def author_environment(argv):
+    from transformers import AutoModelForCausalLM
+
+    # QuMix was written for Transformers 4.57.1. The project's 4.53.1
+    # loader recognizes torch_dtype, which newer versions still accept.
+    load = AutoModelForCausalLM.from_pretrained
+    original = AutoModelForCausalLM.__dict__.get("from_pretrained")
+    previous_argv = sys.argv
+
+    def load_compatible(_cls, *args, **kwargs):
+        if "dtype" in kwargs:
+            kwargs.setdefault("torch_dtype", kwargs.pop("dtype"))
+        return load(*args, **kwargs)
+
+    AutoModelForCausalLM.from_pretrained = classmethod(load_compatible)
+    sys.argv = [str(AUTHOR), *argv]
+    try:
+        yield
+    finally:
+        sys.argv = previous_argv
+        if original is None:
+            del AutoModelForCausalLM.from_pretrained
+        else:
+            AutoModelForCausalLM.from_pretrained = original
+
+
 def load_author(model, calibration, block):
     # The supplied script initializes the model and installs its cache hooks
     # at module scope. Stop before its dataset and evaluation loop.
@@ -31,14 +60,10 @@ def load_author(model, calibration, block):
     if not marker:
         raise RuntimeError("Could not locate the dataset boundary in the QuMix evaluator.")
     namespace = {"__file__": str(AUTHOR), "__name__": "_qumix_author"}
-    argv = sys.argv
-    try:
-        sys.argv = [str(AUTHOR), "--model", model, "--loadcalib", str(calibration),
-                    "--block", str(block), "--steps", str(block), "--prerope", "--vbits", "2",
-                    "--vsbits", "8", "--arms", ",".join(ARMS)]
+    with author_environment(["--model", model, "--loadcalib", str(calibration),
+                             "--block", str(block), "--steps", str(block), "--prerope", "--vbits", "2",
+                             "--vsbits", "8", "--arms", ",".join(ARMS)]):
         exec(compile(setup, str(AUTHOR), "exec"), namespace)
-    finally:
-        sys.argv = argv
     return namespace
 
 
@@ -153,6 +178,11 @@ def evaluate(args):
 
 
 def main():
+    if sys.argv[1:2] == ["--author-calibration"]:
+        with author_environment(["--calibonly", *sys.argv[2:]]):
+            runpy.run_path(str(AUTHOR), run_name="__main__")
+        return
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bench", required=True, choices=("longbench", "longproc"))
     parser.add_argument("--data", required=True, type=Path)

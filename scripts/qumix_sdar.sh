@@ -112,8 +112,8 @@ fi
 
 calib="$output/calib"
 if [[ ! -s "$calib/same_kv.pt" ]]; then
-    python -u "$author/accuracy/sdar/qumix_eval.py" --model "$model" \
-        --calibonly --calibset wikitext --ncalib 64 --calibgen 128 --prerope \
+    python -u -m blockkv.run_qumix --author-calibration --model "$model" \
+        --calibset wikitext --ncalib 64 --calibgen 128 --prerope \
         --vbits 2 --block "$block" --steps "$block" --ladder --arms qmx2t --savecalib "$calib/raw.pt"
     python "$author/calibration/build_po2q.py" "$calib/raw.pt" "$calib/po2q.pt"
     python "$author/calibration/add_scale_tags.py" "$calib/po2q.pt" "$calib/scales.pt"
