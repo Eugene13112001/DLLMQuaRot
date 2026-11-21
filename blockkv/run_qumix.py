@@ -74,7 +74,7 @@ def evaluate(args):
 
     if args.bench == "longbench":
         longbench.require_metrics()
-        work = longbench.items(TASKS, args.data, None, 16384, 100)[:args.limit]
+        work = longbench.items(TASKS, args.data, None, 16384)[:args.limit]
     else:
         work = run_longproc.load(args.data, PROCEDURES, 20, 0)[:args.limit]
 
