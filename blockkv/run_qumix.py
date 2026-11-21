@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -39,6 +40,20 @@ def load_author(model, calibration):
     return namespace
 
 
+def limit_store_logits(model):
+    # The decoder discards logits during prefill and completed-block writes.
+    # Keep the full logits on denoising forwards for the confidence threshold.
+    if "logits_to_keep" not in inspect.signature(model.forward).parameters:
+        return
+
+    def hook(_model, inputs, kwargs):
+        if kwargs.get("store_kv"):
+            kwargs.setdefault("logits_to_keep", 1)
+        return inputs, kwargs
+
+    model.register_forward_pre_hook(hook, with_kwargs=True)
+
+
 def evaluate(args):
     settings = dict(bench=args.bench, data=str(args.data.resolve()), model=args.model,
                     block=32, threshold=0.9, dtype="bfloat16", limit=args.limit,
@@ -62,6 +77,7 @@ def evaluate(args):
 
     author = load_author(args.model, args.calibration)
     model, tok = author["model"], author["tok"]
+    limit_store_logits(model)
     mid, stops = mask_id("sdar", tok, None), stop_ids("sdar", tok, model)
     layers, head_dim = author["L"], author["HD"]
     tag = ARMS[-1].removesuffix("ts")

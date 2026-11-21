@@ -8,10 +8,33 @@ output=${OUT:-out/qumix/sdar8b_b32_t0.9}
 model=${SDAR_DIR:-$output/model}
 bench_data=${LONGBENCH_DATA:-$HOME/data/longbench/data.zip}
 proc_data=${LONGPROC:-$HOME/third_party/LongProc}
+read -r -a benches <<<"${BENCHES:-longbench longproc}"
 mkdir -p "$output/calib"
 exec 9>>"$output/run.lock"
 flock -n 9 || { echo "QuMix is already running in $output" >&2; exit 1; }
 export CUDA_VISIBLE_DEVICES=${GPU:-0}
+
+for bench in "${benches[@]}"; do
+    case "$bench" in
+        longbench)
+            [[ -r "$bench_data" ]] || { echo "LongBench data unavailable: $bench_data" >&2; exit 2; }
+            python -c 'from blockkv.longbench import require_metrics; require_metrics()'
+            ;;
+        longproc)
+            [[ -d "$proc_data/longproc" && -d "$proc_data/data" ]] || {
+                echo "LongProc checkout incomplete: $proc_data" >&2; exit 2;
+            }
+            ;;
+        *) echo "Unknown benchmark: $bench" >&2; exit 2 ;;
+    esac
+done
+python - <<'PY'
+import torch
+
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA unavailable on the selected GPU.")
+torch.empty(1, device="cuda")
+PY
 
 if [[ -z ${SDAR_DIR:-} ]]; then
     if [[ ! -f "$model/.qumix_prepared" ]]; then
@@ -35,7 +58,7 @@ fi
 
 extra=()
 [[ -z ${LIMIT:-} ]] || extra+=(--limit "$LIMIT")
-for bench in ${BENCHES:-longbench longproc}; do
+for bench in "${benches[@]}"; do
     case "$bench" in
         longbench) data=$bench_data ;;
         longproc) data=$proc_data ;;
