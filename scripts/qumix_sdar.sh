@@ -38,7 +38,65 @@ PY
 
 if [[ -z ${SDAR_DIR:-} ]]; then
     if [[ ! -f "$model/.qumix_prepared" ]]; then
-        hf download JetLM/SDAR-8B-Chat-b32 --local-dir "$model"
+        python - "$model" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+from huggingface_hub.errors import LocalEntryNotFoundError
+
+repo = "JetLM/SDAR-8B-Chat-b32"
+revision = "76fd4333a0c7e14a92e9873f05c295fd6954991a"
+
+
+def complete(path):
+    if path is None or not (path / "config.json").is_file():
+        return False
+    for name in ("model.safetensors", "pytorch_model.bin"):
+        if (path / name).is_file():
+            return True
+        index = path / (name + ".index.json")
+        if index.is_file():
+            shards = set(json.loads(index.read_text(encoding="utf-8"))["weight_map"].values())
+            if shards and all((path / shard).is_file() for shard in shards):
+                return True
+    return False
+
+
+root = os.environ.get("MODELS_DIR")
+source = Path(root).expanduser() / repo.split("/")[-1] if root else None
+if not complete(source):
+    try:
+        source = Path(snapshot_download(repo, revision=revision, local_files_only=True))
+    except LocalEntryNotFoundError:
+        source = None
+if not complete(source):
+    try:
+        source = Path(snapshot_download(repo, revision=revision))
+    except LocalEntryNotFoundError as error:
+        raise SystemExit(
+            "SDAR-b32 weights unavailable. Point MODELS_DIR to a directory containing "
+            "SDAR-8B-Chat-b32 or populate the Hugging Face cache before retrying."
+        ) from error
+if not complete(source):
+    raise SystemExit(f"SDAR-b32 checkpoint is incomplete: {source}")
+
+target = Path(sys.argv[1]).resolve()
+target.mkdir(parents=True, exist_ok=True)
+if target == source.resolve():
+    raise SystemExit("Use a separate output directory for the patched QuMix model.")
+for entry in source.iterdir():
+    if entry.name.startswith(".") or entry.name == "modeling_sdar.py":
+        continue
+    link = target / entry.name
+    original = entry.resolve(strict=True)
+    if link.is_symlink() and link.resolve() == original:
+        continue
+    link.symlink_to(original, target_is_directory=original.is_dir())
+print(f"QuMix model uses existing checkpoint files: {source}", flush=True)
+PY
         cp --remove-destination "$author/accuracy/sdar/sdar_model/modeling_sdar.py" "$model/modeling_sdar.py"
         touch "$model/.qumix_prepared"
     fi
