@@ -86,6 +86,9 @@ def evaluate(args):
     settings = dict(bench=args.bench, data=str(args.data.resolve()), model=args.model,
                     block=args.block, threshold=0.9, dtype="bfloat16", limit=args.limit,
                     calibration_sha256=hashlib.sha256(args.calibration.read_bytes()).hexdigest())
+    tasks = args.tasks or TASKS
+    if args.tasks:
+        settings["tasks"] = list(tasks)
     outputs = {}
     args.out.mkdir(parents=True, exist_ok=True)
     for arm in arms:
@@ -98,8 +101,9 @@ def evaluate(args):
         outputs[arm] = path, meta, fingerprint
 
     if args.bench == "longbench":
-        longbench.require_metrics()
-        work = longbench.items(TASKS, args.data, None, 16384)[:args.limit]
+        if any(task not in longbench.QA_TASKS for task in tasks):
+            longbench.require_metrics()
+        work = longbench.items(tasks, args.data, None, 16384)[:args.limit]
     else:
         work = run_longproc.load(args.data, PROCEDURES, 20, 0)[:args.limit]
 
@@ -145,7 +149,7 @@ def evaluate(args):
                 gen = gen[:limit]
                 answer = tok.decode(gen, skip_special_tokens=True)
                 if args.bench == "longbench":
-                    metrics = longbench.scores(answer, [str(a) for a in row["answers"]])
+                    metrics = longbench.scores(answer, [str(a) for a in row["answers"]], task)
                     score = metrics["score"]
                 else:
                     try:
@@ -191,7 +195,11 @@ def main():
     parser.add_argument("--calibration", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--limit", type=int, help="limit total examples for a smoke run")
+    parser.add_argument("--tasks", nargs="+", choices=tuple(longbench.MAX_NEW),
+                        help="LongBench datasets (default: qmsum gov_report)")
     args = parser.parse_args()
+    if args.tasks and (args.bench != "longbench" or len(set(args.tasks)) != len(args.tasks)):
+        parser.error("--tasks requires LongBench and distinct datasets")
     if not args.data.exists() or not args.calibration.is_file():
         parser.error("--data and --calibration must exist")
     if args.limit is not None and args.limit < 1:

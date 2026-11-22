@@ -23,7 +23,9 @@ for bench in "${benches[@]}"; do
     case "$bench" in
         longbench)
             [[ -r "$bench_data" ]] || { echo "LongBench data unavailable: $bench_data" >&2; exit 2; }
-            python -c 'from blockkv.longbench import require_metrics; require_metrics()'
+            if [[ -z ${TASKS:-} ]]; then
+                python -c 'from blockkv.longbench import require_metrics; require_metrics()'
+            fi
             ;;
         longproc)
             [[ -d "$proc_data/longproc" && -d "$proc_data/data" ]] || {
@@ -125,11 +127,22 @@ fi
 extra=()
 [[ -z ${LIMIT:-} ]] || extra+=(--limit "$LIMIT")
 for bench in "${benches[@]}"; do
+    bench_out="$output/$bench"
+    bench_extra=("${extra[@]}")
     case "$bench" in
-        longbench) data=$bench_data ;;
+        longbench)
+            data=$bench_data
+            if [[ -n ${TASKS:-} ]]; then
+                read -r -a tasks <<<"$TASKS"
+                bench_extra+=(--tasks "${tasks[@]}")
+                task_dir=$(IFS=_; echo "${tasks[*]}")
+                [[ "$task_dir" =~ ^[a-z0-9_]+$ ]] || { echo "Invalid TASKS" >&2; exit 2; }
+                bench_out="${bench_out}_${task_dir}"
+            fi
+            ;;
         longproc) data=$proc_data ;;
         *) echo "Unknown benchmark: $bench" >&2; exit 2 ;;
     esac
     python -u -m blockkv.run_qumix --model "$model" --block "$block" --calibration "$calib/same_kv.pt" \
-        --bench "$bench" --data "$data" --out "$output/$bench" "${extra[@]}"
+        --bench "$bench" --data "$data" --out "$bench_out" "${bench_extra[@]}"
 done
