@@ -89,6 +89,8 @@ def evaluate(args):
     tasks = args.tasks or TASKS
     if args.tasks:
         settings["tasks"] = list(tasks)
+    if args.max_new_tokens is not None:
+        settings["max_new_tokens"] = args.max_new_tokens
     outputs = {}
     args.out.mkdir(parents=True, exist_ok=True)
     for arm in arms:
@@ -132,7 +134,7 @@ def evaluate(args):
                 if args.bench == "longbench":
                     (row,) = example
                     prompt = longbench.chat_prompt(task, row, tok, 16384)
-                    limit = longbench.MAX_NEW[task]
+                    limit = args.max_new_tokens or longbench.MAX_NEW[task]
                 else:
                     text, limit, scorer, row = example
                     prompt = tok.apply_chat_template([{"role": "user", "content": text}],
@@ -197,7 +199,10 @@ def main():
     parser.add_argument("--limit", type=int, help="limit total examples for a smoke run")
     parser.add_argument("--tasks", nargs="+", choices=tuple(longbench.MAX_NEW),
                         help="LongBench datasets (default: qmsum gov_report)")
+    parser.add_argument("--max-new-tokens", type=int, help="override the LongBench answer cap")
     args = parser.parse_args()
+    if args.max_new_tokens is not None and (args.bench != "longbench" or args.max_new_tokens < 1):
+        parser.error("--max-new-tokens requires LongBench and a positive value")
     if args.tasks and (args.bench != "longbench" or len(set(args.tasks)) != len(args.tasks)):
         parser.error("--tasks requires LongBench and distinct datasets")
     if not args.data.exists() or not args.calibration.is_file():

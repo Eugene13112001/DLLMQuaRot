@@ -139,6 +139,13 @@ for bench in "${benches[@]}"; do
                 [[ "$task_dir" =~ ^[a-z0-9_]+$ ]] || { echo "Invalid TASKS" >&2; exit 2; }
                 bench_out="${bench_out}_${task_dir}"
             fi
+            if [[ -n ${LONGBENCH_MAX_NEW_TOKENS:-} ]]; then
+                [[ "$LONGBENCH_MAX_NEW_TOKENS" =~ ^[1-9][0-9]*$ ]] || {
+                    echo "LONGBENCH_MAX_NEW_TOKENS must be a positive integer" >&2; exit 2;
+                }
+                bench_extra+=(--max-new-tokens "$LONGBENCH_MAX_NEW_TOKENS")
+                bench_out="${bench_out}_g${LONGBENCH_MAX_NEW_TOKENS}"
+            fi
             ;;
         longproc) data=$proc_data ;;
         *) echo "Unknown benchmark: $bench" >&2; exit 2 ;;
