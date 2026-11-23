@@ -16,7 +16,14 @@ proc_data=${LONGPROC:-$HOME/third_party/LongProc}
 read -r -a benches <<<"${BENCHES:-longbench longproc}"
 mkdir -p "$output/calib"
 exec 9>>"$output/run.lock"
-flock -n 9 || { echo "QuMix is already running in $output" >&2; exit 1; }
+if ! flock -n 9; then
+    if [[ "${benches[*]}" != longbench || -z ${TASKS:-} || -z ${LONGBENCH_MAX_NEW_TOKENS:-} ]]; then
+        echo "QuMix is already running in $output" >&2
+        exit 1
+    fi
+    echo "Waiting for QuMix LongBench in $output"
+    flock 9
+fi
 export CUDA_VISIBLE_DEVICES=${GPU:-0}
 
 for bench in "${benches[@]}"; do
