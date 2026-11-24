@@ -11,7 +11,7 @@ from pathlib import Path
 
 import torch
 
-from blockkv import decode, longbench, run_longproc
+from blockkv import decode, gsm8k, longbench, run_longproc
 from blockkv.kvquant import KVQuant
 from blockkv.run_gsm8k import device_info, mask_id, read_done, stop_ids
 from third_party.qumix.qumix.reference import entry_to_bits
@@ -82,13 +82,15 @@ def limit_store_logits(model):
 
 
 def evaluate(args):
-    arms = LONGBENCH_ARMS if args.bench == "longbench" else ARMS
+    arms = ARMS if args.bench == "longproc" else LONGBENCH_ARMS
     settings = dict(bench=args.bench, data=str(args.data.resolve()), model=args.model,
                     block=args.block, threshold=0.9, dtype="bfloat16", limit=args.limit,
                     calibration_sha256=hashlib.sha256(args.calibration.read_bytes()).hexdigest())
     tasks = args.tasks or TASKS
     if args.tasks:
         settings["tasks"] = list(tasks)
+    if args.bench == "gsm8k":
+        settings.update(prompt_style="sdar", max_new_tokens=4096)
     if args.max_new_tokens is not None:
         settings["max_new_tokens"] = args.max_new_tokens
     outputs = {}
@@ -106,6 +108,8 @@ def evaluate(args):
         if any(task not in longbench.QA_TASKS for task in tasks):
             longbench.require_metrics()
         work = longbench.items(tasks, args.data, None, 16384)[:args.limit]
+    elif args.bench == "gsm8k":
+        work = [(idx, "gsm8k", row) for idx, row in enumerate(gsm8k.load(args.data)[:args.limit])]
     else:
         work = run_longproc.load(args.data, PROCEDURES, 20, 0)[:args.limit]
 
@@ -136,7 +140,12 @@ def evaluate(args):
                     prompt = longbench.chat_prompt(task, row, tok, 16384)
                     limit = args.max_new_tokens or longbench.MAX_NEW[task]
                 else:
-                    text, limit, scorer, row = example
+                    if args.bench == "gsm8k":
+                        (row,) = example
+                        text = gsm8k.PROMPT_STYLES["sdar"].format(question=row["question"])
+                        limit = settings["max_new_tokens"]
+                    else:
+                        text, limit, scorer, row = example
                     prompt = tok.apply_chat_template([{"role": "user", "content": text}],
                                                      tokenize=False, add_generation_prompt=True)
                 ids = tok(prompt, return_tensors="pt", add_special_tokens=False).input_ids
@@ -153,6 +162,10 @@ def evaluate(args):
                 if args.bench == "longbench":
                     metrics = longbench.scores(answer, [str(a) for a in row["answers"]], task)
                     score = metrics["score"]
+                elif args.bench == "gsm8k":
+                    pred, gold = gsm8k.extract(answer), gsm8k.gold(row["answer"])
+                    score = gsm8k.is_correct(pred, gold)
+                    metrics = dict(accuracy=score, pred=pred, gold=gold)
                 else:
                     try:
                         metrics, _ = scorer(answer, row)
@@ -190,7 +203,7 @@ def main():
         return
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bench", required=True, choices=("longbench", "longproc"))
+    parser.add_argument("--bench", required=True, choices=("longbench", "longproc", "gsm8k"))
     parser.add_argument("--data", required=True, type=Path)
     parser.add_argument("--model", required=True, help="SDAR-8B checkpoint for the selected block")
     parser.add_argument("--block", type=int, choices=(4, 8, 16, 32), default=32)

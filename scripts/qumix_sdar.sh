@@ -13,6 +13,7 @@ output=${OUT:-out/qumix/sdar8b_b${block}_t0.9}
 model=${SDAR_DIR:-$output/model}
 bench_data=${LONGBENCH_DATA:-$HOME/data/longbench/data.zip}
 proc_data=${LONGPROC:-$HOME/third_party/LongProc}
+gsm_data=${GSM8K_DATA:-$HOME/data/gsm8k_test.jsonl}
 read -r -a benches <<<"${BENCHES:-longbench longproc}"
 mkdir -p "$output/calib"
 exec 9>>"$output/run.lock"
@@ -28,6 +29,7 @@ export CUDA_VISIBLE_DEVICES=${GPU:-0}
 
 for bench in "${benches[@]}"; do
     case "$bench" in
+        gsm8k) [[ -r "$gsm_data" ]] || { echo "GSM8K data unavailable: $gsm_data" >&2; exit 2; } ;;
         longbench)
             [[ -r "$bench_data" ]] || { echo "LongBench data unavailable: $bench_data" >&2; exit 2; }
             if [[ -z ${TASKS:-} ]]; then
@@ -155,6 +157,7 @@ for bench in "${benches[@]}"; do
             fi
             ;;
         longproc) data=$proc_data ;;
+        gsm8k) data=$gsm_data; bench_out="${bench_out}_g4096" ;;
         *) echo "Unknown benchmark: $bench" >&2; exit 2 ;;
     esac
     python -u -m blockkv.run_qumix --model "$model" --block "$block" --calibration "$calib/same_kv.pt" \
