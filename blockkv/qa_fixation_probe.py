@@ -82,7 +82,10 @@ def main():
     parser.add_argument("--bench", choices=("longbench", "gsm8k"), default="longbench")
     parser.add_argument("--block", type=int, required=True, choices=(4, 8, 16, 32))
     parser.add_argument("--per-task", type=int, default=20)
+    parser.add_argument("--prefill-chunk", type=int, help="prefill in block-aligned chunks of this many tokens")
     args = parser.parse_args()
+    if args.prefill_chunk is not None and (args.prefill_chunk < args.block or args.prefill_chunk % args.block):
+        parser.error("--prefill-chunk must be a positive multiple of --block")
     maximum = 1319 if args.bench == "gsm8k" else 200
     if not 1 <= args.per_task <= maximum:
         parser.error(f"--per-task must be between 1 and {maximum}")
@@ -125,12 +128,12 @@ def main():
             ids = tok(prompt, return_tensors="pt", add_special_tokens=False).input_ids.cuda()
             observer = BlockObserver(model, mid, ids.shape[1], stops, gen_limit)
             gen, stats = decode.sdar_generate(observer, ids, mid, args.block, args.block,
-                                               0.9, gen_limit, stops)
+                                               0.9, gen_limit, stops, prefill_chunk=args.prefill_chunk)
             record = dict(idx=idx, task=task, block=args.block, checkpoint=str(path),
                           revision=getattr(model.config, "_commit_hash", None),
                           prompt_tokens=ids.shape[1], generated=gen[:gen_limit].tolist(),
                           steps=stats.steps, blocks=observer.blocks, probes=observer.rows)
-            record.update(gen_limit=gen_limit, threshold=0.9,
+            record.update(gen_limit=gen_limit, threshold=0.9, prefill_chunk=args.prefill_chunk,
                           peak_allocated_gib=torch.cuda.max_memory_allocated() / 2**30,
                           peak_reserved_gib=torch.cuda.max_memory_reserved() / 2**30)
             stream.write(json.dumps(record) + "\n")
