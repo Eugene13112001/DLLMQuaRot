@@ -79,7 +79,7 @@ class BlockObserver:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, required=True)
-    parser.add_argument("--bench", choices=("longbench", "gsm8k"), default="longbench")
+    parser.add_argument("--bench", choices=("longbench", "longbench-summary", "gsm8k"), default="longbench")
     parser.add_argument("--block", type=int, required=True, choices=(4, 8, 16, 32))
     parser.add_argument("--per-task", type=int, default=20)
     parser.add_argument("--prefill-chunk", type=int, help="prefill in block-aligned chunks of this many tokens")
@@ -97,9 +97,11 @@ def main():
         gen_limit = 4096
         directory = "gsm8k_fixation_v1_g4096"
     else:
-        work = longbench.items(longbench.QA_TASKS, args.data, None, 16384, args.per_task)
+        summary = args.bench == "longbench-summary"
+        tasks = ("qmsum", "gov_report") if summary else longbench.QA_TASKS
+        work = longbench.items(tasks, args.data, None, 16384, args.per_task)
         gen_limit = 512
-        directory = "qa_fixation_v1"
+        directory = "summary_fixation_v1" if summary else "qa_fixation_v1"
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     family, name = repo("sdar8b", args.block)
