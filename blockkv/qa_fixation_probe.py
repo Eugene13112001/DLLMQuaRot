@@ -106,18 +106,21 @@ def main():
 
     family, name = repo("sdar8b", args.block)
     path = resolve_path(name, None)
-    tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16,
-                                                 trust_remote_code=True, device_map="cuda").eval()
-    mid, stops = mask_id(family, tok, None), stop_ids(family, tok, model)
     root = Path("out/diagnostics") / directory / f"n{args.per_task}"
     root.mkdir(parents=True, exist_ok=True)
     out = root / f"sdar8b_b{args.block}.jsonl"
     import fcntl
     with out.open("a+", encoding="utf-8") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(stream, fcntl.LOCK_EX)
         stream.seek(0)
         done = {json.loads(line)["idx"] for line in stream}
+        if all(idx in done for idx, _, _ in work):
+            print(f"Already complete: {out}", flush=True)
+            return
+        tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16,
+                                                     trust_remote_code=True, device_map="cuda").eval()
+        mid, stops = mask_id(family, tok, None), stop_ids(family, tok, model)
         for idx, task, data in work:
             if idx in done:
                 continue
