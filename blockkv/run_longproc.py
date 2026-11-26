@@ -70,6 +70,7 @@ def main():
     ap.add_argument("--max-input", type=int, default=24576, help="skip problems with a longer prompt")
     ap.add_argument("--out", required=True)
     ap.add_argument("--model-path")
+    ap.add_argument("--dtype", choices=["float16", "bfloat16"], help="weight and inference precision")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--threshold", type=float, default=0.9)
     ap.add_argument("--prefill-chunk", type=int, default=1024)
@@ -90,11 +91,15 @@ def main():
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     family, repo_id = repo(args.model, args.block)
+    if args.dtype is None:
+        args.dtype = "float16" if family == "sdar" else "bfloat16"
     path = resolve_path(repo_id, args.model_path)
     tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        path, torch_dtype=torch.float16 if family == "sdar" else torch.bfloat16, trust_remote_code=True,
+        path, torch_dtype=getattr(torch, args.dtype), trust_remote_code=True,
         device_map="cuda", low_cpu_mem_usage=True).eval()
+    if model.dtype != getattr(torch, args.dtype):
+        raise RuntimeError(f"Loaded model dtype {model.dtype}, expected {args.dtype}")
     mid, stops = mask_id(family, tok, None), stop_ids(family, tok, model)
     rmsnorm_patched = patch_rmsnorm(model) if args.torch_rmsnorm else False
     if args.torch_rmsnorm and not rmsnorm_patched:
